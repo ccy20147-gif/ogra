@@ -1,31 +1,30 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { DatabaseService } from '../../src/core/database-service';
 import { RecipeService } from '../../src/core/recipe-service';
 import { A2ABridge } from '../../src/core/a2a-bridge';
 import { PolicyService } from '../../src/core/policy-service';
 import { AuditService } from '../../src/core/audit-service';
 import { DataClassification, WorkspaceType } from '../../src/shared/types';
+import * as path from 'path';
+import * as fs from 'fs';
+import * as os from 'os';
+import { createTestDb } from '../helpers/test-db';
 
 describe('RecipeService', () => {
-  const testDir = path.join(os.tmpdir(), `ogra-recipe-test-${Date.now()}`);
+  let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let recipes: RecipeService;
   let wsId: string;
 
   beforeAll(() => {
-    fs.mkdirSync(testDir, { recursive: true });
-    db = new DatabaseService(testDir);
+    fixture = createTestDb();
+    db = fixture.db;
+    wsId = fixture.workspaceId;
     recipes = new RecipeService(db);
-    const ws = db.createWorkspace('Recipe Test', WorkspaceType.Project, DataClassification.Internal);
-    wsId = ws.id;
   });
 
   afterAll(() => {
-    db.close();
-    fs.rmSync(testDir, { recursive: true, force: true });
+    fixture.cleanup();
   });
 
   it('should save a recipe', () => {
@@ -73,6 +72,7 @@ describe('A2ABridge', () => {
   let auditService: AuditService;
   let policyService: PolicyService;
   let bridge: A2ABridge;
+  let wsId: string;
 
   beforeAll(() => {
     fs.mkdirSync(testDir, { recursive: true });
@@ -80,6 +80,8 @@ describe('A2ABridge', () => {
     auditService = new AuditService();
     policyService = new PolicyService(auditService);
     bridge = new A2ABridge(db, policyService, auditService);
+    const ws = db.createWorkspace('A2A Test', WorkspaceType.Personal, DataClassification.Internal);
+    wsId = ws.id;
   });
 
   afterAll(() => {

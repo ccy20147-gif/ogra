@@ -2,6 +2,7 @@ import { AuditService } from '../core/audit-service';
 import { PathValidator } from '../core/path-validator';
 import { OgraCoreConfig } from '../core/index';
 import { DataClassification, IndexingStatus } from '../shared/types';
+import { scanDirectory } from '../shared/dir-scanner';
 import path from 'path';
 import fs from 'fs';
 import crypto from 'crypto';
@@ -44,11 +45,6 @@ export class KnowledgeService {
     '.c', '.cpp', '.h', '.hpp',
     '.json', '.yaml', '.yml', '.toml',
     '.sql', '.sh',
-  ]);
-
-  // Ignored directories
-  private readonly IGNORED_DIRS = new Set([
-    '.git', 'node_modules', 'dist', 'build', '.next', '.cache', '__pycache__', '.venv',
   ]);
 
   constructor(
@@ -207,35 +203,6 @@ export class KnowledgeService {
     skipped: string[];
     skippedReasons: string[];
   }> {
-    const supported: string[] = [];
-    const skipped: string[] = [];
-    const skippedReasons: string[] = [];
-
-    const walkDir = (dir: string) => {
-      const entries = fs.readdirSync(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-
-        if (entry.isDirectory()) {
-          if (!this.IGNORED_DIRS.has(entry.name) && !entry.name.startsWith('.')) {
-            walkDir(fullPath);
-          } else {
-            skipped.push(fullPath);
-            skippedReasons.push(`Ignored directory: ${entry.name}`);
-          }
-        } else if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (this.SUPPORTED_EXTENSIONS.has(ext)) {
-            supported.push(fullPath);
-          } else {
-            skipped.push(fullPath);
-            skippedReasons.push(`Unsupported file type: ${ext}`);
-          }
-        }
-      }
-    };
-
-    walkDir(rootPath);
-    return { supported, skipped, skippedReasons };
+    return scanDirectory(rootPath, (ext) => this.SUPPORTED_EXTENSIONS.has(ext));
   }
 }

@@ -1,3 +1,4 @@
+import { DatabaseService } from './database-service';
 import { AuditService } from './audit-service';
 import { DataClassification, WorkspaceType } from '../shared/types';
 import { OgraError, OgraErrorCode } from '../shared/errors';
@@ -12,50 +13,44 @@ export interface WorkspaceRecord {
 }
 
 /**
- * Workspace management service.
- * Alpha uses in-memory storage. Plan 02 will migrate to SQLite.
+ * Workspace management service — persists to SQLite via DatabaseService.
  */
 export class WorkspaceService {
-  private workspaces: Map<string, WorkspaceRecord> = new Map();
   private currentWorkspaceId: string | null = null;
 
-  constructor(private auditService: AuditService) {}
+  constructor(
+    private auditService: AuditService,
+    private db: DatabaseService,
+  ) {}
 
   async create(req: {
     name: string;
     type: WorkspaceType;
     defaultClassification: DataClassification;
   }): Promise<WorkspaceRecord> {
-    const id = `ws_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    const now = new Date().toISOString();
-    const workspace: WorkspaceRecord = {
-      id,
-      name: req.name,
-      type: req.type,
-      defaultClassification: req.defaultClassification || DataClassification.Internal,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.workspaces.set(id, workspace);
-    this.currentWorkspaceId = id;
-    return workspace;
+    const row = this.db.createWorkspace(
+      req.name,
+      req.type,
+      req.defaultClassification || DataClassification.Internal,
+    );
+    this.currentWorkspaceId = row.id;
+    return this.rowToRecord(row);
   }
 
   async list(): Promise<WorkspaceRecord[]> {
-    return Array.from(this.workspaces.values());
+    return this.db.listWorkspaces().map(r => this.rowToRecord(r));
   }
 
   async select(id: string): Promise<WorkspaceRecord> {
-    const ws = this.workspaces.get(id);
-    if (!ws) throw new OgraError(OgraErrorCode.WORKSPACE_NOT_FOUND, `Workspace ${id} not found`);
+    const ws = await this.get(id);
     this.currentWorkspaceId = id;
     return ws;
   }
 
   async get(id: string): Promise<WorkspaceRecord> {
-    const ws = this.workspaces.get(id);
-    if (!ws) throw new OgraError(OgraErrorCode.WORKSPACE_NOT_FOUND, `Workspace ${id} not found`);
-    return ws;
+    const row = this.db.getWorkspace(id);
+    if (!row) throw new OgraError(OgraErrorCode.WORKSPACE_NOT_FOUND, `Workspace ${id} not found`);
+    return this.rowToRecord(row);
   }
 
   async getCurrent(): Promise<WorkspaceRecord | null> {
@@ -64,13 +59,22 @@ export class WorkspaceService {
   }
 
   async updateClassification(workspaceId: string, classification: DataClassification): Promise<WorkspaceRecord> {
-    const ws = await this.get(workspaceId);
-    ws.defaultClassification = classification;
-    ws.updatedAt = new Date().toISOString();
-    return ws;
+    this.db.updateWorkspaceClassification(workspaceId, classification);
+    return this.get(workspaceId);
   }
 
   getCurrentId(): string | null {
     return this.currentWorkspaceId;
+  }
+
+  private rowToRecord(row: any): WorkspaceRecord {
+    return {
+      id: row.id,
+      name: row.name,
+      type: row.type as WorkspaceType,
+      defaultClassification: row.default_data_classification as DataClassification,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+    };
   }
 }

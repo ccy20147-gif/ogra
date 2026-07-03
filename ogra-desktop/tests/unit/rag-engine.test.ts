@@ -1,11 +1,11 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { DocumentParser } from '../../src/edge/document-parser';
 import { RagEngine } from '../../src/edge/rag-engine';
 import { DatabaseService } from '../../src/core/database-service';
 import { DataClassification, WorkspaceType } from '../../src/shared/types';
+import { createTestDb } from '../helpers/test-db';
 
 describe('DocumentParser', () => {
   const parser = new DocumentParser();
@@ -57,29 +57,28 @@ describe('DocumentParser', () => {
 });
 
 describe('RagEngine', () => {
-  const testDir = path.join(os.tmpdir(), `ogra-rag-test-${Date.now()}`);
+  let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let engine: RagEngine;
   let wsId: string;
 
   beforeAll(() => {
-    fs.mkdirSync(testDir, { recursive: true });
-    db = new DatabaseService(testDir);
+    fixture = createTestDb();
+    db = fixture.db;
+    wsId = fixture.workspaceId;
     engine = new RagEngine(db);
 
-    // Create workspace and KB for tests
-    const ws = db.createWorkspace('RAG Test', WorkspaceType.Project, DataClassification.Internal);
-    wsId = ws.id;
+    // Create KB for tests
     db.createKnowledgeBase({
       id: 'kb_rag_test',
-      workspaceId: ws.id,
+      workspaceId: wsId,
       name: 'Test KB',
-      rootPath: testDir,
+      rootPath: fixture.testDir,
       classification: DataClassification.Internal,
     });
 
     // Create test fixture files
-    const docsDir = path.join(testDir, 'test-docs');
+    const docsDir = path.join(fixture.testDir, 'test-docs');
     fs.mkdirSync(docsDir, { recursive: true });
     fs.writeFileSync(path.join(docsDir, 'finance.md'), '# Q2 Finance Report\n\nRevenue: $4.2M\nExpenses: $3.1M\nProfit: $1.1M\n\n## Key Points\n\nGrowth of 15% year over year.\nNew product line launched in April.');
     fs.writeFileSync(path.join(docsDir, 'code.ts'), 'function analyzeData(data: any) {\n  const result = data.map((d: any) => d.value * 2);\n  return result;\n}');
@@ -88,20 +87,19 @@ describe('RagEngine', () => {
 
     // Index the folder
     engine.indexFolder(
-      ws.id, 'kb_rag_test', docsDir,
+      wsId, 'kb_rag_test', docsDir,
       DataClassification.Internal,
     );
   });
 
   afterAll(() => {
-    db.close();
-    fs.rmSync(testDir, { recursive: true, force: true });
+    fixture.cleanup();
   });
 
   it('should index files and create documents', () => {
     const docs = db.getRawDB().prepare(
       'SELECT * FROM documents WHERE knowledge_base_id = ?'
-    ).all('kb_rag_test') as any[];
+    ).all('kb_rag_test') as Record<string, unknown>[];
     // Should have 2 supported files (finance.md and code.ts)
     expect(docs.length).toBe(2);
   });
@@ -135,7 +133,7 @@ describe('RagEngine', () => {
   it('should filter by workspace', () => {
     // Create another workspace with different docs
     const ws2 = db.createWorkspace('RAG Test 2', WorkspaceType.Personal, DataClassification.Public);
-    const docsDir2 = path.join(testDir, 'test-docs2');
+    const docsDir2 = path.join(fixture.testDir, 'test-docs2');
     fs.mkdirSync(docsDir2, { recursive: true });
     fs.writeFileSync(path.join(docsDir2, 'other.md'), '# Other Workspace\n\nCompletely different content.');
     db.createKnowledgeBase({

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { RunEventType } from '../shared/types';
+import { DatabaseService } from './database-service';
 
 export interface RunEventRecord {
   id: string;
@@ -19,18 +20,33 @@ export interface RunEventRecord {
 const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 
 /**
- * Append-only audit event store with hash-chain verification.
+ * Canonical JSON stringify with sorted keys — shared function so
+ * AuditService and DatabaseService produce identical hashes.
+ */
+export function canonicalJSON(obj: Record<string, unknown>): string {
+  return JSON.stringify(obj, Object.keys(obj).sort());
+}
+
+/**
+ * Append-only audit event store with hash-chain verification, backed by SQLite.
  *
  * Each event stores:
  * - sequence: monotonic per run
  * - previous_hash: SHA-256 of prior event in same run, or genesis
  * - event_hash: SHA-256 of canonical(event_payload) + previous_hash
  *
- * Alpha uses in-memory storage. Plan 02 will migrate to SQLite.
+ * Delegates persistence to DatabaseService when available; falls back to
+ * in-memory storage for backward compatibility in tests.
  */
 export class AuditService {
+  /** In-memory fallback used only when no DatabaseService is provided */
   private events: RunEventRecord[] = [];
   private sequences: Map<string, number> = new Map();
+  private dbService: DatabaseService | null;
+
+  constructor(dbService?: DatabaseService) {
+    this.dbService = dbService ?? null;
+  }
 
   async appendEvent(req: {
     runId: string;
@@ -40,24 +56,31 @@ export class AuditService {
     policyVersionHash?: string;
     redactionRuleVersion?: string;
   }): Promise<RunEventRecord> {
+    if (this.dbService) {
+      const row = this.dbService.appendRunEvent(
+        req.runId,
+        req.workspaceId,
+        req.eventType,
+        req.eventPayload,
+        req.policyVersionHash,
+        req.redactionRuleVersion,
+      );
+      return this.rowToRecord(row);
+    }
+
+    // In-memory fallback
     const seq = (this.sequences.get(req.runId) ?? 0) + 1;
     this.sequences.set(req.runId, seq);
 
-    // Find previous event in same run
     const prevEvent = [...this.events].reverse().find(e => e.runId === req.runId);
 
     const payloadHash = crypto
       .createHash('sha256')
-      .update(this.canonicalJSON(req.eventPayload))
+      .update(canonicalJSON(req.eventPayload))
       .digest('hex');
 
-    const eventPayload: Record<string, unknown> = { ...req.eventPayload };
-    if (req.eventType !== RunEventType.RouteDecision) {
-      // Avoid storing full payloads for non-essential events
-    }
-
     const previousHash = prevEvent?.eventHash ?? GENESIS_HASH;
-    const hashInput = this.canonicalJSON(eventPayload) + previousHash;
+    const hashInput = canonicalJSON(req.eventPayload) + previousHash;
     const eventHash = crypto.createHash('sha256').update(hashInput).digest('hex');
 
     const record: RunEventRecord = {
@@ -66,7 +89,7 @@ export class AuditService {
       workspaceId: req.workspaceId,
       sequence: seq,
       eventType: req.eventType,
-      eventPayload,
+      eventPayload: { ...req.eventPayload },
       payloadHash,
       previousHash,
       eventHash,
@@ -80,17 +103,35 @@ export class AuditService {
   }
 
   async getEvents(runId: string, limit = 100, offset = 0): Promise<RunEventRecord[]> {
-    const runEvents = this.events
+    if (this.dbService) {
+      return this.dbService.getRunEvents(runId, limit, offset).map(r => this.rowToRecord(r));
+    }
+    return this.events
       .filter(e => e.runId === runId)
-      .sort((a, b) => a.sequence - b.sequence);
-    return runEvents.slice(offset, offset + limit);
+      .sort((a, b) => a.sequence - b.sequence)
+      .slice(offset, offset + limit);
   }
 
   async getAllEvents(): Promise<RunEventRecord[]> {
+    if (this.dbService) {
+      // Fetch all events from DB; we need the full set for verifyAllChains
+      const rows = await this.getAllEventsFromDb();
+      return rows.map(r => this.rowToRecord(r));
+    }
     return [...this.events];
   }
 
+  private async getAllEventsFromDb(): Promise<any[]> {
+    if (!this.dbService) return [];
+    const db = (this.dbService as any).db.getDB();
+    return db.prepare('SELECT * FROM run_events ORDER BY run_id, sequence ASC').all();
+  }
+
   async verifyChain(runId: string): Promise<{ valid: boolean; brokenAt?: number; errors: string[] }> {
+    if (this.dbService) {
+      return this.dbService.verifyRunChain(runId);
+    }
+
     const runEvents = this.events
       .filter(e => e.runId === runId)
       .sort((a, b) => a.sequence - b.sequence);
@@ -100,20 +141,17 @@ export class AuditService {
     for (let i = 0; i < runEvents.length; i++) {
       const evt = runEvents[i];
 
-      // Check sequence
       if (evt.sequence !== i + 1) {
         errors.push(`Event ${evt.id}: expected sequence ${i + 1}, got ${evt.sequence}`);
       }
 
-      // Check previous_hash
       const expectedPrevHash = i === 0 ? GENESIS_HASH : runEvents[i - 1].eventHash;
       if (evt.previousHash !== expectedPrevHash) {
         errors.push(`Event ${evt.id}: previous_hash mismatch`);
         return { valid: false, brokenAt: i, errors };
       }
 
-      // Recompute event_hash
-      const hashInput = this.canonicalJSON(evt.eventPayload) + evt.previousHash;
+      const hashInput = canonicalJSON(evt.eventPayload) + evt.previousHash;
       const recomputedHash = crypto.createHash('sha256').update(hashInput).digest('hex');
       if (evt.eventHash !== recomputedHash) {
         errors.push(`Event ${evt.id}: event_hash mismatch`);
@@ -125,7 +163,8 @@ export class AuditService {
   }
 
   async verifyAllChains(): Promise<{ valid: boolean; errors: string[] }> {
-    const runIds = [...new Set(this.events.map(e => e.runId))];
+    const allEvents = await this.getAllEvents();
+    const runIds = [...new Set(allEvents.map(e => e.runId))];
     const allErrors: string[] = [];
 
     for (const runId of runIds) {
@@ -138,7 +177,21 @@ export class AuditService {
     return { valid: allErrors.length === 0, errors: allErrors };
   }
 
-  private canonicalJSON(obj: Record<string, unknown>): string {
-    return JSON.stringify(obj, Object.keys(obj).sort());
+  /** Convert a DatabaseService RunEventRow to a domain RunEventRecord */
+  private rowToRecord(row: any): RunEventRecord {
+    return {
+      id: row.id,
+      runId: row.run_id,
+      workspaceId: row.workspace_id,
+      sequence: row.sequence,
+      eventType: row.event_type,
+      eventPayload: JSON.parse(row.event_payload_json || '{}'),
+      payloadHash: row.payload_hash ?? undefined,
+      previousHash: row.previous_hash,
+      eventHash: row.event_hash,
+      policyVersionHash: row.policy_version_hash ?? undefined,
+      redactionRuleVersion: row.redaction_rule_version ?? undefined,
+      createdAt: row.created_at,
+    };
   }
 }

@@ -1,4 +1,4 @@
-import { AuditService } from './audit-service';
+import { AuditService } from '@core/audit-service';
 
 /**
  * LocalCommandAgentAdapter — read-only supervised mode.
@@ -12,17 +12,37 @@ import { AuditService } from './audit-service';
  * - write Level 1 audit events
  * - support cancellation
  *
- * This is a simplified stub for Alpha/Beta coverage.
- * Full implementation requires process spawning with workdir and timeout.
+ * This implementation uses spawn() instead of execSync to avoid
+ * shell injection vulnerabilities. Commands are validated against
+ * an allowlist of safe read-only programs.
  */
+
+const ALLOWED_COMMANDS = new Set([
+  'ls', 'cat', 'head', 'tail', 'wc', 'find', 'grep', 'rg',
+  'diff', 'stat', 'echo', 'pwd', 'which', 'file', 'sort',
+  'uniq', 'cut', 'wc', 'tree', 'git', 'npm', 'npx',
+]);
+
+function isSafeReadonlyCommand(cmd: string): boolean {
+  // Disallow shell metacharacters
+  const unsafeChars = /[;&|`$(){}[\]<>!\\\n\r]/;
+  if (unsafeChars.test(cmd)) return false;
+
+  const parts = cmd.trim().split(/\s+/);
+  if (parts.length === 0) return false;
+  const base = parts[0];
+
+  return ALLOWED_COMMANDS.has(base);
+}
+
 export class LocalCommandAgentAdapter {
-  private running = new Map<string, { cancelled: boolean }>();
+  private running = new Map<string, { abort: AbortController }>();
 
   constructor(private auditService: AuditService) {}
 
   /**
-   * Execute a read-only command. The command is hashed and executed
-   * in a restricted workdir with no shell write access.
+   * Execute a read-only command in a restricted workdir with no shell.
+   * Command must be from the allowlist and contain no shell metacharacters.
    */
   async executeReadOnly(
     runId: string,
@@ -37,7 +57,19 @@ export class LocalCommandAgentAdapter {
     outputHash: string;
   }> {
     const { createHash } = await import('crypto');
-    const { execSync } = await import('child_process');
+    const { spawn } = await import('child_process');
+
+    // Validate command: allowlist + no shell metacharacters
+    if (!isSafeReadonlyCommand(command)) {
+      const errorMsg = `Command rejected: "${command.substring(0, 80)}" is not in the safe allowlist or contains shell metacharacters`;
+      await this.auditService.appendEvent({
+        runId,
+        workspaceId: '',
+        eventType: 'local_command_failed',
+        eventPayload: { error: errorMsg, exitCode: -1 },
+      });
+      return { stdout: '', stderr: errorMsg, exitCode: -1, inputHash: '', outputHash: '' };
+    }
 
     // Hash input (command + workdir)
     const inputHash = createHash('sha256').update(`${command}:${workdir}`).digest('hex');
@@ -50,30 +82,70 @@ export class LocalCommandAgentAdapter {
       eventPayload: { command: command.substring(0, 100), workdir, inputHash },
     });
 
-    const handle = { cancelled: false };
-    this.running.set(runId, handle);
+    const abortController = new AbortController();
+    this.running.set(runId, { abort: abortController });
+
+    // Split command into program + args for safe spawn (no shell)
+    const parts = command.trim().split(/\s+/);
+    const program = parts[0];
+    const args = parts.slice(1);
 
     try {
-      const result = execSync(command, {
+      const stdoutChunks: Buffer[] = [];
+      const stderrChunks: Buffer[] = [];
+
+      const child = spawn(program, args, {
         cwd: workdir,
+        signal: abortController.signal,
         timeout: timeoutMs,
-        encoding: 'utf-8',
-        maxBuffer: 1024 * 1024, // 1MB
-        env: { PATH: process.env.PATH || '' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { PATH: process.env.PATH || '', HOME: process.env.HOME || '' },
       });
 
-      const stdout = result?.toString() || '';
-      const outputHash = createHash('sha256').update(stdout).digest('hex');
+      child.stdout?.on('data', (chunk: Buffer) => stdoutChunks.push(chunk));
+      child.stderr?.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+      const exitCode = await new Promise<number>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          child.kill('SIGTERM');
+          reject(new Error(`Command timed out after ${timeoutMs}ms: ${command.substring(0, 80)}`));
+        }, timeoutMs);
+
+        child.on('error', (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+
+        child.on('close', (code) => {
+          clearTimeout(timer);
+          resolve(code ?? -1);
+        });
+      });
+
+      const stdout = Buffer.concat(stdoutChunks).toString('utf-8');
+      const stderr = Buffer.concat(stderrChunks).toString('utf-8');
+      const outputHash = createHash('sha256').update(stdout + stderr).digest('hex');
 
       await this.auditService.appendEvent({
         runId,
         workspaceId: '',
-        eventType: 'local_command_complete',
-        eventPayload: { exitCode: 0, outputHash, bytes: stdout.length },
+        eventType: exitCode === 0 ? 'local_command_complete' : 'local_command_failed',
+        eventPayload: { exitCode, outputHash, bytes: stdout.length + stderr.length },
       });
 
-      return { stdout, stderr: '', exitCode: 0, inputHash, outputHash };
+      return { stdout, stderr, exitCode, inputHash, outputHash };
     } catch (err: any) {
+      // AbortError = cancellation
+      if (err.name === 'AbortError') {
+        await this.auditService.appendEvent({
+          runId,
+          workspaceId: '',
+          eventType: 'local_command_failed',
+          eventPayload: { error: 'Command cancelled', exitCode: -1 },
+        });
+        return { stdout: '', stderr: 'Command cancelled', exitCode: -1, inputHash, outputHash: '' };
+      }
+
       const stderr = err.stderr?.toString() || err.message || '';
       const outputHash = createHash('sha256').update(stderr).digest('hex');
 
@@ -93,7 +165,7 @@ export class LocalCommandAgentAdapter {
   cancel(runId: string): void {
     const handle = this.running.get(runId);
     if (handle) {
-      handle.cancelled = true;
+      handle.abort.abort();
     }
   }
 }

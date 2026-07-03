@@ -47,15 +47,13 @@ export enum RunStatus {
   Blocked = 'blocked',
 }
 
-/** Agent adapter kinds */
+/** Agent adapter kinds — only implemented adapters are listed here.
+ *  Codex, ClaudeCode, and Hermes adapters are planned for future releases. */
 export enum AdapterKind {
   Internal = 'internal',
   Ollama = 'ollama',
   OpenAICompatible = 'openai_compatible',
   LocalCommand = 'local_command',
-  Codex = 'codex',
-  ClaudeCode = 'claude_code',
-  Hermes = 'hermes',
   Aider = 'aider',
   OpenInterpreter = 'open_interpreter',
   A2A = 'a2a',
@@ -89,11 +87,10 @@ export enum ApprovalDecision {
   Expired = 'expired',
 }
 
-/** Agent group modes */
+/** Agent group execution mode — Pipeline is implemented in Alpha;
+ *  Parallel and Debate are planned for Beta. */
 export enum AgentGroupMode {
   Pipeline = 'pipeline',
-  Parallel = 'parallel',
-  Debate = 'debate',
 }
 
 /** Memory types */
@@ -147,4 +144,5 @@ export enum RunEventType {
   PolicyEvaluation = 'policy_evaluation',
   IncidentCreated = 'incident_created',
   PromptInjectionWarning = 'prompt_injection_warning',
+  KnowledgeBaseReindexed = 'knowledge_base_reindexed',
 }

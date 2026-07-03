@@ -1,28 +1,24 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { DatabaseService } from '../../src/core/database-service';
 import { MemoryService } from '../../src/core/memory-service';
 import { DataClassification, WorkspaceType } from '../../src/shared/types';
+import { createTestDb } from '../helpers/test-db';
 
 describe('M3 MemoryService', () => {
-  const testDir = path.join(os.tmpdir(), `ogra-m3-test-${Date.now()}`);
+  let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let memory: MemoryService;
   let wsId: string;
 
   beforeAll(() => {
-    fs.mkdirSync(testDir, { recursive: true });
-    db = new DatabaseService(testDir);
+    fixture = createTestDb();
+    db = fixture.db;
+    wsId = fixture.workspaceId;
     memory = new MemoryService(db);
-    const ws = db.createWorkspace('Memory Test', WorkspaceType.Personal, DataClassification.Internal);
-    wsId = ws.id;
   });
 
   afterAll(() => {
-    db.close();
-    fs.rmSync(testDir, { recursive: true, force: true });
+    fixture.cleanup();
   });
 
   it('should auto-write episodic memory', async () => {

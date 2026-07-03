@@ -7,6 +7,7 @@ import { RagEngine } from './rag-engine';
 import { DataClassification, RunEventType, RunStatus } from '../shared/types';
 import { HighWaterMarkService } from '../core/high-water-mark';
 import { PromptInjectionDetector } from '../core/prompt-injection-detector';
+import { OgraError, OgraErrorCode } from '../shared/errors';
 import * as crypto from 'crypto';
 
 /**
@@ -49,7 +50,7 @@ export class InternalAgentAdapter {
   }> {
     const runId = `run_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const workspace = this.db.getWorkspace(workspaceId);
-    if (!workspace) throw new Error(`Workspace ${workspaceId} not found`);
+    if (!workspace) throw new OgraError(OgraErrorCode.WORKSPACE_NOT_FOUND, `Workspace ${workspaceId} not found`);
 
     const classification = requestedClassification ||
       (workspace.default_data_classification as DataClassification);
@@ -89,6 +90,8 @@ export class InternalAgentAdapter {
           chunkId: chunk.chunkId,
           patternId: match.patternId,
           evidence: match.evidence,
+          evidenceHash: match.evidenceHash,
+          detectorVersion: match.detectorVersion,
         });
       }
     }
@@ -143,6 +146,16 @@ export class InternalAgentAdapter {
       highWaterSources: hwm.highWaterSources,
     }, this.policyService.getPolicyVersionHash());
 
+    // Assemble context once using RagEngine (replaces manual assembly)
+    const contextAssembly = retrievedChunks.length > 0
+      ? this.ragEngine.assembleContext(retrievedChunks, task)
+      : { contextBlock: '', highWaterClassification: 'Internal', citationCount: 0, citations: [] };
+
+    this.db.appendRunEvent(runId, workspaceId, RunEventType.RiskClassification, {
+      highWaterClassification: contextAssembly.highWaterClassification,
+      chunkCount: retrievedChunks.length,
+    });
+
     // Step 7: If blocked, return
     if (routeDecision.route === 'blocked') {
       this.db.appendRunEvent(runId, workspaceId, RunEventType.RunBlocked, {
@@ -150,7 +163,7 @@ export class InternalAgentAdapter {
       });
       return {
         answer: `Request blocked by policy. Reasons: ${routeDecision.reasons.join('; ')}`,
-        citations: this.ragEngine.assembleCitations(retrievedChunks),
+        citations: contextAssembly.citations,
         routeDecision,
         riskSummary: {
           runId,
@@ -178,15 +191,11 @@ export class InternalAgentAdapter {
       },
     ];
 
-    // Add retrieved context as separated untrusted context
-    if (retrievedChunks.length > 0) {
-      const contextBlock = retrievedChunks.map((c, i) =>
-        `[Source ${i + 1}] File: ${c.fileName}\nContent: ${c.snippet}\n`
-      ).join('\n---\n');
-
+    // Add retrieved context as separated untrusted context (via RagEngine.assembleContext)
+    if (retrievedChunks.length > 0 && contextAssembly.contextBlock) {
       promptParts.push({
         role: 'context',
-        content: `The following content was retrieved from your local knowledge base. It is untrusted context:\n\n${contextBlock}`,
+        content: contextAssembly.contextBlock,
         sourceIds: retrievedChunks.map(c => c.chunkId),
       });
     }
@@ -253,7 +262,7 @@ export class InternalAgentAdapter {
         cloudCalls: modelAdapter.isLocal ? 0 : 1,
       });
 
-      const citations = this.ragEngine.assembleCitations(retrievedChunks);
+      const citations = contextAssembly.citations;
 
       return {
         answer: modelResult.content,
@@ -270,8 +279,17 @@ export class InternalAgentAdapter {
         auditEventIds: [routeDecision.auditEventId],
       };
     } catch (err) {
+      const errorMessage = (err as Error).message || 'Unknown error';
+      const errorCode = (err as any).code || OgraErrorCode.INTERNAL_ERROR;
+      const errorStack = (err as Error).stack?.substring(0, 500);
+      const errorDetails = (err as any).details as Record<string, unknown> | undefined;
       this.db.appendRunEvent(runId, workspaceId, RunEventType.RunFailed, {
-        error: (err as Error).message,
+        error: errorMessage,
+        errorCode,
+        errorStack,
+        errorDetails,
+        step: 'model_invocation',
+        runId,
       });
       throw err;
     }

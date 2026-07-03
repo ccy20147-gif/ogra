@@ -1,4 +1,5 @@
 import { AuditService } from './audit-service';
+import { DatabaseService } from './database-service';
 import { RiskLevel, IncidentType } from '../shared/types';
 
 export interface RunRiskSummary {
@@ -33,9 +34,11 @@ export interface IncidentRecord {
  * - model/provider registry views
  */
 export class GovernanceService {
-  private incidents: Map<string, IncidentRecord> = new Map();
+  private db: DatabaseService | null;
 
-  constructor(private auditService: AuditService) {}
+  constructor(private auditService: AuditService, dbService?: DatabaseService) {
+    this.db = dbService ?? null;
+  }
 
   async getRunRisk(runId: string): Promise<RunRiskSummary | null> {
     const events = await this.auditService.getEvents(runId);
@@ -63,6 +66,53 @@ export class GovernanceService {
       riskLevel = RiskLevel.Low;
     }
 
+    // When DB is available, also query document_access_events for incident detection
+    if (this.db) {
+      const accessEvents = this.db.getRawDB().prepare(
+        `SELECT dae.id, dae.document_id, dae.access_type, dae.classification_snapshot, dae.created_at, d.file_name
+         FROM document_access_events dae
+         LEFT JOIN documents d ON dae.document_id = d.id
+         WHERE dae.run_id = ?
+         ORDER BY dae.created_at DESC`
+      ).all(runId) as any[];
+
+      for (const access of accessEvents) {
+        // Detect incidents for blocked access or high-classification access
+        if (access.access_type === 'blocked') {
+          if (!reasons.includes('Blocked document access detected')) {
+            reasons.push('Blocked document access detected');
+          }
+          if (riskLevel !== RiskLevel.Blocked && riskLevel !== RiskLevel.High) {
+            riskLevel = RiskLevel.High;
+            requiredApprovals = ['allow_cloud'];
+          }
+        }
+        // If a confidential/restricted document was included in cloud payload, flag it
+        if (access.access_type === 'included_in_cloud_payload') {
+          let snapshotClass = '';
+          if (access.classification_snapshot) {
+            try {
+              const snapshot = JSON.parse(access.classification_snapshot);
+              snapshotClass = snapshot.classification || '';
+            } catch {
+              snapshotClass = access.classification_snapshot;
+            }
+          }
+          if (
+            snapshotClass === 'Confidential' || snapshotClass === 'Restricted' ||
+            access.access_type === 'included_in_cloud_payload'
+          ) {
+            if (!reasons.includes(`Confidential document accessed by run`)) {
+              reasons.push(`Confidential document accessed by run`);
+            }
+            if (riskLevel !== RiskLevel.Blocked && riskLevel !== RiskLevel.High) {
+              riskLevel = RiskLevel.High;
+            }
+          }
+        }
+      }
+    }
+
     return {
       runId,
       riskLevel,
@@ -81,29 +131,38 @@ export class GovernanceService {
     summary: string;
     evidenceEventIds: string[];
   }): Promise<IncidentRecord> {
+    if (this.db) {
+      const record = this.db.createIncident({
+        id: `inc_${Date.now()}`,
+        workspaceId: req.workspaceId,
+        runId: req.runId,
+        incidentType: req.incidentType,
+        severity: req.severity,
+        summary: req.summary,
+        evidenceEventIds: req.evidenceEventIds,
+      });
+      return record;
+    }
+    // Fallback: in-memory (no persistence)
     const incident: IncidentRecord = {
       id: `inc_${Date.now()}`,
       ...req,
       status: 'open',
       createdAt: new Date().toISOString(),
     };
-    this.incidents.set(incident.id, incident);
     return incident;
   }
 
   async getIncidents(workspaceId?: string): Promise<IncidentRecord[]> {
-    const all = Array.from(this.incidents.values());
-    if (workspaceId) {
-      return all.filter(i => i.workspaceId === workspaceId);
+    if (this.db) {
+      return this.db.listIncidents(workspaceId);
     }
-    return all;
+    return [];
   }
 
   async resolveIncident(id: string): Promise<void> {
-    const incident = this.incidents.get(id);
-    if (incident) {
-      incident.status = 'resolved';
-      incident.resolvedAt = new Date().toISOString();
+    if (this.db) {
+      this.db.resolveIncident(id);
     }
   }
 }

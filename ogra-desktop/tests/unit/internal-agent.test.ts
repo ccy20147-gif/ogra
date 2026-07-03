@@ -1,15 +1,18 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
-import * as os from 'os';
 import { DatabaseService } from '../../src/core/database-service';
 import { PolicyService } from '../../src/core/policy-service';
 import { RouteService } from '../../src/core/route-service';
 import { RunService } from '../../src/core/run-service';
+import { AuditService } from '../../src/core/audit-service';
 import { RagEngine } from '../../src/edge/rag-engine';
 import { InternalAgentAdapter } from '../../src/edge/internal-agent-adapter';
 import { DataClassification, WorkspaceType } from '../../src/shared/types';
+import { WorkspaceService, WorkspaceRecord } from '../../src/core/workspace-service';
+import { OgraCoreConfig } from '../../src/core';
 import { BaseModelAdapter, ModelRequest, ModelResult, ModelCapabilities, ProviderHealth } from '../../src/core/model-adapter';
+import { createTestDb } from '../helpers/test-db';
 
 /**
  * Mock model adapter that doesn't require a real Ollama instance.
@@ -47,7 +50,7 @@ class MockModelAdapter extends BaseModelAdapter {
 }
 
 describe('InternalAgentAdapter', () => {
-  const testDir = path.join(os.tmpdir(), `ogra-agent-test-${Date.now()}`);
+  let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let policyService: PolicyService;
   let routeService: RouteService;
@@ -57,43 +60,40 @@ describe('InternalAgentAdapter', () => {
   let wsId: string;
 
   beforeAll(() => {
-    fs.mkdirSync(testDir, { recursive: true });
-    db = new DatabaseService(testDir);
-    policyService = new PolicyService({ appendEvent: () => {} } as any);
+    fixture = createTestDb();
+    db = fixture.db;
+    wsId = fixture.workspaceId;
+    policyService = new PolicyService(new AuditService());
     routeService = new RouteService(policyService);
+    const mockAuditService = new AuditService();
     runService = new RunService(
-      { getCurrentId: () => wsId, get: async (id: string) => ({ id, defaultClassification: DataClassification.Internal }) } as any,
+      { getCurrentId: () => wsId, get: async (id: string): Promise<WorkspaceRecord> => ({ id, name: 'mock', type: WorkspaceType.Personal, defaultClassification: DataClassification.Internal, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }) } as WorkspaceService,
       routeService,
-      { appendEvent: async () => ({ id: 'evt_test', previousHash: '0', eventHash: 'hash' }) } as any,
+      mockAuditService,
       policyService,
-      { appDataDir: testDir } as any,
+      { appDataDir: fixture.testDir, secretBroker: undefined, isDev: true } as OgraCoreConfig,
     );
     ragEngine = new RagEngine(db);
     agent = new InternalAgentAdapter(db, policyService, routeService, runService, ragEngine);
 
-    // Create workspace for tests
-    const ws = db.createWorkspace('Agent Test', WorkspaceType.Project, DataClassification.Public);
-    wsId = ws.id;
-
     // Create test docs
-    const docsDir = path.join(testDir, 'agent-docs');
+    const docsDir = path.join(fixture.testDir, 'agent-docs');
     fs.mkdirSync(docsDir, { recursive: true });
     fs.writeFileSync(path.join(docsDir, 'info.md'), '# Project Info\n\nThe project budget is $500K for Q2.\nKey deliverables include API integration and dashboard.');
 
     // Index docs
     db.createKnowledgeBase({
       id: 'kb_agent_test',
-      workspaceId: ws.id,
+      workspaceId: fixture.workspaceId,
       name: 'Agent KB',
       rootPath: docsDir,
       classification: DataClassification.Public,
     });
-    ragEngine.indexFolder(ws.id, 'kb_agent_test', docsDir, DataClassification.Public);
+    ragEngine.indexFolder(fixture.workspaceId, 'kb_agent_test', docsDir, DataClassification.Public);
   });
 
   afterAll(() => {
-    db.close();
-    fs.rmSync(testDir, { recursive: true, force: true });
+    fixture.cleanup();
   });
 
   it('should run a complete agent cycle with local model', async () => {

@@ -1,4 +1,5 @@
 import { RunEventType } from '../shared/types';
+import * as crypto from 'crypto';
 
 /**
  * Deterministic prompt-injection detector.
@@ -6,8 +7,13 @@ import { RunEventType } from '../shared/types';
  * Matches simple known patterns in untrusted content.
  * Each pattern is a simple regex/keyword match.
  * Detected patterns are written to run events and incident records.
+ *
+ * Each detection returns an evidence hash for audit trail integrity.
  */
 export class PromptInjectionDetector {
+  /** Version identifier — bump when patterns change */
+  readonly detectorVersion = 'v1.0.0';
+
   private patterns: Array<{
     id: string;
     name: string;
@@ -76,33 +82,45 @@ export class PromptInjectionDetector {
 
   /**
    * Scan content for prompt injection patterns.
-   * Returns matched patterns with evidence excerpts.
+   * Returns matched patterns with evidence excerpts and cryptographic hashes.
    */
   detect(content: string): Array<{
     patternId: string;
     patternName: string;
     severity: string;
     evidence: string;
+    evidenceHash: string;
     description: string;
+    detectorVersion: string;
   }> {
     const matches: Array<{
       patternId: string;
       patternName: string;
       severity: string;
       evidence: string;
+      evidenceHash: string;
       description: string;
+      detectorVersion: string;
     }> = [];
 
     for (const pattern of this.patterns) {
       for (const regex of pattern.patterns) {
         const match = content.match(regex);
         if (match) {
+          const evidence = match[0].substring(0, 100);
+          const evidenceHash = crypto
+            .createHash('sha256')
+            .update(evidence)
+            .digest('hex');
+
           matches.push({
             patternId: pattern.id,
             patternName: pattern.name,
             severity: pattern.severity,
-            evidence: match[0].substring(0, 100),
+            evidence,
+            evidenceHash,
             description: pattern.description,
+            detectorVersion: this.detectorVersion,
           });
           break; // One match per pattern group
         }
@@ -114,6 +132,7 @@ export class PromptInjectionDetector {
 
   /**
    * Get all pattern definitions (for display in UI).
+   * Includes version info for audit consistency.
    */
   getPatterns(): Array<{
     id: string;

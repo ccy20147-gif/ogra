@@ -1,15 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import { DatabaseService } from '../../src/core/database-service';
 import { PipelineOrchestrator, PipelineStep } from '../../src/core/pipeline-orchestrator';
 import { PolicyService } from '../../src/core/policy-service';
 import { RouteService } from '../../src/core/route-service';
+import { AuditService } from '../../src/core/audit-service';
 import { RagEngine } from '../../src/edge/rag-engine';
 import { MemoryService } from '../../src/core/memory-service';
 import { BaseModelAdapter, ModelRequest, ModelResult, ModelCapabilities, ProviderHealth } from '../../src/core/model-adapter';
 import { DataClassification, WorkspaceType } from '../../src/shared/types';
+import { createTestDb } from '../helpers/test-db';
 
 class MockStepModelAdapter extends BaseModelAdapter {
   readonly id = 'mock_pipeline_adapter';
@@ -45,7 +44,7 @@ class MockStepModelAdapter extends BaseModelAdapter {
 }
 
 describe('PipelineOrchestrator', () => {
-  const testDir = path.join(os.tmpdir(), `ogra-pipeline-test-${Date.now()}`);
+  let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let policyService: PolicyService;
   let routeService: RouteService;
@@ -55,21 +54,18 @@ describe('PipelineOrchestrator', () => {
   let wsId: string;
 
   beforeAll(() => {
-    fs.mkdirSync(testDir, { recursive: true });
-    db = new DatabaseService(testDir);
-    policyService = new PolicyService({ appendEvent: () => {} } as any);
+    fixture = createTestDb();
+    db = fixture.db;
+    wsId = fixture.workspaceId;
+    policyService = new PolicyService(new AuditService());
     routeService = new RouteService(policyService);
     ragEngine = new RagEngine(db);
     memoryService = new MemoryService(db);
     orchestrator = new PipelineOrchestrator(db, policyService, routeService, ragEngine, memoryService);
-
-    const ws = db.createWorkspace('Pipeline Test', WorkspaceType.Project, DataClassification.Public);
-    wsId = ws.id;
   });
 
   afterAll(() => {
-    db.close();
-    fs.rmSync(testDir, { recursive: true, force: true });
+    fixture.cleanup();
   });
 
   it('should execute a 3-agent pipeline', async () => {
@@ -166,7 +162,7 @@ describe('PipelineOrchestrator', () => {
   it('should persist group run to database', () => {
     const runs = db.getRawDB().prepare(
       'SELECT * FROM agent_group_runs WHERE workspace_id = ? ORDER BY started_at DESC'
-    ).all(wsId) as any[];
+    ).all(wsId) as Record<string, unknown>[];
     expect(runs.length).toBeGreaterThanOrEqual(1);
     expect(runs[0].mode).toBe('pipeline');
   });

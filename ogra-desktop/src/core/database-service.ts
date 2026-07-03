@@ -2,6 +2,7 @@ import { OgraDatabase } from './database';
 import * as crypto from 'crypto';
 import { DataClassification, WorkspaceType } from '../shared/types';
 import { OgraError, OgraErrorCode } from '../shared/errors';
+import { canonicalJSON } from './audit-service';
 
 export interface WorkspaceRow {
   id: string;
@@ -54,8 +55,29 @@ export class DatabaseService {
     this.db.runMigrations();
   }
 
+  /**
+   * @deprecated Use typed query methods instead of raw DB access.
+   * Direct DB manipulation bypasses validation, audit, and FK constraints.
+   * Only use for migration bootstrap or test cleanup.
+   */
   getRawDB() {
     return this.db.getDB();
+  }
+
+  /**
+   * Update a single field on a run_event row by ID.
+   * Intended for test scenarios that need to tamper with event data
+   * (e.g. verifying that chain verification detects corruption).
+   * This is a controlled alternative to calling getRawDB() directly.
+   */
+  updateRunEventField(eventId: string, field: string, value: string): void {
+    const allowedFields = new Set(['event_payload_json', 'event_hash', 'previous_hash', 'payload_hash']);
+    if (!allowedFields.has(field)) {
+      throw new Error(`updateRunEventField: field '${field}' is not allowed. Allowed: ${[...allowedFields].join(', ')}`);
+    }
+    this.db.getDB().prepare(
+      `UPDATE run_events SET ${field} = ? WHERE id = ?`
+    ).run(value, eventId);
   }
 
   close(): void {
@@ -112,9 +134,8 @@ export class DatabaseService {
     const previousHash = prevEvent?.event_hash ?? GENESIS_HASH;
 
     // Calculate payload hash and event hash
-    const canonicalJson = JSON.stringify(eventPayload, Object.keys(eventPayload).sort());
-    const payloadHash = crypto.createHash('sha256').update(canonicalJson).digest('hex');
-    const hashInput = canonicalJson + previousHash;
+    const payloadHash = crypto.createHash('sha256').update(canonicalJSON(eventPayload)).digest('hex');
+    const hashInput = canonicalJSON(eventPayload) + previousHash;
     const eventHash = crypto.createHash('sha256').update(hashInput).digest('hex');
 
     const id = `evt_${Date.now()}_${seq}_${crypto.randomBytes(4).toString('hex')}`;
@@ -172,8 +193,7 @@ export class DatabaseService {
 
       // Recompute event_hash
       const payload = JSON.parse(evt.event_payload_json);
-      const canonicalJson = JSON.stringify(payload, Object.keys(payload).sort());
-      const hashInput = canonicalJson + evt.previous_hash;
+      const hashInput = canonicalJSON(payload) + evt.previous_hash;
       const recomputedHash = crypto.createHash('sha256').update(hashInput).digest('hex');
       if (evt.event_hash !== recomputedHash) {
         errors.push(`Event ${evt.id}: event_hash mismatch`);
@@ -269,28 +289,86 @@ export class DatabaseService {
 
   // ---- Incident Queries ----
 
+  /** IncidentRecord-compatible row from DB */
+  private static mapIncidentRow(row: any): {
+    id: string;
+    workspaceId: string;
+    runId: string;
+    incidentType: string;
+    severity: string;
+    summary: string;
+    evidenceEventIds: string[];
+    status: string;
+    createdAt: string;
+    resolvedAt?: string;
+  } {
+    return {
+      id: row.id,
+      workspaceId: row.workspace_id,
+      runId: row.run_id || '',
+      incidentType: row.incident_type,
+      severity: row.severity,
+      summary: row.summary,
+      evidenceEventIds: row.evidence_event_ids_json
+        ? JSON.parse(row.evidence_event_ids_json)
+        : [],
+      status: row.status,
+      createdAt: row.created_at,
+      resolvedAt: row.resolved_at || undefined,
+    };
+  }
+
   createIncident(incident: {
     id: string; workspaceId: string; runId?: string;
     incidentType: string; severity: string; summary: string;
     evidenceEventIds: string[];
-  }): void {
+  }): {
+    id: string;
+    workspaceId: string;
+    runId: string;
+    incidentType: string;
+    severity: string;
+    summary: string;
+    evidenceEventIds: string[];
+    status: string;
+    createdAt: string;
+    resolvedAt?: string;
+  } {
+    const now = new Date().toISOString();
     this.db.getDB().prepare(`
-      INSERT INTO incidents (id, workspace_id, run_id, incident_type, severity, summary, evidence_event_ids_json)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO incidents (id, workspace_id, run_id, incident_type, severity, summary, evidence_event_ids_json, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(incident.id, incident.workspaceId, incident.runId || null,
       incident.incidentType, incident.severity, incident.summary,
-      JSON.stringify(incident.evidenceEventIds));
+      JSON.stringify(incident.evidenceEventIds), now);
+    return this.getIncident(incident.id)!;
   }
 
-  listIncidents(workspaceId?: string): any[] {
+  getIncident(id: string): ReturnType<typeof DatabaseService.mapIncidentRow> | undefined {
+    const row = this.db.getDB().prepare(
+      'SELECT * FROM incidents WHERE id = ?'
+    ).get(id) as any;
+    return row ? DatabaseService.mapIncidentRow(row) : undefined;
+  }
+
+  listIncidents(workspaceId?: string): ReturnType<typeof DatabaseService.mapIncidentRow>[] {
+    let rows: any[];
     if (workspaceId) {
-      return this.db.getDB().prepare(
+      rows = this.db.getDB().prepare(
         'SELECT * FROM incidents WHERE workspace_id = ? ORDER BY created_at DESC'
-      ).all(workspaceId);
+      ).all(workspaceId) as any[];
+    } else {
+      rows = this.db.getDB().prepare(
+        'SELECT * FROM incidents ORDER BY created_at DESC'
+      ).all() as any[];
     }
-    return this.db.getDB().prepare(
-      'SELECT * FROM incidents ORDER BY created_at DESC'
-    ).all();
+    return rows.map(DatabaseService.mapIncidentRow);
+  }
+
+  resolveIncident(id: string): void {
+    this.db.getDB().prepare(`
+      UPDATE incidents SET status = 'resolved', resolved_at = ? WHERE id = ?
+    `).run(new Date().toISOString(), id);
   }
 
   // ---- Knowledge Base Queries ----

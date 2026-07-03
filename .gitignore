@@ -1,0 +1,47 @@
+# Node
+node_modules/
+dist/
+out/
+release/
+
+# Build artifacts
+*.js.map
+*.tsbuildinfo
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Temp files
+tmp/
+*.md~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Test coverage
+coverage/
+.nyc_output/
+
+# Electron
+ogra-desktop/out/
+ogra-desputil/release/

@@ -1,0 +1,48 @@
+name: Ogra Desktop CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ogra-desktop
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: ogra-desktop/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx eslint src/ --ext .ts,.tsx --max-warnings 50
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Audit chain verification test
+        run: npx vitest run tests/unit/audit-verifier.test.ts
+
+      - name: Security tests
+        run: npx vitest run tests/security/desktop-security.test.ts
+
+      - name: Build
+        run: npm run build

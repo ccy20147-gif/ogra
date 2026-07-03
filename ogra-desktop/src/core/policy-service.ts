@@ -46,14 +46,28 @@ export interface PolicyEvaluationInput {
   workspaceId: string;
   workspaceDefaultClassification?: DataClassification;
   dataClassification: DataClassification;
+  knowledgeBaseClassification?: DataClassification;
   providerId?: string;
   modelId?: string;
   providerIsLocal?: boolean;
+  providerDataRetentionPolicy?: 'none' | 'zero_retention' | 'limited' | 'indefinite';
+  providerTrainingOptOut?: boolean;
   requestedOperation?: string;
   requestedCompute?: 'local' | 'cloud';
   requiresCloud?: boolean;
   hasUserApproval?: boolean;
   agentId?: string;
+  /** Agent manifest as JSON string — contains capability declarations */
+  agentManifest?: string;
+  /** Agent manifest permission flags — used for agent-level policy evaluation */
+  agentPermissions?: {
+    canUseCloud: boolean;
+    canWriteToDisk: boolean;
+    canAccessNetwork: boolean;
+    allowedTools?: string[];
+  };
+  /** Specific tools the agent is requesting to use this run */
+  requestedTools?: string[];
   hasPromptInjectionWarning?: boolean;
 }
 
@@ -119,8 +133,93 @@ export class PolicyService {
     let decision: 'allow' | 'require_approval' | 'redact' | 'local_only' | 'blocked' = 'allow';
     let route = 'local';
 
+    // === Compute effective classification ===
+    // Fallback to workspaceDefaultClassification if dataClassification is unset
+    let effectiveClassification = input.dataClassification ?? input.workspaceDefaultClassification;
+    // Apply knowledgeBaseClassification as high-water mark
+    if (input.knowledgeBaseClassification) {
+      const classificationOrder: Record<string, number> = {
+        [DataClassification.Public]: 0,
+        [DataClassification.Internal]: 1,
+        [DataClassification.Confidential]: 2,
+        [DataClassification.Restricted]: 3,
+      };
+      const dataLevel = classificationOrder[effectiveClassification] ?? -1;
+      const kbLevel = classificationOrder[input.knowledgeBaseClassification] ?? -1;
+      if (kbLevel > dataLevel) {
+        effectiveClassification = input.knowledgeBaseClassification;
+        matchedRules.push({ name: 'kb-high-water-mark', reason: `Knowledge base classification ${input.knowledgeBaseClassification} elevated effective classification` });
+        reasons.push(`Using knowledge base classification ${input.knowledgeBaseClassification} as high-water mark (higher than data classification ${input.dataClassification})`);
+      }
+    }
+
+    // === Prompt injection check (blocks cloud routing if detected) ===
+    if (input.hasPromptInjectionWarning) {
+      matchedRules.push({ name: 'prompt-injection-detected', reason: 'Prompt injection warning flagged' });
+      reasons.push('Prompt injection detected: restricting to local compute');
+      if (input.requestedCompute === 'cloud' || input.requiresCloud) {
+        return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+      }
+    }
+
+    // === Agent manifest validation (checks requestedTools against manifest capabilities) ===
+    if (input.agentManifest && input.requestedTools && input.requestedTools.length > 0) {
+      try {
+        const manifest = JSON.parse(input.agentManifest);
+        const manifestTools: string[] = manifest.capabilities?.tools || manifest.tools || [];
+        if (Array.isArray(manifestTools) && manifestTools.length > 0) {
+          for (const tool of input.requestedTools) {
+            if (!manifestTools.includes(tool)) {
+              matchedRules.push({ name: 'agent-manifest-tool-blocked', reason: `Tool "${tool}" not in agent manifest capabilities` });
+              reasons.push(`Requested tool "${tool}" is not declared in agent manifest capabilities`);
+              return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+            }
+          }
+        }
+      } catch {
+        matchedRules.push({ name: 'agent-manifest-invalid', reason: 'Agent manifest JSON is malformed' });
+        reasons.push('Agent manifest is not valid JSON; blocking for safety');
+        return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+      }
+    }
+
+    // Priority 0: Agent permissions — check before data classification
+    if (input.agentPermissions) {
+      const perms = input.agentPermissions;
+
+      // Agent blocked from cloud entirely
+      if (!perms.canUseCloud && (input.requestedCompute === 'cloud' || input.requiresCloud)) {
+        matchedRules.push({ name: 'agent-no-cloud', reason: 'Agent lacks cloud permission' });
+        reasons.push(`Agent ${input.agentId || 'unknown'} is not permitted to use cloud compute`);
+        return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+      }
+
+      // Check requested tools against allowed tools list
+      if (input.requestedTools && input.requestedTools.length > 0 && perms.allowedTools) {
+        for (const tool of input.requestedTools) {
+          if (!perms.allowedTools.includes(tool)) {
+            matchedRules.push({ name: 'agent-tool-restricted', reason: `Tool "${tool}" not in agent allowlist` });
+            reasons.push(`Agent is not permitted to use tool: "${tool}"`);
+            return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+          }
+        }
+      }
+
+      // Network access requires approval
+      if (perms.canAccessNetwork && input.requestedCompute !== 'local') {
+        matchedRules.push({ name: 'agent-network-approval', reason: 'Agent network access requires approval' });
+        requiredApprovals.push('allow_agent_network');
+        if (!input.hasUserApproval) {
+          decision = 'require_approval';
+          reasons.push('Agent network access requires user approval before proceeding');
+        } else {
+          reasons.push('Agent network access approved by user');
+        }
+      }
+    }
+
     // Priority 1: Restricted / Confidential rules
-    const classification = input.dataClassification;
+    const classification = effectiveClassification;
     if (classification === DataClassification.Restricted) {
       const restrictedPolicy = this.policies.get('restricted-local-allowlist');
       if (restrictedPolicy) {
@@ -145,6 +244,13 @@ export class PolicyService {
         matchedRules.push({ name: 'confidential-local-only', reason: 'Confidential data detected' });
         reasons.push('Confidential data: local-only by default in Alpha');
         if (input.requestedCompute === 'cloud' || input.requiresCloud) {
+          // If provider is local, allow local routing instead of blocking
+          if (input.providerIsLocal) {
+            decision = 'allow';
+            route = 'local';
+            reasons.push('Confidential data with local provider: allowing local compute');
+            return { matchedRules, decision, reasons, requiredApprovals, route };
+          }
           decision = 'blocked';
           route = 'blocked';
           reasons.push('Cloud upload blocked for Confidential data in Alpha');
@@ -164,6 +270,24 @@ export class PolicyService {
         matchedRules.push({ name: 'internal-redacted-cloud', reason: 'Internal data with cloud request' });
         reasons.push('Internal data cloud request: redaction and approval required');
         if (input.hasUserApproval) {
+          // Check provider data retention policy
+          if (input.providerDataRetentionPolicy && input.providerDataRetentionPolicy !== 'zero_retention' && input.providerDataRetentionPolicy !== 'none') {
+            matchedRules.push({ name: 'provider-retention-cloud-restriction', reason: `Provider data retention policy is ${input.providerDataRetentionPolicy}` });
+            if (input.providerDataRetentionPolicy === 'indefinite') {
+              reasons.push('Provider retains data indefinitely: cloud blocked for Internal data');
+              return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+            }
+            // limited retention: require additional approval
+            reasons.push(`Provider data retention policy (${input.providerDataRetentionPolicy}) requires additional approval for cloud`);
+            requiredApprovals.push('allow_provider_retention_cloud');
+            return { matchedRules, decision: 'require_approval', reasons, requiredApprovals, route: 'blocked' };
+          }
+          // Check provider training opt-out
+          if (input.providerTrainingOptOut === false) {
+            matchedRules.push({ name: 'provider-training-cloud-restriction', reason: 'Provider may use data for training' });
+            reasons.push('Provider may use data for training: cloud blocked for Internal data');
+            return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+          }
           decision = 'allow';
           route = 'hybrid';
           reasons.push('User approval provided, redaction required before cloud');
@@ -185,6 +309,26 @@ export class PolicyService {
         matchedRules.push({ name: 'public-cloud-allowed', reason: 'Public data cloud request' });
         reasons.push('Public data: cloud allowed');
         if (input.providerId) {
+          // Check provider data retention policy even for Public data
+          if (input.providerDataRetentionPolicy === 'indefinite') {
+            matchedRules.push({ name: 'provider-retention-indefinite', reason: 'Provider retains data indefinitely' });
+            reasons.push('Provider retains data indefinitely: additional approval required');
+            requiredApprovals.push('allow_indefinite_retention_cloud');
+            if (!input.hasUserApproval) {
+              return { matchedRules, decision: 'require_approval', reasons, requiredApprovals, route: 'blocked' };
+            }
+            reasons.push('User approved indefinite retention cloud routing');
+          }
+          // Check provider training opt-out
+          if (input.providerTrainingOptOut === false) {
+            matchedRules.push({ name: 'provider-training-public-restriction', reason: 'Provider may use data for training' });
+            reasons.push('Provider may use data for training: additional approval required');
+            requiredApprovals.push('allow_training_cloud');
+            if (!input.hasUserApproval) {
+              return { matchedRules, decision: 'require_approval', reasons, requiredApprovals, route: 'blocked' };
+            }
+            reasons.push('User approved cloud routing despite training data use');
+          }
           decision = 'allow';
           route = 'cloud';
           return { matchedRules, decision, reasons, requiredApprovals, route };

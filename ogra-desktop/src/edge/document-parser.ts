@@ -130,6 +130,25 @@ export class DocumentParser {
   }> {
     const MAX_LINES_PER_CHUNK = 50;
     const MIN_LINES_PER_CHUNK = 10;
+
+    // Pre-scan: identify code block boundaries so we never split inside them
+    const inCodeBlock = new Array<boolean>(lines.length).fill(false);
+    let insideCodeBlock = false;
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].trimStart().startsWith('```')) {
+        insideCodeBlock = !insideCodeBlock;
+      }
+      inCodeBlock[i] = insideCodeBlock;
+    }
+
+    const CODE_BREAK_PATTERNS = [
+      /^\s*(export\s+)?(async\s+)?function\s+\w+/,
+      /^\s*(export\s+)?(abstract\s+)?class\s+\w+/,
+      /^\s*(export\s+)?(default\s+)?(async\s+)?(function\s*)?\(?\s*\w/,
+      /^\s*(public|private|protected)\s+(static\s+)?(async\s+)?\w+\s*\(/,
+      /^\s*\/\/\s*(region|SECTION|TODO|FIXME)/i,
+      /^\s*\/\*/,
+    ];
     const chunks: Array<{
       content: string;
       startOffset: number;
@@ -145,14 +164,33 @@ export class DocumentParser {
       const remainingLines = lines.length - currentStartLine;
       const chunkSize = Math.min(MAX_LINES_PER_CHUNK, remainingLines);
 
-      // Try to find a good break point (heading for markdown, blank line for code)
+      // Try to find a good break point
+      // Priority: headings > empty lines (for markdown) > code function/class boundaries
       let breakLine = currentStartLine + chunkSize;
       if (chunkSize >= MIN_LINES_PER_CHUNK && remainingLines > chunkSize) {
         for (let i = breakLine - 1; i > currentStartLine + MIN_LINES_PER_CHUNK; i--) {
+          // Never split inside a code block (fenced by ```)
+          if (inCodeBlock[i]) {
+            continue;
+          }
+
           const line = lines[i].trim();
-          if (line.startsWith('#') || line.startsWith('##') || line.startsWith('###') ||
-              line.startsWith('---') || line.startsWith('===') || line === '') {
-            breakLine = i + 1;
+
+          // Priority 1: Markdown heading boundaries (ATX headings, setext-style ===/---)
+          if (/^#{1,6}\s/.test(line) || line.startsWith('---') || line.startsWith('===')) {
+            breakLine = i;       // heading starts the next chunk
+            break;
+          }
+
+          // Priority 2: Empty line as a natural break
+          if (line === '') {
+            breakLine = i + 1;   // empty line stays with current chunk, next chunk starts after it
+            break;
+          }
+
+          // Priority 3: Code file break points (function/class/region declarations)
+          if (CODE_BREAK_PATTERNS.some(p => p.test(lines[i]))) {
+            breakLine = i;       // declaration starts the next chunk
             break;
           }
         }

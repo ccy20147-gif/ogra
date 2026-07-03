@@ -251,6 +251,12 @@ export interface SecretMetadata {
   lastUsedAt?: string;
 }
 
+export interface SecretCreateRequest {
+  providerId: string;
+  value: string;
+  displayName: string;
+}
+
 export interface ApprovalRequest {
   runId: string;
   approvalType: string;

@@ -73,4 +73,68 @@ export class RecipeService {
       updatedAt: row.updated_at,
     };
   }
+
+  // ---- Self-Build Process (Phase 8) ----
+
+  /**
+   * Find recipes that provide all of the requested capabilities.
+   */
+  findRecipesByCapability(workspaceId: string, requiredCapabilities: string[]): Recipe[] {
+    const all = this.listRecipes(workspaceId);
+    return all.filter(r =>
+      requiredCapabilities.every(c => r.requiredCapabilities.includes(c))
+    );
+  }
+
+  /**
+   * Analyze the gap between capabilities a task requires and
+   * what the workspace's existing agents and recipes provide.
+   */
+  analyzeCapabilityGap(
+    workspaceId: string,
+    requiredCapabilities: string[],
+    existingAgentCapabilities: string[],
+  ): {
+    missingCapabilities: string[];
+    matchingRecipes: Recipe[];
+    fillRate: number; // 0.0 to 1.0
+  } {
+    const missing = requiredCapabilities.filter(c => !existingAgentCapabilities.includes(c));
+    const matchingRecipes = this.findRecipesByCapability(workspaceId, missing);
+    const fillRate = missing.length === 0
+      ? 1.0
+      : (requiredCapabilities.length - missing.length) / requiredCapabilities.length;
+
+    return { missingCapabilities: missing, matchingRecipes, fillRate };
+  }
+
+  /**
+   * Record a self-build recommendation with user decision.
+   */
+  recordSelfBuildDecision(params: {
+    runId?: string;
+    workspaceId: string;
+    missingCapability: string;
+    candidateRecipeIds: string[];
+    candidateAgentIds: string[];
+    rationale: string;
+    decision: 'pending' | 'accepted' | 'rejected';
+  }): void {
+    const id = `sbr_${crypto.randomBytes(8).toString('hex')}`;
+    const now = new Date().toISOString();
+
+    this.db.getRawDB().prepare(`
+      INSERT INTO self_build_recommendations
+        (id, run_id, workspace_id, missing_capability,
+         candidate_recipe_ids_json, candidate_agent_ids_json,
+         rationale, decision, decided_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id, params.runId || null, params.workspaceId, params.missingCapability,
+      JSON.stringify(params.candidateRecipeIds),
+      JSON.stringify(params.candidateAgentIds),
+      params.rationale, params.decision,
+      params.decision !== 'pending' ? now : null,
+    );
+  }
 }

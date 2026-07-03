@@ -85,13 +85,13 @@ export class ProviderService {
 
   async getProvider(id: string): Promise<ProviderRecord> {
     const provider = this.providers.get(id);
-    if (!provider) throw new OgraError(OgraErrorCode.PERMISSION_DENIED, `Provider ${id} not found`);
+    if (!provider) throw new OgraError(OgraErrorCode.PROVIDER_NOT_FOUND, `Provider ${id} not found`);
     return provider;
   }
 
   async getModel(id: string): Promise<ModelRecord> {
     const model = this.models.get(id);
-    if (!model) throw new OgraError(OgraErrorCode.PERMISSION_DENIED, `Model ${id} not found`);
+    if (!model) throw new OgraError(OgraErrorCode.MODEL_NOT_FOUND, `Model ${id} not found`);
     return model;
   }
 

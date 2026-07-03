@@ -1,4 +1,5 @@
 import { OgraSecretBroker } from './secret-broker';
+import { DatabaseService } from './database-service';
 import { WorkspaceService } from './workspace-service';
 import { PathValidator } from './path-validator';
 import { KnowledgeService } from '../edge/knowledge-service';
@@ -23,6 +24,7 @@ export interface OgraCoreConfig {
  * All services are initialized here and exposed to Main process handlers.
  */
 export class OgraCore {
+  public readonly databaseService: DatabaseService;
   public readonly workspaceService: WorkspaceService;
   public readonly pathValidator: PathValidator;
   public readonly knowledgeService: KnowledgeService;
@@ -39,11 +41,12 @@ export class OgraCore {
 
   constructor(config: OgraCoreConfig) {
     this.config = config;
-    this.auditService = new AuditService();
+    this.databaseService = new DatabaseService(config.appDataDir);
+    this.auditService = new AuditService(this.databaseService);
     this.pathValidator = new PathValidator();
     this.policyService = new PolicyService(this.auditService);
     this.routeService = new RouteService(this.policyService);
-    this.workspaceService = new WorkspaceService(this.auditService);
+    this.workspaceService = new WorkspaceService(this.auditService, this.databaseService);
     this.providerService = new ProviderService(this.auditService);
     this.runService = new RunService(
       this.workspaceService,
@@ -53,7 +56,7 @@ export class OgraCore {
       config,
     );
     this.knowledgeService = new KnowledgeService(this.auditService, this.pathValidator, config);
-    this.dataSafetyService = new DataSafetyService(this.auditService, this.workspaceService);
+    this.dataSafetyService = new DataSafetyService(this.auditService, this.workspaceService, this.databaseService);
     this.governanceService = new GovernanceService(this.auditService);
   }
 

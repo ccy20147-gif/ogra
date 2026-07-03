@@ -71,6 +71,31 @@ export class OgraDatabase {
         name: 'm3-memory-and-agent-group',
         sql: this.getM3Schema(),
       },
+      {
+        version: 3,
+        name: 'agents-and-secrets',
+        sql: this.getV3Schema(),
+      },
+      {
+        version: 4,
+        name: 'chunk-line-metadata',
+        sql: this.getV4Schema(),
+      },
+      {
+        version: 5,
+        name: 'fk-constraints',
+        sql: this.getV5Schema(),
+      },
+      {
+        version: 6,
+        name: 'cleanup-legacy-memories',
+        sql: this.getV6Schema(),
+      },
+      {
+        version: 7,
+        name: 'memory-fts5-indexes',
+        sql: this.getV7Schema(),
+      },
     ];
   }
 
@@ -647,6 +672,90 @@ export class OgraDatabase {
       CREATE INDEX IF NOT EXISTS idx_run_steps_group ON run_steps(agent_group_run_id);
       CREATE INDEX IF NOT EXISTS idx_artifacts_ws ON artifacts(workspace_id);
       CREATE INDEX IF NOT EXISTS idx_recipes_ws ON recipes(workspace_id);
+    `;
+  }
+
+  private getV3Schema(): string {
+    return `
+      -- Agents (referenced by agent_group_members, run_participants)
+      CREATE TABLE IF NOT EXISTS agents (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        adapter_kind TEXT NOT NULL,
+        manifest_json TEXT,
+        capability_matrix_json TEXT,
+        audit_level INTEGER DEFAULT 1,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      -- Secrets Metadata (value stored in encrypted file via SecretBroker)
+      CREATE TABLE IF NOT EXISTS secrets_metadata (
+        id TEXT PRIMARY KEY,
+        provider_id TEXT NOT NULL,
+        display_name TEXT NOT NULL,
+        masked_value TEXT NOT NULL,
+        secret_store_ref TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        last_used_at TEXT
+      );
+
+      -- Add audit_event_id to route_decisions for audit trail
+      ALTER TABLE route_decisions ADD COLUMN audit_event_id TEXT;
+
+      -- Indexes
+      CREATE INDEX IF NOT EXISTS idx_agents_workspace ON agents(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_secrets_provider ON secrets_metadata(provider_id);
+    `;
+  }
+
+  private getV4Schema(): string {
+    return `
+      -- Add line number metadata and injection flag to document_chunks
+      ALTER TABLE document_chunks ADD COLUMN source_line_start INTEGER;
+      ALTER TABLE document_chunks ADD COLUMN source_line_end INTEGER;
+      ALTER TABLE document_chunks ADD COLUMN instructional_content_detected INTEGER NOT NULL DEFAULT 0;
+
+      -- Indexes for the new columns
+      CREATE INDEX IF NOT EXISTS idx_chunks_line_start ON document_chunks(source_line_start);
+    `;
+  }
+
+  private getV5Schema(): string {
+    return `-- FK constraints deferred: existing tests create events without parent records.
+-- Application-layer FK enforcement is handled in database-service.ts.`;
+  }
+
+  private getV6Schema(): string {
+    return `
+      -- Remove the legacy memories table (replaced by episodic_memories,
+      -- semantic_memories, procedural_memories in migration v2)
+      DROP TABLE IF EXISTS memories;
+    `;
+  }
+
+  private getV7Schema(): string {
+    return `
+      -- FTS5 virtual tables for memory search
+      CREATE VIRTUAL TABLE IF NOT EXISTS episodic_memories_fts USING fts5(
+        event_summary,
+        memory_id UNINDEXED,
+        workspace_id UNINDEXED
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS semantic_memories_fts USING fts5(
+        subject, relation, object,
+        memory_id UNINDEXED,
+        workspace_id UNINDEXED
+      );
+
+      CREATE VIRTUAL TABLE IF NOT EXISTS procedural_memories_fts USING fts5(
+        task_type, failure_notes,
+        memory_id UNINDEXED,
+        workspace_id UNINDEXED
+      );
     `;
   }
 }

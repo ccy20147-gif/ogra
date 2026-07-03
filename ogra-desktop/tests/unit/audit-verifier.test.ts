@@ -1,10 +1,8 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as path from 'path';
-import * as fs from 'fs';
-import * as os from 'os';
 import * as crypto from 'crypto';
 import { DatabaseService } from '../../src/core/database-service';
 import { DataClassification, WorkspaceType, RunEventType } from '../../src/shared/types';
+import { createTestDb } from '../helpers/test-db';
 
 /**
  * Alpha 07: Audit Verifier
@@ -18,20 +16,29 @@ import { DataClassification, WorkspaceType, RunEventType } from '../../src/share
  * - Concurrent event append preserves transaction boundaries
  */
 describe('Alpha Audit Verifier', () => {
-  const testDir = path.join(os.tmpdir(), `ogra-audit-verify-${Date.now()}`);
+  let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let wsId: string;
 
   beforeAll(() => {
-    fs.mkdirSync(testDir, { recursive: true });
-    db = new DatabaseService(testDir);
-    const ws = db.createWorkspace('Verify Test', WorkspaceType.Personal, DataClassification.Internal);
-    wsId = ws.id;
+    fixture = createTestDb();
+    db = fixture.db;
+    wsId = fixture.workspaceId;
+    // Create an agent run that all test events can reference
+    const now = new Date().toISOString();
+    db.storeRun({ id: 'verify_seq_run', workspaceId: wsId, task: 'Sequence test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_unique_run', workspaceId: wsId, task: 'Uniqueness test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_hash_run', workspaceId: wsId, task: 'Hash chain test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_tamper_run', workspaceId: wsId, task: 'Tamper test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_route_run', workspaceId: wsId, task: 'Route test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_policy_run', workspaceId: wsId, task: 'Policy test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'demo-run-001', workspaceId: wsId, task: 'Demo run', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_risk_run', workspaceId: wsId, task: 'Risk test', status: 'completed', startedAt: now, completedAt: now });
+    db.storeRun({ id: 'verify_high_risk', workspaceId: wsId, task: 'High risk test', status: 'completed', startedAt: now, completedAt: now });
   });
 
   afterAll(() => {
-    db.close();
-    fs.rmSync(testDir, { recursive: true, force: true });
+    fixture.cleanup();
   });
 
   it('should create events with monotonic sequence per run', () => {
@@ -111,9 +118,7 @@ describe('Alpha Audit Verifier', () => {
     const events = db.getRunEvents(runId);
     const firstEvent = events[0];
 
-    db.getRawDB().prepare(
-      "UPDATE run_events SET event_payload_json = '{\"data\":\"TAMPERED\"}' WHERE id = ?"
-    ).run(firstEvent.id);
+    db.updateRunEventField(firstEvent.id, 'event_payload_json', '{"data":"TAMPERED"}');
 
     // Verification should now fail
     const result = db.verifyRunChain(runId);
@@ -129,9 +134,7 @@ describe('Alpha Audit Verifier', () => {
 
     // Tamper the event_hash of the first event
     const eventA = db.getRunEvents(runId)[0];
-    db.getRawDB().prepare(
-      "UPDATE run_events SET event_hash = 'tampered_hash_0000000000000000000' WHERE id = ?"
-    ).run(eventA.id);
+    db.updateRunEventField(eventA.id, 'event_hash', 'tampered_hash_0000000000000000000');
 
     const result = db.verifyRunChain(runId);
     expect(result.valid).toBe(false);

@@ -33,6 +33,13 @@ export class PathValidator {
 
   validateImportPath(importPath: string): PathValidationResult {
     try {
+      // Check path traversal BEFORE any normalization — normalise() resolves ..
+      // so it can't detect traversal. Check the raw input instead.
+      const forwardNormalized = importPath.replace(/\\/g, '/');
+      if (forwardNormalized.includes('..') || importPath.includes('..')) {
+        return { isValid: false, reason: 'Path traversal detected (.. not allowed)' };
+      }
+
       // Check path exists
       if (!fs.existsSync(importPath)) {
         return { isValid: false, reason: 'Path does not exist' };
@@ -43,22 +50,17 @@ export class PathValidator {
         return { isValid: false, reason: 'Path is not a directory' };
       }
 
-      // Resolve canonical path
+      // Resolve canonical path (resolves symlinks and normalizes)
       const canonical = this.resolveCanonical(importPath);
       if (!canonical) {
         return { isValid: false, reason: 'Cannot resolve canonical path' };
       }
 
-      // Symlink escape detection: check if realpath differs from original
-      const realPath = fs.realpathSync(importPath);
-      if (realPath !== canonical && importPath !== realPath) {
+      // Symlink escape detection: realpath resolves symlinks; if the resolved
+      // canonical path points outside the original path's expected location,
+      // flag it. Also catches symlink-to-symlink chains.
+      if (canonical !== path.resolve(importPath)) {
         return { isValid: false, reason: 'Symlink escape detected' };
-      }
-
-      // Path traversal check
-      const normalized = path.normalize(importPath);
-      if (normalized.includes('..')) {
-        return { isValid: false, reason: 'Path traversal detected' };
       }
 
       return {

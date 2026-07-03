@@ -104,7 +104,8 @@ export class MemoryService {
       }
       return { allowed: true };
     } catch {
-      return { allowed: true }; // Fail open for memory writes in Alpha
+      console.warn(`[MemoryService] Policy check failed for workspace ${workspaceId}, memory type ${memoryType} — Policy service unavailable, failing closed`);
+      return { allowed: false, reason: 'Policy service unavailable' };
     }
   }
 
@@ -151,6 +152,12 @@ export class MemoryService {
       VALUES (@id, @workspace_id, @event_summary, @occurred_at,
         @participating_agent_ids_json, @source_run_id, @source_file_ids_json,
         @source_route_decision_id, @source_event_ids_json, @confidence, @scope, @created_at)
+    `).run(row);
+
+    // Index into FTS5 for full-text search
+    this.db.getRawDB().prepare(`
+      INSERT INTO episodic_memories_fts (event_summary, memory_id, workspace_id)
+      VALUES (@event_summary, @id, @workspace_id)
     `).run(row);
 
     this.recordMemoryAccess({
@@ -210,6 +217,12 @@ export class MemoryService {
         source_run_id, source_file_ids_json, confidence, user_confirmed, scope, created_at, updated_at)
       VALUES (@id, @workspace_id, @subject, @relation, @object,
         @source_run_id, @source_file_ids_json, @confidence, @user_confirmed, @scope, @created_at, @updated_at)
+    `).run(row);
+
+    // Index into FTS5 for full-text search
+    this.db.getRawDB().prepare(`
+      INSERT INTO semantic_memories_fts (subject, relation, object, memory_id, workspace_id)
+      VALUES (@subject, @relation, @object, @id, @workspace_id)
     `).run(row);
 
     this.recordMemoryAccess({
@@ -279,6 +292,12 @@ export class MemoryService {
         @user_confirmed, @scope, @created_at, @updated_at)
     `).run(row);
 
+    // Index into FTS5 for full-text search
+    this.db.getRawDB().prepare(`
+      INSERT INTO procedural_memories_fts (task_type, failure_notes, memory_id, workspace_id)
+      VALUES (@task_type, @failure_notes, @id, @workspace_id)
+    `).run(row);
+
     this.recordMemoryAccess({
       memoryId: id,
       memoryType: 'procedural',
@@ -301,6 +320,143 @@ export class MemoryService {
   }
 
   // ---- Generic Memory Operations ----
+
+  /**
+   * Search memories across all types using FTS5 full-text search.
+   */
+  searchMemories(workspaceId: string, query: string, limit = 10): Array<{
+    type: 'episodic' | 'semantic' | 'procedural';
+    memory: EpisodicMemory | SemanticMemory | ProceduralMemory;
+    score: number;
+  }> {
+    const results: Array<{
+      type: 'episodic' | 'semantic' | 'procedural';
+      memory: any;
+      score: number;
+    }> = [];
+
+    if (!query.trim()) return results;
+
+    // Build FTS5 query: escape special characters, treat each word as prefix search
+    const ftsQuery = query
+      .replace(/["()*^~:\-+]/g, ' ')
+      .split(/\s+/)
+      .filter(Boolean)
+      .map(w => `"${w}"*`)
+      .join(' ');
+
+    // Search episodic memories via FTS5
+    const episodicRows = this.db.getRawDB().prepare(`
+      SELECT em.*, fts.rank
+      FROM episodic_memories_fts fts
+      JOIN episodic_memories em ON em.id = fts.memory_id
+      WHERE fts.event_summary MATCH ?
+        AND em.workspace_id = ?
+        AND em.deleted_at IS NULL
+      ORDER BY fts.rank
+      LIMIT ?
+    `).all(ftsQuery, workspaceId, limit) as any[];
+    for (const row of episodicRows) {
+      results.push({ type: 'episodic', memory: this.toEpisodic(row), score: 1.0 / (1.0 + row.rank) });
+    }
+
+    // Search semantic memories via FTS5 (confirmed only)
+    const semanticRows = this.db.getRawDB().prepare(`
+      SELECT sm.*, fts.rank
+      FROM semantic_memories_fts fts
+      JOIN semantic_memories sm ON sm.id = fts.memory_id
+      WHERE fts MATCH ?
+        AND sm.workspace_id = ?
+        AND sm.user_confirmed = 1
+        AND sm.deleted_at IS NULL
+      ORDER BY fts.rank
+      LIMIT ?
+    `).all(ftsQuery, workspaceId, limit) as any[];
+    for (const row of semanticRows) {
+      results.push({ type: 'semantic', memory: this.toSemantic(row), score: 1.0 / (1.0 + row.rank) });
+    }
+
+    // Search procedural memories via FTS5 (confirmed only)
+    const proceduralRows = this.db.getRawDB().prepare(`
+      SELECT pm.*, fts.rank
+      FROM procedural_memories_fts fts
+      JOIN procedural_memories pm ON pm.id = fts.memory_id
+      WHERE fts MATCH ?
+        AND pm.workspace_id = ?
+        AND pm.user_confirmed = 1
+        AND pm.deleted_at IS NULL
+      ORDER BY fts.rank
+      LIMIT ?
+    `).all(ftsQuery, workspaceId, limit) as any[];
+    for (const row of proceduralRows) {
+      results.push({ type: 'procedural', memory: this.toProcedural(row), score: 1.0 / (1.0 + row.rank) });
+    }
+
+    // Sort by score descending (higher = better match), limit total
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, limit);
+  }
+
+  /**
+   * Read a specific memory by ID across all memory types.
+   */
+  readMemory(id: string): {
+    type: 'episodic' | 'semantic' | 'procedural';
+    memory: EpisodicMemory | SemanticMemory | ProceduralMemory;
+  } | null {
+    // Try episodic
+    const epRow = this.db.getRawDB().prepare(
+      'SELECT * FROM episodic_memories WHERE id = ? AND deleted_at IS NULL'
+    ).get(id) as any;
+    if (epRow) return { type: 'episodic', memory: this.toEpisodic(epRow) };
+
+    // Try semantic
+    const semRow = this.db.getRawDB().prepare(
+      'SELECT * FROM semantic_memories WHERE id = ? AND deleted_at IS NULL'
+    ).get(id) as any;
+    if (semRow) return { type: 'semantic', memory: this.toSemantic(semRow) };
+
+    // Try procedural
+    const procRow = this.db.getRawDB().prepare(
+      'SELECT * FROM procedural_memories WHERE id = ? AND deleted_at IS NULL'
+    ).get(id) as any;
+    if (procRow) return { type: 'procedural', memory: this.toProcedural(procRow) };
+
+    return null;
+  }
+
+  /**
+   * Get relevant memories formatted as context text for prompt injection.
+   * This is what the pipeline calls to inject memories into model context.
+   */
+  getRelevantMemories(workspaceId: string, taskContext: string, maxMemories = 5): string {
+    const results = this.searchMemories(workspaceId, taskContext, maxMemories);
+    if (results.length === 0) return '';
+
+    const lines: string[] = ['[Memory Context from Previous Runs]'];
+    for (const { type, memory } of results) {
+      switch (type) {
+        case 'episodic': {
+          const ep = memory as EpisodicMemory;
+          lines.push(`- [Episode] ${ep.eventSummary} (confidence: ${ep.confidence})`);
+          break;
+        }
+        case 'semantic': {
+          const sem = memory as SemanticMemory;
+          lines.push(`- [Knowledge] ${sem.subject} ${sem.relation} ${sem.object} (confidence: ${sem.confidence})`);
+          break;
+        }
+        case 'procedural': {
+          const proc = memory as ProceduralMemory;
+          const toolchain = proc.toolchain?.join(', ') || '';
+          lines.push(`- [Procedure] For task type "${proc.taskType}": use tools [${toolchain}]`);
+          if (proc.failureNotes) lines.push(`  Note: ${proc.failureNotes}`);
+          break;
+        }
+      }
+    }
+    return lines.join('\n');
+  }
 
   async deleteMemory(type: 'episodic' | 'semantic' | 'procedural', id: string): Promise<void> {
     const table = type === 'episodic' ? 'episodic_memories'

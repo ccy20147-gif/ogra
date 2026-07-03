@@ -6,6 +6,8 @@ import { AuditService } from './audit-service';
 export interface RouteDecisionRecord {
   id: string;
   runId: string;
+  /** The task/query the user submitted — used for audit trail */
+  taskId: string;
   route: string;
   dataClassification: DataClassification;
   highWaterSources: string[];
@@ -15,6 +17,10 @@ export interface RouteDecisionRecord {
   requiresUserApproval: boolean;
   approvalId?: string;
   policyEvaluationId?: string;
+  /** SHA-256 hash of the policy set used for this evaluation */
+  policyVersionHash: string;
+  /** Which adapter should execute this route — set by evaluateRoute */
+  assignedAdapter?: 'internal' | 'local_command' | 'cloud' | 'none';
   providerId?: string;
   modelId?: string;
   cloudPayloadSummary?: string;
@@ -41,23 +47,35 @@ export class RouteService {
 
     // Determine route type
     let route: string;
+    let assignedAdapter: RouteDecisionRecord['assignedAdapter'];
     switch (policyResult.decision) {
       case 'blocked':
         route = RouteDecisionType.Blocked;
+        assignedAdapter = 'none';
         break;
       case 'local_only':
         route = RouteDecisionType.Local;
+        assignedAdapter = 'internal';
         break;
       case 'require_approval':
         route = RouteDecisionType.Blocked;
+        assignedAdapter = 'none';
         break;
       case 'allow':
-        if (policyResult.route === 'cloud') route = RouteDecisionType.Cloud;
-        else if (policyResult.route === 'hybrid') route = RouteDecisionType.Hybrid;
-        else route = RouteDecisionType.Local;
+        if (policyResult.route === 'cloud') {
+          route = RouteDecisionType.Cloud;
+          assignedAdapter = 'cloud';
+        } else if (policyResult.route === 'hybrid') {
+          route = RouteDecisionType.Hybrid;
+          assignedAdapter = 'internal'; // internal adapter orchestrates hybrid
+        } else {
+          route = RouteDecisionType.Local;
+          assignedAdapter = 'internal';
+        }
         break;
       default:
         route = RouteDecisionType.Local;
+        assignedAdapter = 'internal';
     }
 
     // Build steps
@@ -77,13 +95,16 @@ export class RouteService {
     const decision: RouteDecisionRecord = {
       id: `rd_${uuidv4().slice(0, 8)}`,
       runId,
+      taskId: '', // Set by caller when task is known
       route,
+      assignedAdapter,
       dataClassification: input.dataClassification,
       highWaterSources: [],
       reasons: policyResult.reasons,
       localSteps,
       cloudSteps,
       requiresUserApproval: policyResult.requiredApprovals.length > 0,
+      policyVersionHash: this.policyService.getPolicyVersionHash(),
       providerId: input.providerId,
       modelId: input.modelId,
       incidentIds: [],

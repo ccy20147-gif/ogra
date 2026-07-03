@@ -29,8 +29,31 @@ export class OgraSecretBroker {
 
   constructor(appDataDir: string) {
     this.secretsFile = path.join(appDataDir, 'secrets', 'secrets.enc.json');
-    // Derive a stable encryption key from the app data dir (unique per machine)
-    this.encryptionKey = crypto.createHash('sha256').update(`ogra-secret-key:${appDataDir}`).digest();
+    // Use a randomly generated encryption key stored alongside the secrets file.
+    // On first run, a new 32-byte key is generated and persisted with strict
+    // file permissions (0600). This is more secure than deriving from a known
+    // path, as an attacker must read the key file to decrypt secrets.
+    // Production should use Electron safeStorage / OS keychain.
+    this.encryptionKey = this.loadOrCreateEncryptionKey(appDataDir);
+  }
+
+  private loadOrCreateEncryptionKey(appDataDir: string): Buffer {
+    const keyDir = path.join(appDataDir, 'secrets');
+    const keyFile = path.join(keyDir, 'key.bin');
+    try {
+      if (fs.existsSync(keyFile)) {
+        return fs.readFileSync(keyFile);
+      }
+    } catch {
+      // Corrupted key file — fall through to create a new one
+    }
+    // Generate a new random 32-byte AES-256 key
+    const newKey = crypto.randomBytes(32);
+    if (!fs.existsSync(keyDir)) {
+      fs.mkdirSync(keyDir, { recursive: true });
+    }
+    fs.writeFileSync(keyFile, newKey, { mode: 0o600 });
+    return newKey;
   }
 
   private ensureLoaded(): void {
