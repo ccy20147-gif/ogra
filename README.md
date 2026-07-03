@@ -97,11 +97,32 @@ Import sensitive folder
 .
 ├── README.md
 ├── AGENTS.md
+├── docs/
+│   ├── plans/
+│   │   ├── 00-development-requirements-index.md
+│   │   ├── 01-desktop-runtime-foundation.md
+│   │   ├── 02-local-data-audit-governance-store.md
+│   │   ├── 03-policy-routing-safety-engine.md
+│   │   ├── 04-rag-knowledge-engine.md
+│   │   ├── 05-model-agent-orchestration.md
+│   │   ├── 06-application-ui-ux.md
+│   │   ├── 07-verification-packaging-release-gates.md
+│   │   └── 08-memory-agentgroup-recipes-v1-requirements.md
+│   └── prd/
+│       └── 01-ogra-alpha-requirements.md
 ├── ogra-product-handbook.md
 └── archive/
     ├── orga-product-doc.md
     └── orga-edge-whitepaper.md
 ```
+
+## Development Requirements
+
+The active implementation planning documents are under [docs/plans](docs/plans/), starting with:
+
+- [docs/plans/00-development-requirements-index.md](docs/plans/00-development-requirements-index.md)
+
+These plans replace the earlier Alpha demo task breakdown. They are organized by product and architecture layer: desktop runtime, local data/audit/governance store, policy/routing/safety, RAG, model and Agent orchestration, UI/UX, verification/release gates, and Beta/v1 memory/Agent Group/recipes/interoperability completion.
 
 ## Repository Status
 

@@ -1,0 +1,25 @@
+VENDOR_PAYMENTS_LOG
+===================
+Date: 2026-Q2
+Prepared by: AP Department
+
+VENDOR_PAYMENTS Q2 2026
+========================
+Vendor ID, Vendor Name, Amount, Date, Invoice #
+-----------------------------------------------
+V001,    Acme Corp,        $125,000.00, 2026-04-15, INV-2026-401
+V002,    Beta Inc,         $68,500.00,  2026-04-22, INV-2026-402
+V003,    XYZ Corp,         $210,000.00, 2026-04-30, INV-2026-403
+V004,    Delta LLC,        $45,200.00,  2026-05-05, INV-2026-404
+V003,    XYZ Corp,         $195,000.00, 2026-05-12, INV-2026-405
+V001,    Acme Corp,        $88,000.00,  2026-05-20, INV-2026-406
+V003,    XYZ Corp,         $225,000.00, 2026-05-28, INV-2026-407
+V005,    Gamma Services,   $32,000.00,  2026-06-02, INV-2026-408
+V003,    XYZ Corp,         $217,000.00, 2026-06-10, INV-2026-409
+V002,    Beta Inc,         $95,000.00,  2026-06-18, INV-2026-410
+
+TOTAL Q2 2026: $1,300,700.00
+TOTAL Q1 2026: $850,200.00
+INCREASE: 53%
+
+CONFIDENTIAL - FINANCE DEPARTMENT ONLY

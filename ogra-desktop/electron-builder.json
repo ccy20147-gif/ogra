@@ -1,0 +1,22 @@
+{
+  "appId": "dev.ogra.desktop",
+  "productName": "Ogra Desktop",
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist-electron/**/*",
+    "dist/renderer/**/*"
+  ],
+  "mac": {
+    "target": "dmg",
+    "category": "public.app-category.productivity"
+  },
+  "win": {
+    "target": "nsis"
+  },
+  "linux": {
+    "target": "AppImage",
+    "category": "Office"
+  }
+}
