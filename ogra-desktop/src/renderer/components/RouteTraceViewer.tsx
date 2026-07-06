@@ -13,6 +13,20 @@ interface RouteTraceProps {
   modelId?: string;
   cloudPayloadHash?: string;
   createdAt: string;
+  /**
+   * Explicit cloud-call status from the route decision. Spec §7 requires the
+   * trace viewer to distinguish four states:
+   *   - 'no_cloud_needed'         — no cloud call was needed.
+   *   - 'cloud_blocked'           — cloud call was blocked by policy.
+   *   - 'cloud_ogra_controlled'   — cloud call happened through an Ogra-controlled adapter.
+   *   - 'unverifiable_outside'    — Ogra cannot prove activity outside its controlled adapters.
+   * If omitted, the value is derived from the `route` and `cloudSteps`/`localSteps` fields.
+   */
+  cloudCallStatus?:
+    | 'no_cloud_needed'
+    | 'cloud_blocked'
+    | 'cloud_ogra_controlled'
+    | 'unverifiable_outside';
   events?: Array<{
     eventType: string;
     eventPayload: Record<string, unknown>;
@@ -46,7 +60,48 @@ const routeColors: Record<string, string> = {
   blocked: '#da3633',
 };
 
+/**
+ * Maps the spec §7 four cloud-call states to a colour, label, and description
+ * so the trace viewer can render the appropriate badge.
+ */
+const CLOUD_CALL_STATE_META: Record<string, { color: string; label: string; description: string }> = {
+  no_cloud_needed: {
+    color: '#238636',
+    label: 'No cloud call was needed',
+    description: 'All steps ran locally. Ogra made no outbound calls through any adapter.',
+  },
+  cloud_blocked: {
+    color: '#da3633',
+    label: 'Cloud call was blocked',
+    description: 'A cloud call was attempted but blocked by policy or classification.',
+  },
+  cloud_ogra_controlled: {
+    color: '#1f6feb',
+    label: 'Cloud call through Ogra-controlled adapter',
+    description: 'Ogra brokered this call through one of its controlled adapters and recorded the payload hash.',
+  },
+  unverifiable_outside: {
+    color: '#d29922',
+    label: 'Activity outside Ogra-controlled adapters is unverifiable',
+    description: 'Ogra cannot prove activity performed outside its controlled adapters (manual copy/paste, screenshots, provider-side retention, other local processes, etc.).',
+  },
+};
+
+/** Derive a cloud-call state from the route-decision fields when not supplied. */
+function deriveCloudCallStatus(trace: RouteTraceProps): keyof typeof CLOUD_CALL_STATE_META {
+  if (trace.cloudCallStatus) return trace.cloudCallStatus;
+  if (trace.route === 'blocked') return 'cloud_blocked';
+  const hasCloud = (trace.cloudSteps?.length || 0) > 0;
+  if (hasCloud && trace.providerId) return 'cloud_ogra_controlled';
+  if (trace.route === 'cloud') return 'cloud_ogra_controlled';
+  if (trace.route === 'hybrid') return 'unverifiable_outside';
+  return 'no_cloud_needed';
+}
+
 export const RouteTraceViewer: React.FC<{ trace: RouteTraceProps }> = ({ trace }) => {
+  const cloudStatus = deriveCloudCallStatus(trace);
+  const cloudMeta = CLOUD_CALL_STATE_META[cloudStatus];
+
   return (
     <div style={{
       backgroundColor: '#161b22',
@@ -78,6 +133,47 @@ export const RouteTraceViewer: React.FC<{ trace: RouteTraceProps }> = ({ trace }
           {trace.route}
         </span>
         <span style={{ color: '#8b949e' }}>ID: {trace.runId.slice(0, 16)}...</span>
+      </div>
+
+      {/* Cloud-call status (spec §7) — distinguishes the four required states. */}
+      <div
+        role="status"
+        aria-label={`Cloud call status: ${cloudMeta.label}`}
+        style={{
+          marginBottom: '12px',
+          padding: '10px 12px',
+          backgroundColor: '#0d1117',
+          border: `1px solid ${cloudMeta.color}`,
+          borderLeft: `4px solid ${cloudMeta.color}`,
+          borderRadius: '6px',
+        }}
+      >
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          marginBottom: '4px',
+        }}>
+          <span style={{
+            width: '10px',
+            height: '10px',
+            borderRadius: '50%',
+            backgroundColor: cloudMeta.color,
+            flexShrink: 0,
+          }} />
+          <span style={{
+            color: cloudMeta.color,
+            fontWeight: 600,
+            fontSize: '12px',
+            textTransform: 'uppercase',
+            letterSpacing: '0.5px',
+          }}>
+            {cloudMeta.label}
+          </span>
+        </div>
+        <div style={{ fontSize: '11px', color: '#8b949e', lineHeight: 1.5 }}>
+          {cloudMeta.description}
+        </div>
       </div>
 
       {/* Reasons */}

@@ -93,15 +93,14 @@ export class PipelineOrchestrator {
       task: config.task,
       steps: config.steps.map(s => ({ agentId: s.agentId, role: s.role })),
     });
-
-    this.running.set(groupRunId, 'running');
+    this.running.set(groupRunId, PipelineStatus.Running);
     const stepResults: StepResult[] = [];
 
     try {
       for (let i = 0; i < Math.min(config.steps.length, maxSteps); i++) {
-        if (this.running.get(groupRunId) === 'cancelled') break; // Cancelled
+        if (this.running.get(groupRunId) === PipelineStatus.Cancelled) break; // Cancelled
         // Wait if paused (in a real implementation this would await a signal)
-        if (this.running.get(groupRunId) === 'paused') {
+        if (this.running.get(groupRunId) === PipelineStatus.Paused) {
           // Pause: skip remaining steps — could await a resume signal in production
           break;
         }
@@ -295,7 +294,7 @@ export class PipelineOrchestrator {
   }
 
   cancelPipeline(groupRunId: string): void {
-    this.running.set(groupRunId, 'cancelled');
+    this.running.set(groupRunId, PipelineStatus.Cancelled);
     this.db.getRawDB().prepare(
       "UPDATE agent_group_runs SET status = 'cancelled', completed_at = datetime('now') WHERE id = ?"
     ).run(groupRunId);
@@ -303,8 +302,8 @@ export class PipelineOrchestrator {
 
   pausePipeline(groupRunId: string): void {
     const state = this.running.get(groupRunId);
-    if (state === 'running') {
-      this.running.set(groupRunId, 'paused');
+    if (state === PipelineStatus.Running) {
+      this.running.set(groupRunId, PipelineStatus.Paused);
       this.db.getRawDB().prepare(
         "UPDATE agent_group_runs SET status = 'paused' WHERE id = ?"
       ).run(groupRunId);
@@ -313,8 +312,8 @@ export class PipelineOrchestrator {
 
   resumePipeline(groupRunId: string): void {
     const state = this.running.get(groupRunId);
-    if (state === 'paused') {
-      this.running.set(groupRunId, 'running');
+    if (state === PipelineStatus.Paused) {
+      this.running.set(groupRunId, PipelineStatus.Running);
       this.db.getRawDB().prepare(
         "UPDATE agent_group_runs SET status = 'running' WHERE id = ?"
       ).run(groupRunId);
@@ -370,12 +369,13 @@ export class PipelineOrchestrator {
       steps: config.steps.map(s => ({ agentId: s.agentId, role: s.role })),
     });
 
-    this.running.set(groupRunId, 'running');
+    this.running.set(groupRunId, PipelineStatus.Running);
     const stepsToRun = config.steps.slice(0, maxSteps);
 
     // Check for cancellation / pause / timeout / token limit before starting
-    if (this.running.get(groupRunId) === 'cancelled' ||
-        this.running.get(groupRunId) === 'paused' ||
+    if (this.running.get(groupRunId) === PipelineStatus.Cancelled ||
+        this.running.get(groupRunId) === PipelineStatus.Paused ||
+        this.running.get(groupRunId) === PipelineStatus.Failed ||
         Date.now() - startTime > maxDurationMs ||
         totalTokensUsed >= maxTokens) {
       this.db.getRawDB().prepare(
@@ -599,11 +599,11 @@ export class PipelineOrchestrator {
       rounds,
     });
 
-    this.running.set(groupRunId, 'running');
+    this.running.set(groupRunId, PipelineStatus.Running);
 
     // Check for cancellation / pause before starting
-    if (this.running.get(groupRunId) === 'cancelled' ||
-        this.running.get(groupRunId) === 'paused') {
+    if (this.running.get(groupRunId) === PipelineStatus.Cancelled ||
+        this.running.get(groupRunId) === PipelineStatus.Paused) {
       this.db.getRawDB().prepare(
         "UPDATE agent_group_runs SET status = 'completed', completed_at = datetime('now') WHERE id = ?"
       ).run(groupRunId);

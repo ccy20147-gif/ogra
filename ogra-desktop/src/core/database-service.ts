@@ -65,7 +65,7 @@ export class DatabaseService {
    * Direct DB manipulation bypasses validation, audit, and FK constraints.
    * Only use for migration bootstrap or test cleanup.
    */
-  getRawDB() {
+  getRawDB(): any {
     return this.db.getDB();
   }
 
@@ -486,6 +486,14 @@ export class DatabaseService {
 
   // ---- Agent Run Queries ----
 
+  /**
+   * Insert a new run record. MUST NOT silently overwrite an existing run —
+   * run evidence (task, started_at) is append-only-by-intent.
+   *
+   * For status updates on an existing run, use updateRunStatus() instead.
+   * This method will throw on conflict to prevent accidental overwrite
+   * of run evidence (e.g. on retry, replay, or ID collision).
+   */
   storeRun(run: {
     id: string;
     workspaceId: string;
@@ -497,9 +505,6 @@ export class DatabaseService {
     this.db.getDB().prepare(`
       INSERT INTO agent_runs (id, workspace_id, task, status, started_at, completed_at)
       VALUES (?, ?, ?, ?, ?, ?)
-      ON CONFLICT(id) DO UPDATE SET
-        status = excluded.status,
-        completed_at = excluded.completed_at
     `).run(run.id, run.workspaceId, run.task, run.status, run.startedAt, run.completedAt || null);
   }
 

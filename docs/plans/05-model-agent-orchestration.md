@@ -123,29 +123,119 @@ If no acceptable model is available, the run MUST become blocked with a user-vis
 
 ## 5. InternalAgentAdapter
 
-Alpha MUST implement only `InternalAgentAdapter`.
+Alpha MUST implement the InternalAgentAdapter as a **Plan + ReAct + strong-persistence engine** with an integrated sanitize/policy/route/audit middleware chain. This is the Alpha execution engine; the previous single-shot executor is no longer sufficient.
 
-Responsibilities:
+### 5.1 Execution Model
 
-- accept a bounded user task.
-- retrieve context through RAG service.
-- invoke policy and router before context assembly and model call.
-- assemble prompt with untrusted context separation.
-- invoke selected model adapter.
-- record participating agent.
-- record accessed files/chunks.
-- record model call.
-- record route decision and run events.
-- return structured result to UI.
+The runtime is a persistent, self-directed task execution engine. Every action in the ReAct loop passes through a mandatory middleware chain that the agent cannot bypass:
 
-InternalAgentAdapter MUST default to:
+```
+Agent decides Action
+  -> [Sanitize] strip sensitive fields from action payload
+  -> [Policy Eval] does this action violate any policy?
+     -> allowed: continue
+     -> require_approval: pause, request user approval
+     -> blocked: record incident, return error to agent
+  -> [Route] if action touches external endpoint:
+     -> local: execute directly
+     -> cloud: apply egress policy (approve / log / auto-filter)
+     -> hybrid: split into local phase + cloud phase
+  -> [Pre-Audit] record action intent before execution
+  -> [Execute] perform the actual action
+  -> [Ingress Review] if result came from external source:
+     -> scan for injection via Ingress Review Agent
+     -> apply ingress policy (approve / log / auto-filter)
+  -> [Post-Audit] record action result and evidence hash
+  -> Return result to agent's Observation
+```
+
+Key design decisions:
+
+- Middleware is enforced at the runtime level, not the agent level. The agent cannot choose to skip sanitization "for performance."
+- Sanitization is automatic and deterministic. The agent does not manually call a sanitize function; the runtime intercepts any payload destined for external consumption and applies redaction rules automatically.
+- Pre-audit before execution, post-audit after. This creates a verifiable hash chain: intent hash -> execution -> result hash.
+
+### 5.2 Plan Phase
+
+The agent first produces a structured execution plan:
+
+```
+Input: user task + available capabilities
+Output: Plan { steps: Step[], estimatedTokens: number, riskLevel: string }
+
+Each Step:
+  - id, goal, actionType (retrieve | generate | review | execute | delegate)
+  - requiredCapabilities: string[]
+  - expectedOutput: schema description
+  - routePreference: local | cloud | hybrid
+  - dependencies: stepId[] (for DAG execution)
+  - retryPolicy: { maxRetries, backoff, fallbackAction }
+```
+
+The planner is a local LLM call with structured output. It does NOT see raw user data; it only sees task abstracts and capability declarations. This keeps the planner cheap (can run on a local 7B model) and safe (no data leakage risk).
+
+### 5.3 Execute Phase (ReAct Loop)
+
+Each step executes as a ReAct loop:
+
+```
+Thought -> Action -> Observation -> Thought -> Action -> ... -> Final Answer
+```
+
+The action space includes:
+
+- `retrieve(kbId, query)` — local RAG retrieval.
+- `generate(prompt)` — local model generation.
+- `delegate(agentId, sanitizedTask)` — delegate to another agent (local or cloud).
+- `execute(code, runtime)` — run code in local sandbox.
+- `read_file(path)` — read local file (policy-gated).
+- `write_file(path, content)` — write local file (policy-gated, approval-gated).
+- `ask_user(question)` — request clarification from user.
+- `use_skill(skillId, params)` — invoke a registered skill (see §9).
+- `complete(result)` — declare step finished.
+
+Every action passes through the middleware chain in §5.1.
+
+### 5.4 Strong Persistence and Recovery
+
+Every agent state transition is durably persisted in `run_step_actions` and `run_events`. The agent can survive a crash, restart, or user interruption and resume exactly where it left off. Persisted per step:
+
+- step status: pending | planning | executing | awaiting_approval | completed | failed.
+- current ReAct iteration: { thought, action, observation }.
+- accumulated context: retrieved chunks, previous step outputs.
+- intermediate artifacts: partial code, draft reports.
+- route decisions: one per delegate/external call.
+- audit events: append-only event log.
+
+Persisted per run:
+
+- plan snapshot (immutable after plan phase).
+- high-water mark (recomputed on every new data access).
+- token budget consumed / remaining.
+- elapsed time / remaining.
+
+Recovery semantics on resume:
+
+1. Load persisted state, find last in-progress step.
+2. If step is `awaiting_approval`, re-prompt user.
+3. If step is `executing` with partial ReAct state, resume from last Observation.
+4. If step is `failed` with retries remaining, retry with backoff.
+5. If step is `completed`, advance to next step.
+6. Re-run policy evaluation on restored context (high-water mark may have changed).
+
+### 5.5 Default Permissions
+
+The InternalAgentAdapter MUST default to:
 
 - read-only workspace RAG.
 - no shell.
 - no arbitrary network.
-- no clipboard/browser/MCP/A2A access.
+- no clipboard/browser access.
+- MCP and A2A access is disabled in Alpha for the InternalAgentAdapter (v1.0 is the earliest phase for safe MCP and A2A delegation through policy).
 - no cross-workspace access.
 - no direct secret access.
+- read only approved workspace RAG chunks.
+- write only run events and optional episodic run summary.
 
 ## 6. Run Lifecycle
 
@@ -153,78 +243,80 @@ Every run MUST follow:
 
 ```text
 created
+  -> plan
   -> policy_precheck
   -> retrieval
   -> context_policy_check
   -> route_decision
   -> risk_classified
+  -> redaction_engine_invoked
   -> redaction_preview_required | approval_required | blocked | payload_hash_recorded
-  -> approval_decision
+  -> approval_decision (Approve-then-Egress)
+  -> re_sanitize_loop (if rejected, see 03 §3.6)
   -> model_invocation
+  -> ingress_review
+  -> ingress_decision
   -> model_call_recorded
+  -> egress_record_recorded
   -> cloud_call_ledger_updated
   -> final_output
   -> audit_complete
 ```
 
-Each transition MUST emit a run event.
+Within each step, the InternalAgentAdapter runs a ReAct loop with the middleware chain in §5.1. Each ReAct action and each lifecycle transition MUST emit a run event. ReAct iteration persistence uses `run_step_actions` and is transactional with the corresponding `run_events` row.
 
 Runs MUST support:
 
 - status fetch.
-- cancellation.
-- timeout.
+- cancellation (per-iteration for scheduled/continuous runs; mid-iteration for one-shot runs).
+- timeout (per-iteration and lifetime-level for scheduled/continuous runs).
 - structured errors.
 - route trace fetch.
 - evidence fetch.
 
 ## 7. Agent Group Requirements
 
-Agent Group is the v1.0 main work surface. This section defines the orchestration layer; detailed data/UI/release requirements are in [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
+Agent Group is the Alpha main work surface. This section defines the orchestration layer; detailed data/UI/release requirements are in [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
 
-### Alpha
+### 7.1 Modes (Alpha)
 
-Alpha MUST NOT build free-form multi-agent collaboration.
+Alpha MUST support all three Agent Group modes:
 
-Alpha MUST define data types or migration-compatible placeholders for future:
+- **Pipeline** — `Research -> Draft -> Review`. Each step is policy-checked, route-checked, and audited. Per-step permissions apply. Bounded by `max_steps`, `max_tokens`, `max_duration`.
+- **Parallel** — multiple agents run concurrently and a deterministic Merge step combines their outputs. Each parallel branch is its own bounded run with policy and audit. The Merge step is itself an agent with the same middleware chain.
+- **Debate** — multiple agents run adversarially; a Judge step converges on a final answer. Each round is bounded; the Judge step is itself an agent with the same middleware chain.
 
-- agent.
-- agent group.
-- group run.
-- run step.
+All three modes MUST preserve:
 
-Only one InternalAgentAdapter participates in a run.
+- bounded runs.
+- per-step policy checks.
+- per-step route decisions.
+- per-step audit events.
+- re-sanitize loop on the Approve-then-Egress tier.
+- ingress review on every external result.
 
-### Beta
+### 7.2 Scheduling (Alpha)
 
-Beta MUST implement 3-agent Pipeline:
+Alpha MUST support two scheduling modes for Agent Groups:
 
-```text
-Research -> Draft -> Review
-```
+- **Interval** — cron expression or interval string. The Agent Group runs on the schedule. Each iteration is a separate `agent_runs` row; per-iteration bounds apply.
+- **Continuous** — event-driven (file change, new data, API webhook) or loop. The Agent Group runs as a long-lived process with `cooldown_between_iterations_ms` and lifetime-level bounds.
 
-Pipeline requirements:
+Schedule config persists in `scheduled_runs` (see 02 §3.8.5). Each iteration creates a `scheduled_run_iterations` row.
 
-- max steps.
-- max tokens.
-- max duration.
-- pause.
-- cancel.
-- force summarize.
-- visible intermediate outputs.
-- policy check before each step.
-- per-agent permissions.
+Bounds:
 
-### v1.0
+- per-iteration bounds: `max_duration_ms`, `max_tokens`, `cancel` — remain as the Alpha one-shot bounds.
+- lifetime-level bounds: `max_iterations`, `max_total_duration_ms`, `max_total_tokens` — new for scheduled/continuous runs.
+- `cancel` for scheduled/continuous stops after the current iteration. `pause` pauses between iterations; mid-iteration pause is per-iteration cancel.
 
-In this roadmap, "first version of Agent Group as a main work surface" means v1.0, not Alpha. v1.0 MUST add:
+### 7.3 Self-Building (Deferred)
 
-- Parallel mode.
-- Debate mode.
-- user-confirmed self-building organization.
-- reusable recipes.
+Self-building Agent Group recruitment is a product decision that is explicitly deferred from Alpha. The capability taxonomy, Coordinator agent, dynamic group assembly, and confirmation UI are NOT implemented in Alpha.
 
-Parallel and Debate MUST preserve bounded runs, policy checks, route traces, and audit evidence.
+Alpha MUST reserve the data structures (a `capability_taxonomy` table or JSON registry, and a `self_build_recommendations` table) as migration-compatible placeholders so a future phase can adopt them without schema break. The placeholder does NOT trigger any auto-recruitment in Alpha.
+
+Hard constraints preserved from the handbook apply if self-building is later enabled: no auto-download of unknown plugins, no auto-pulling of GitHub repos for execution, no auto-enabling of shell permissions, no auto-access of high-sensitivity data, no cross-workspace recruitment without user confirmation, and every recommendation and decision must be audited.
 
 ## 8. Local Agent Control Plane Requirements
 
@@ -255,7 +347,71 @@ External local agent adapters MUST declare:
 
 Ogra MUST NOT promise full control over third-party tools that bypass Ogra adapters.
 
-## 9. A2A and MCP Strategy
+## 9. Skills Market
+
+Ogra agents — both the local runtime agent and external agents registered in the Local Agent Control Plane — need access to reusable capabilities beyond what their base model provides. The Skills Market is a discoverable catalog of capability modules that agents can load and execute through the `use_skill` action (§5.3).
+
+### 9.1 Skill Definition
+
+A skill is a packaged capability unit:
+
+```text
+Skill {
+  id: string
+  name: string
+  version: string
+  description: string
+  capabilityTags: string[]        // e.g., ["generate/report", "analyze/finance"]
+  runtime: "local" | "cloud" | "hybrid"
+  entrypoint: "prompt" | "code" | "agent_group"
+  manifest: {
+    requiredPermissions: string[]  // e.g., ["file_read", "network_egress"]
+    requiredModels: string[]       // model requirements
+    inputSchema: JSONSchema
+    outputSchema: JSONSchema
+    estimatedTokens: number
+    riskLevel: "low" | "medium" | "high"
+  }
+  source: "builtin" | "local_recipe"   // "marketplace" is v1.0
+  trustLevel: "verified" | "user_trusted"
+  content: string  // the actual skill definition (prompt template, code, or agent group config)
+}
+```
+
+### 9.2 Alpha Skill Sources
+
+| Source | Description | Trust Model |
+|---|---|---|
+| **Built-in** | Shipped with Ogra; report generation, code review, data analysis | Fully trusted |
+| **Local Recipe** | User-created or workspace-saved from successful runs | User-trusted |
+
+Marketplace (community/vendor) skills are v1.0.
+
+### 9.3 Skill Execution Flow
+
+```
+Agent identifies needed capability
+  -> Query Skills Market: findSkills(tags=["generate/report", "analyze/finance"])
+  -> Returns candidate skills ranked by trust + capability match
+  -> Agent selects skill (or asks user to choose)
+  -> Policy evaluation on skill manifest:
+     -> Does skill require permissions the agent does not have?
+     -> Does skill's runtime (cloud) conflict with data classification?
+     -> Is skill's trustLevel acceptable per workspace policy?
+  -> If approved: load skill, inject into agent's action space
+  -> Agent invokes skill as an action: use_skill(skillId, params)
+  -> Skill execution goes through the standard middleware chain (§5.1)
+  -> Result returned to agent's Observation
+  -> skill_invocations row written with input hash, output hash, policy evaluation id
+```
+
+### 9.4 Skill Persistence and Version Pinning
+
+- The active skill registry is persisted in `skills` (see 02 §3.8.4). Each skill has a content hash and a version.
+- Once a run is started, the skill version used is pinned for the duration of the run. Version upgrades do not retroactively change an in-flight run.
+- Updating a skill version creates a new `skills` row with `version = new_version` and `parent_version = old_version`. The previous version remains queryable.
+
+## 10. A2A and MCP Strategy
 
 Ogra SHOULD remain A2A-compatible instead of inventing a closed protocol.
 
@@ -279,7 +435,10 @@ Every agent/model run MUST produce:
 - citation list.
 - route decision.
 - model call summary.
-- cloud call count.
+- cloud call count with egress mode (`auto_redact` / `log_and_proceed` / `approve_then_egress`).
+- redaction preview and redaction rule version when applicable.
+- ingress review findings and quarantine references when applicable.
+- re-sanitize iteration history when applicable.
 - run risk summary.
 - audit event ids.
 - optional artifacts.
@@ -296,16 +455,23 @@ Artifacts MUST have:
 
 Alpha is accepted when:
 
+- InternalAgentAdapter executes a Plan + ReAct + strong-persistence engine with the integrated sanitize/policy/route/audit middleware chain (§5).
 - InternalAgentAdapter completes the Confidential local RAG demo path.
 - Ollama answers local RAG questions and writes local model call records.
-- OpenAI-compatible adapter can answer Public-only questions when policy allows.
-- Cloud adapter is blocked for Confidential and Restricted fixtures without exception in Alpha.
+- OpenAI-compatible adapter can answer Public-only questions when policy allows, and is gated by the three-tier egress policy for non-Public data.
+- Confidential cloud upload goes through the Approve-then-Egress tier only and is blocked when approval is missing.
+- Restricted cloud calls are blocked without exception in Alpha.
 - Model adapters reject calls missing policy gate evidence.
-- Run lifecycle events are complete and ordered.
-- Cancellation writes an audit event and stops pending work.
-- Model call ledger drives `0 Ogra-managed cloud calls`.
+- Run lifecycle events are complete and ordered, including plan, redaction_engine_invoked, ingress_review, egress_record_recorded.
+- Cancellation writes an audit event and stops pending work; for scheduled/continuous runs, cancel stops after the current iteration.
+- Model call ledger drives `0 Ogra-managed cloud calls` and shows the egress mode alongside.
 - Agent manifest restrictions are enforced in tests.
-- UI can fetch answer, citations, route trace, risk summary, and audit evidence for a run.
+- Agent Group runs in Pipeline, Parallel, and Debate modes with bounded runs and per-step policy/audit.
+- Interval and continuous Agent Group scheduling is part of Alpha with per-iteration and lifetime-level bounds.
+- Skills Market ships built-in and local-recipe skills; every invocation is audited in `skill_invocations`.
+- The Ingress Review Agent runs in a separate process boundary and produces structured findings persisted in `ingress_review_findings`; suspicious or malicious findings land in `quarantine_contents` with an incident.
+- The re-sanitize loop terminates only on `approved` or `aborted`, and every iteration is audited in `rejection_resanitize_iterations`.
+- UI can fetch answer, citations, route trace, risk summary, ingress findings, and audit evidence for a run.
 
 ## 12. Anti-Patterns
 
@@ -314,8 +480,11 @@ MUST NOT introduce:
 - model calls from renderer.
 - agent adapters without manifest.
 - uncontrolled shell access.
-- cloud calls before route decision.
-- unbounded agent loops.
-- multi-agent group chat without max rounds/tokens/duration.
+- cloud calls before route decision, before egress mode selection, or before user approval on the Approve-then-Egress tier.
+- unbounded agent loops (per-iteration or lifetime).
+- Agent Group Pipeline / Parallel / Debate without per-step policy, per-step route, and per-step audit.
+- scheduled or continuous runs without lifetime-level bounds.
 - external local agents reading sensitive knowledge bases without trace.
 - A2A/MCP execution before policy and audit foundations are complete.
+- skills loaded into an agent without manifest evaluation and audit.
+- ingress review skipped or co-located with the InternalAgentAdapter that produced the original request.

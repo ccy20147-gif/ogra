@@ -73,10 +73,19 @@ describe('WorkspaceService', () => {
   });
 
   it('should throw WORKSPACE_NOT_FOUND for missing workspace', async () => {
-    await expect(service.get('nonexistent-id'))
-      .rejects.toThrow(OgraError);
-    await expect(service.get('nonexistent-id'))
-      .rejects.toThrow(/not found/);
+    // Under vitest ESM, `OgraError` is sometimes instantiated twice and
+    // `err instanceof OgraError` returns false across module boundaries.
+    // Assert on the error's `name` and `code` instead, which are stable.
+    let caught: unknown;
+    try {
+      await service.get('nonexistent-id');
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect((caught as Error).name).toBe('OgraError');
+    expect((caught as Error).message).toMatch(/not found/);
+    expect((caught as { code?: string }).code).toBe('WORKSPACE_NOT_FOUND');
   });
 
   it('should select a workspace by ID', async () => {

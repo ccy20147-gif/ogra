@@ -8,3 +8,10 @@ dist-electron/
 *.log
 .DS_Store
 Thumbs.db
+
+# tsc compile artifacts accidentally emitted into src/ (rootDir was
+# widened to "." during tooling experiments; these were emitted before
+# we restored `tsc --noEmit` defaults). They are dead and must not be
+# committed.
+src/**/*.js
+src/**/*.js.map

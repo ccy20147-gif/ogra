@@ -12,6 +12,7 @@
     "rootDir": ".",
     "sourceMap": true,
     "declaration": false,
+    "baseUrl": ".",
     "paths": {
       "@shared/*": ["src/shared/*"]
     }

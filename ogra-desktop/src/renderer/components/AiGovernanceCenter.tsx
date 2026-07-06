@@ -51,6 +51,25 @@ interface GovernanceProps {
   /** Pending approvals for the active workspace */
   requiredApprovals?: string[];
   approvalStatus?: 'pending' | 'approved' | 'denied' | 'not_required';
+  /**
+   * Pending approval requests (spec §12). Each entry renders Approve/Deny
+   * buttons. The optional `callback` is invoked when the user clicks either
+   * button so the parent can dispatch to the IPC.
+   */
+  approvalRequests?: Array<{
+    id: string;
+    runId?: string;
+    approvalType: string;
+    requestedScope?: Record<string, unknown>;
+    reason?: string;
+    createdAt?: string;
+  }>;
+  /**
+   * Optional callback invoked when the user clicks Approve / Deny on an
+   * approval row. The renderer-side bridge for `approval.decision` is not
+   * currently exposed in preload; until it is, this is a UI-only callback.
+   */
+  onApprovalDecision?: (approvalId: string, decision: 'approve' | 'deny') => void;
   /** Policy evaluation results for each run */
   policyEvaluations?: PolicyEvaluation[];
   /** Registered models in the workspace */
@@ -127,6 +146,7 @@ const badgeStyle: React.CSSProperties = {
 
 export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
   runs, incidents, policies, requiredApprovals, approvalStatus,
+  approvalRequests = [], onApprovalDecision,
   policyEvaluations = [], registeredModels = [], riskDetails = [],
   onExportAudit,
   loading = false,
@@ -134,6 +154,7 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
   const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
   const [expandedRiskRunIds, setExpandedRiskRunIds] = useState<Record<string, boolean>>({});
   const [exporting, setExporting] = useState<string | null>(null);
+  const [decisionState, setDecisionState] = useState<Record<string, 'approve' | 'deny' | 'pending' | 'done'>>({});
 
   const toggleRunExpand = (runId: string) => {
     setExpandedRunIds(prev => ({ ...prev, [runId]: !prev[runId] }));
@@ -141,6 +162,17 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
 
   const toggleRiskExpand = (runId: string) => {
     setExpandedRiskRunIds(prev => ({ ...prev, [runId]: !prev[runId] }));
+  };
+
+  const handleApprovalDecision = (approvalId: string, decision: 'approve' | 'deny') => {
+    setDecisionState(prev => ({ ...prev, [approvalId]: 'pending' }));
+    try {
+      onApprovalDecision?.(approvalId, decision);
+      // Mark decision completed immediately for UX responsiveness.
+      setDecisionState(prev => ({ ...prev, [approvalId]: 'done' }));
+    } catch {
+      setDecisionState(prev => ({ ...prev, [approvalId]: decision }));
+    }
   };
 
   const handleExport = async (format: 'json' | 'csv' | 'pdf') => {
@@ -401,7 +433,7 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
       )}
 
       {/* 1. Enhanced Approval Status Display */}
-      {requiredApprovals && requiredApprovals.length > 0 && (
+      {(requiredApprovals && requiredApprovals.length > 0) || approvalRequests.length > 0 ? (
         <div style={{ marginBottom: '20px' }}>
           <h3 style={{ fontSize: '14px', marginBottom: '8px', color: '#e1e4e8' }}>
             Pending Approvals
@@ -416,30 +448,140 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
               {approvalStatus || 'pending'}
             </span>
           </h3>
-          <div style={{ fontSize: '12px', color: '#8b949e', marginBottom: '8px' }}>
-            {requiredApprovals.length} approval{requiredApprovals.length !== 1 ? 's' : ''} required for the active workspace
-          </div>
-          {requiredApprovals.map((a, i) => (
-            <div key={i} style={{
-              padding: '8px 12px', border: '1px solid #30363d', borderRadius: '4px',
-              marginBottom: '6px', fontSize: '13px', color: '#e1e4e8',
-              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            }}>
-              <span>{a}</span>
-              <span style={{
-                fontSize: '10px',
-                padding: '2px 6px',
-                borderRadius: '4px',
-                backgroundColor: approvalStatus === 'approved' ? '#23863622' : approvalStatus === 'denied' ? '#da363322' : '#d2992222',
-                color: approvalStatus === 'approved' ? '#238636' : approvalStatus === 'denied' ? '#da3633' : '#d29922',
-                fontWeight: 500,
-              }}>
-                {approvalStatus === 'approved' ? 'Approved' : approvalStatus === 'denied' ? 'Denied' : 'Awaiting'}
-              </span>
+
+          {/* Named approvals summary (workspace-level). */}
+          {requiredApprovals && requiredApprovals.length > 0 && (
+            <>
+              <div style={{ fontSize: '12px', color: '#8b949e', marginBottom: '8px' }}>
+                {requiredApprovals.length} approval{requiredApprovals.length !== 1 ? 's' : ''} required for the active workspace
+              </div>
+              {requiredApprovals.map((a, i) => (
+                <div key={i} style={{
+                  padding: '8px 12px', border: '1px solid #30363d', borderRadius: '4px',
+                  marginBottom: '6px', fontSize: '13px', color: '#e1e4e8',
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                }}>
+                  <span>{a}</span>
+                  <span style={{
+                    fontSize: '10px',
+                    padding: '2px 6px',
+                    borderRadius: '4px',
+                    backgroundColor: approvalStatus === 'approved' ? '#23863622' : approvalStatus === 'denied' ? '#da363322' : '#d2992222',
+                    color: approvalStatus === 'approved' ? '#238636' : approvalStatus === 'denied' ? '#da3633' : '#d29922',
+                    fontWeight: 500,
+                  }}>
+                    {approvalStatus === 'approved' ? 'Approved' : approvalStatus === 'denied' ? 'Denied' : 'Awaiting'}
+                  </span>
+                </div>
+              ))}
+            </>
+          )}
+
+          {/* Individual approval requests with Approve / Deny buttons (spec §10 & §12). */}
+          {approvalRequests.length > 0 && (
+            <div style={{ marginTop: '8px' }}>
+              {approvalRequests.map((req) => {
+                const state = decisionState[req.id];
+                return (
+                  <div key={req.id} style={{
+                    padding: '10px 12px', border: '1px solid #30363d', borderRadius: '6px',
+                    marginBottom: '6px', backgroundColor: '#0d1117',
+                  }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+                      <span style={{ color: '#e1e4e8', fontWeight: 500, fontSize: '13px' }}>
+                        {req.approvalType}
+                      </span>
+                      <span style={{ fontSize: '10px', color: '#8b949e' }}>
+                        ID: {req.id.slice(0, 12)}…
+                      </span>
+                    </div>
+                    {req.runId && (
+                      <div style={{ fontSize: '11px', color: '#8b949e', marginBottom: '4px' }}>
+                        Run: {req.runId.slice(0, 16)}…
+                      </div>
+                    )}
+                    {req.reason && (
+                      <div style={{ fontSize: '11px', color: '#c9d1d9', marginBottom: '6px' }}>
+                        Reason: {req.reason}
+                      </div>
+                    )}
+                    {req.requestedScope && Object.keys(req.requestedScope).length > 0 && (
+                      <details style={{ marginBottom: '6px' }}>
+                        <summary style={{ fontSize: '11px', color: '#58a6ff', cursor: 'pointer' }}>
+                          Requested scope ({Object.keys(req.requestedScope).length} keys)
+                        </summary>
+                        <pre style={{
+                          margin: '4px 0 0',
+                          padding: '6px 8px',
+                          background: '#161b22',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          color: '#c9d1d9',
+                          overflowX: 'auto',
+                          maxHeight: '120px',
+                        }}>
+                          {JSON.stringify(req.requestedScope, null, 2)}
+                        </pre>
+                      </details>
+                    )}
+                    {req.createdAt && (
+                      <div style={{ fontSize: '10px', color: '#484f58', marginBottom: '6px' }}>
+                        Created: {req.createdAt}
+                      </div>
+                    )}
+                    {state === 'done' ? (
+                      <div style={{ fontSize: '12px', color: '#3fb950' }}>
+                        Decision recorded (audit event pending preload bridge).
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', gap: '8px' }}>
+                        <button
+                          type="button"
+                          onClick={() => handleApprovalDecision(req.id, 'approve')}
+                          disabled={state === 'pending'}
+                          aria-label={`Approve ${req.approvalType}`}
+                          style={{
+                            padding: '5px 14px',
+                            border: '1px solid #238636',
+                            borderRadius: '4px',
+                            backgroundColor: state === 'pending' ? '#1b3a1b' : '#238636',
+                            color: '#fff',
+                            cursor: state === 'pending' ? 'not-allowed' : 'pointer',
+                            fontSize: '12px',
+                            fontWeight: 500,
+                            opacity: state === 'pending' ? 0.6 : 1,
+                          }}
+                        >
+                          {state === 'pending' ? '...' : 'Approve'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleApprovalDecision(req.id, 'deny')}
+                          disabled={state === 'pending'}
+                          aria-label={`Deny ${req.approvalType}`}
+                          style={{
+                            padding: '5px 14px',
+                            border: '1px solid #da3633',
+                            borderRadius: '4px',
+                            backgroundColor: 'transparent',
+                            color: '#f85149',
+                            cursor: state === 'pending' ? 'not-allowed' : 'pointer',
+                            fontSize: '12px',
+                            fontWeight: 500,
+                            opacity: state === 'pending' ? 0.6 : 1,
+                          }}
+                        >
+                          {state === 'pending' ? '...' : 'Deny'}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          ))}
+          )}
         </div>
-      )}
+      ) : null}
 
       {/* Incidents */}
       <div style={{ marginBottom: '20px' }}>

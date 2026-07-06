@@ -1,7 +1,14 @@
 import { v4 as uuidv4 } from 'uuid';
 import { PolicyService, PolicyEvaluationInput } from './policy-service';
-import { DataClassification, RouteDecisionType, RunEventType } from '../shared/types';
-import { AuditService } from './audit-service';
+import { DataClassification, RouteDecisionType } from '../shared/types';
+import { HighWaterMarkService } from './high-water-mark';
+
+/** Optional input for high-water mark computation in route decisions */
+export interface RouteDecisionInput extends PolicyEvaluationInput {
+  /** Additional sources used for high-water classification. Each entry contributes
+   *  its `classification` to the effective route data classification. */
+  highWaterSources?: Array<{ sourceType: string; sourceId: string; classification: string }>;
+}
 
 export interface RouteDecisionRecord {
   id: string;
@@ -16,7 +23,9 @@ export interface RouteDecisionRecord {
   cloudSteps: string[];
   requiresUserApproval: boolean;
   approvalId?: string;
-  policyEvaluationId?: string;
+  /** ID of the policy_evaluations row produced for this decision. Populated
+   *  by evaluateRoute so downstream consumers can correlate. */
+  policyEvaluationId: string;
   /** SHA-256 hash of the policy set used for this evaluation */
   policyVersionHash: string;
   /** Which adapter should execute this route — set by evaluateRoute */
@@ -26,7 +35,9 @@ export interface RouteDecisionRecord {
   cloudPayloadSummary?: string;
   cloudPayloadHash?: string;
   incidentIds: string[];
-  auditEventId: string;
+  /** Optional ID of the run_event produced when this decision is written to
+   *  audit. Populated by the caller after appendRunEvent, not by evaluateRoute. */
+  auditEventId?: string;
   createdAt: string;
 }
 
@@ -35,13 +46,19 @@ export interface RouteDecisionRecord {
  *
  * Determines the route for every run based on policy evaluation.
  * Route decisions are created BEFORE model invocation.
+ *
+ * Now computes high-water classification from input + highWaterSources so
+ * route decisions reflect the real effective classification (not just the
+ * raw input). Also generates a stable policyEvaluationId per call so the
+ * decision is correlatable with the policy_evaluations table.
  */
 export class RouteService {
   private decisions: Map<string, RouteDecisionRecord> = new Map();
+  private highWaterMark = new HighWaterMarkService();
 
   constructor(private policyService: PolicyService) {}
 
-  async evaluateRoute(input: PolicyEvaluationInput): Promise<RouteDecisionRecord> {
+  async evaluateRoute(input: RouteDecisionInput): Promise<RouteDecisionRecord> {
     const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     const policyResult = await this.policyService.evaluate(input);
 
@@ -92,23 +109,37 @@ export class RouteService {
       localSteps.push('synthesize');
     }
 
+    // Compute effective high-water classification from the input data
+    // classification plus any high-water sources (workspace/KB/docs/chunks).
+    // Previously this just copied the raw input.dataClassification, which
+    // silently under-classified runs that pulled in higher-classification
+    // context (KBs, documents, memories).
+    const hwmSources = input.highWaterSources ?? [
+      { sourceType: 'request', sourceId: runId, classification: input.dataClassification },
+    ];
+    const hwm = this.highWaterMark.compute(hwmSources);
+
+    // Generate a stable policyEvaluationId so the decision can be correlated
+    // with the policy_evaluations table downstream (previously omitted).
+    const policyEvaluationId = `pe_${uuidv4().slice(0, 8)}`;
+
     const decision: RouteDecisionRecord = {
       id: `rd_${uuidv4().slice(0, 8)}`,
       runId,
       taskId: '', // Set by caller when task is known
       route,
       assignedAdapter,
-      dataClassification: input.dataClassification,
-      highWaterSources: [],
+      dataClassification: hwm.highWaterMark as DataClassification,
+      highWaterSources: hwm.highWaterSources,
       reasons: policyResult.reasons,
       localSteps,
       cloudSteps,
       requiresUserApproval: policyResult.requiredApprovals.length > 0,
+      policyEvaluationId,
       policyVersionHash: this.policyService.getPolicyVersionHash(),
       providerId: input.providerId,
       modelId: input.modelId,
       incidentIds: [],
-      auditEventId: '',
       createdAt: new Date().toISOString(),
     };
 

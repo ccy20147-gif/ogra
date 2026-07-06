@@ -244,8 +244,20 @@ export class InternalAgentAdapter {
 
     // Step 10: If blocked, return
     if (routeDecision.route === 'blocked') {
-      this.db.appendRunEvent(runId, workspaceId, RunEventType.RunBlocked, {
+      const blockedEvent = this.db.appendRunEvent(runId, workspaceId, RunEventType.RunBlocked, {
         reasons: routeDecision.reasons,
+      });
+      // Per 03 §11 + 00 cross-document invariants, every policy block
+      // MUST create an incident so it shows up in the AI Governance Center
+      // incident list, even when the run is otherwise abandoned.
+      this.db.createIncident({
+        id: `inc_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+        workspaceId,
+        runId,
+        incidentType: 'policy_block',
+        severity: 'high',
+        summary: `Run blocked by policy: ${routeDecision.reasons.join('; ')}`,
+        evidenceEventIds: blockedEvent ? [blockedEvent.id] : [],
       });
       return {
         answer: `Request blocked by policy. Reasons: ${routeDecision.reasons.join('; ')}`,
@@ -364,7 +376,7 @@ export class InternalAgentAdapter {
           approvalStatus: 'not_required',
         },
         modelCall: modelResult,
-        auditEventIds: [routeDecision.auditEventId],
+        auditEventIds: routeDecision.auditEventId ? [routeDecision.auditEventId] : [],
       };
     } catch (err) {
       const errorMessage = (err as Error).message || 'Unknown error';

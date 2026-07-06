@@ -6,7 +6,15 @@ import SettingsTab from './components/SettingsTab';
 import { DataSafetyCenter } from './components/DataSafetyCenter';
 import { AiGovernanceCenter } from './components/AiGovernanceCenter';
 import { MemoryCenter } from './components/MemoryCenter';
-import { buttonStyle, secondaryButtonStyle } from './styles';
+import {
+  buttonStyle,
+  secondaryButtonStyle,
+  spinnerStyle,
+  spinnerKeyframes,
+  toneStyles,
+  classifyStatus,
+  type StatusTone,
+} from './styles';
 import './types';
 
 interface Workspace {
@@ -16,6 +24,47 @@ interface Workspace {
   defaultClassification: string;
   createdAt: string;
 }
+
+/**
+ * Bottom status bar. Reads the free-form `status` string from the App
+ * shell, classifies it into a tone (idle / info / working / ready /
+ * blocked / error), and renders a fixed bottom strip with the matching
+ * icon, color, and a spinner when something is in flight.
+ */
+const StatusBar: React.FC<{ status: string }> = ({ status }) => {
+  const tone: StatusTone = classifyStatus(status);
+  const t = toneStyles[tone];
+  const showSpinner = tone === 'progress';
+  return (
+    <>
+      <style>{spinnerKeyframes}</style>
+      <div
+        role="status"
+        aria-live="polite"
+        style={{
+          position: 'fixed',
+          bottom: 0,
+          left: 0,
+          right: 0,
+          display: 'flex',
+          alignItems: 'center',
+          gap: '8px',
+          padding: '8px 20px',
+          borderTop: `1px solid ${t.border}`,
+          fontSize: '12px',
+          color: t.fg,
+          backgroundColor: t.bg,
+          fontVariantNumeric: 'tabular-nums',
+        }}
+      >
+        {showSpinner && <span aria-hidden="true" style={spinnerStyle} />}
+        <span aria-hidden="true" style={{ fontWeight: 600, width: '12px', textAlign: 'center' }}>{t.icon}</span>
+        <span style={{ fontWeight: 500, opacity: 0.7, marginRight: '4px' }}>{t.label}:</span>
+        <span style={{ flex: 1 }}>{status}</span>
+      </div>
+    </>
+  );
+};
 
 const App: React.FC = () => {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -154,7 +203,7 @@ const App: React.FC = () => {
       setRunError(null);
       setStatus('Starting demo run...');
       setRunResult('');
-      setRunPhase('policy_check');
+      setRunPhase('policy_precheck');
       setCurrentRunId(null);
       const result = await window.ogra.run.start({
         workspaceId: currentWorkspace.id,
@@ -176,7 +225,7 @@ const App: React.FC = () => {
         } else if (run.status === 'error' || run.status === 'failed' || run.status === 'blocked') {
           setRunPhase('error');
         } else if (run.status === 'running' || run.status === 'in_progress') {
-          setRunPhase('model_call');
+          setRunPhase('model_invocation');
         }
 
         // Route decision
@@ -215,11 +264,15 @@ const App: React.FC = () => {
         // If run supports events, advance phase based on events
         if (run.events && run.events.length > 0) {
           const eventTypes = run.events.map((e: any) => e.eventType);
-          if (eventTypes.includes('model_call_completed')) setRunPhase('complete');
-          else if (eventTypes.includes('model_call_started')) setRunPhase('model_call');
+          if (eventTypes.includes('model_call_completed')) setRunPhase('model_invocation');
+          else if (eventTypes.includes('model_call_started')) setRunPhase('model_invocation');
           else if (eventTypes.includes('retrieval_completed')) setRunPhase('route_decision');
-          else if (eventTypes.includes('retrieval_started')) setRunPhase('rag_retrieval');
-          else if (eventTypes.includes('policy_precheck')) setRunPhase('policy_check');
+          else if (eventTypes.includes('retrieval_started')) setRunPhase('retrieval');
+          else if (eventTypes.includes('context_policy_check')) setRunPhase('context_policy_check');
+          else if (eventTypes.includes('ingress_review')) setRunPhase('ingress_review');
+          else if (eventTypes.includes('redaction')) setRunPhase('redaction');
+          else if (eventTypes.includes('approval')) setRunPhase('approval');
+          else if (eventTypes.includes('policy_precheck')) setRunPhase('policy_precheck');
         }
       }
     } catch (err: any) {
@@ -368,7 +421,20 @@ const App: React.FC = () => {
             padding: '2px 8px',
             borderRadius: '10px',
             fontWeight: 500,
-          }}>Alpha</span>
+          }}>Alpha · v0.1.0</span>
+          <span
+            title="Default compute strategy: local retrieval + redaction + cloud reasoning + local synthesis (see docs/plans/09 §2)."
+            style={{
+              fontSize: '10px',
+              backgroundColor: 'transparent',
+              color: '#8b949e',
+              padding: '2px 8px',
+              borderRadius: '10px',
+              border: '1px solid #30363d',
+              fontWeight: 500,
+              cursor: 'help',
+            }}
+          >Hybrid-default</span>
         </div>
         <div style={{ fontSize: '12px', color: '#8b949e' }}>
           {currentWorkspace ? `Workspace: ${currentWorkspace.name}` : 'No workspace'}
@@ -401,6 +467,7 @@ const App: React.FC = () => {
               fontSize: '13px',
               fontWeight: activeTab === tab.key ? 600 : 400,
               textTransform: 'capitalize',
+              transition: 'color 0.15s, border-color 0.15s, font-weight 0.15s',
             }}
           >
             {tab.label}
@@ -688,29 +755,10 @@ const App: React.FC = () => {
           )}
         </div>
 
-        {/* Status bar — B42: aria-live for dynamic status updates */}
-        <div
-          role="status"
-          aria-live="polite"
-          style={{
-            position: 'fixed',
-            bottom: 0,
-            left: 0,
-            right: 0,
-            padding: '8px 20px',
-            borderTop: '1px solid #21262d',
-            fontSize: '12px',
-            color: status.includes('Error') ? '#f85149'
-              : status.includes('blocked') ? '#d29922'
-              : status.includes('complete') || status.includes('Ready') ? '#58a6ff'
-              : '#8b949e',
-            backgroundColor: status.includes('Error') ? '#3d0000'
-              : status.includes('blocked') ? '#3d2100'
-              : '#0f1117',
-          }}
-        >
-          {status}
-        </div>
+        {/* Status bar — B42: aria-live for dynamic status updates.
+            Tone-driven so 'Error' / 'blocked' / 'Loading …' / 'Ready' all
+            get distinct colors + icons without ad-hoc string matching. */}
+        <StatusBar status={status} />
       </main>
     </div>
   );

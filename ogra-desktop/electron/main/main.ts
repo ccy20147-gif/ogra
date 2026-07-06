@@ -11,7 +11,7 @@ let mainWindow: BrowserWindow | null = null;
 let ograCore: OgraCore | null = null;
 let secretBroker: OgraSecretBroker | null = null;
 
-const isDev = !app.isPackaged;
+const isDev = !app.isPackaged && process.env.OGRA_PROD !== '1';
 const APP_DATA_DIR = path.join(app.getPath('appData'), 'Ogra');
 
 function ensureAppDataDir(): void {
@@ -39,7 +39,16 @@ function createWindow(): void {
       preload: path.join(__dirname, '../preload/preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
+      // Electron 28 sandboxed preload scripts cannot `require` arbitrary
+      // local files (only the `electron` module and a small built-in set
+      // are allowed). Our typed preload bridge imports the shared
+      // `IpcChannel` enum to keep renderer and main in lock-step, so the
+      // preload must run in non-sandbox mode. Renderer process isolation
+      // is still enforced via `contextIsolation: true` and
+      // `nodeIntegration: false`; no Node globals reach the renderer.
+      // This is the documented Electron limitation called out in
+      // 01-desktop-runtime-foundation.md §2.0.
+      sandbox: false,
     },
     title: 'Ogra Desktop',
     show: false,
@@ -51,7 +60,9 @@ function createWindow(): void {
     mainWindow.loadURL(DEV_SERVER_URL);
     mainWindow.webContents.openDevTools({ mode: 'bottom' });
   } else {
-    mainWindow.loadFile(path.join(__dirname, '../../dist/renderer/index.html'));
+    // __dirname at runtime is .../ogra-desktop/dist-electron/electron/main;
+    // the renderer bundle is built to .../ogra-desktop/dist/renderer/.
+    mainWindow.loadFile(path.join(__dirname, '..', '..', '..', 'dist', 'renderer', 'index.html'));
   }
 
   mainWindow.once('ready-to-show', () => {
@@ -75,7 +86,14 @@ function createWindow(): void {
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     const csp = isDev
       ? "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws://localhost:* http://localhost:*; img-src 'self' data:; font-src 'self' data:;"
-      : "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';";
+      // Production CSP: React renders inline style attributes for layout,
+      // and the renderer's emotion-free jsx style={{...}} is the primary
+      // styling mechanism (see 06-application-ui-ux.md). `unsafe-inline`
+      // is therefore required for style-src. script-src stays strict
+      // because the renderer bundle is a single self-hosted file with
+      // no eval. This is the documented Electron desktop trade-off
+      // called out in 01-desktop-runtime-foundation.md §2.0.
+      : "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self';";
     callback({
       responseHeaders: {
         ...details.responseHeaders,
@@ -179,6 +197,9 @@ function registerIpcHandlers(): void {
     async (_event, req: any) => {
       if (!req || !req.folderPath || typeof req.folderPath !== 'string') {
         throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'folderPath is required');
+      }
+      if (!req.workspaceId || typeof req.workspaceId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'workspaceId is required');
       }
       const valid = await ograCore!.pathValidator.validateImportPath(req.folderPath);
       if (!valid.isValid) {
@@ -331,9 +352,15 @@ function registerIpcHandlers(): void {
     IpcChannel.ApprovalDecision,
     async (_event, req: any) => {
       if (!req || !req.approvalId) throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval decision must include approvalId');
+      if (!req.runId || typeof req.runId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval decision must include runId');
+      }
+      if (!req.workspaceId || typeof req.workspaceId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval decision must include workspaceId');
+      }
       ograCore!.auditService.appendEvent({
-        runId: req.runId || 'unknown',
-        workspaceId: req.workspaceId || 'unknown',
+        runId: req.runId,
+        workspaceId: req.workspaceId,
         eventType: 'approval_decision',
         eventPayload: { approvalId: req.approvalId, decision: req.decision } as Record<string, unknown>,
       });

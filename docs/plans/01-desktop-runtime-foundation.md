@@ -80,6 +80,7 @@ Main process MUST:
 - Start and supervise Ogra Core/Edge workers.
 - Record permission decisions as audit events.
 - Inject caller context and permission context into Ogra Core calls.
+- Spawn and supervise the Ingress Review Agent as a separate process boundary. The Ingress Review Agent MUST NOT share the InternalAgentAdapter's process, module loader, or scratch space. The main process MUST enforce a different IPC channel namespace for ingress review and a different caller context shape. A compromised cloud response must never influence its own reviewer.
 
 Main process MUST NOT:
 
@@ -87,6 +88,7 @@ Main process MUST NOT:
 - Store provider keys in renderer-accessible state.
 - Accept arbitrary filesystem paths without workspace/path policy checks.
 - Trust renderer-supplied workspace ids, provider ids, approval ids, or approval state without server-side validation.
+- Co-locate Ingress Review Agent state with InternalAgentAdapter state.
 
 Ogra Core services MAY run in the Main process for Alpha only if long-running work is delegated out. Main handlers MUST remain thin permission and routing wrappers.
 
@@ -155,16 +157,19 @@ Alpha MUST define typed APIs for:
 - chat/run start/status/cancel.
 - route decision fetch.
 - audit event fetch.
+- audit export (NDJSON or CSV), policy-gated.
 - Data Safety Center summaries.
 - AI Governance run risk summaries.
 - model/provider registry read and update.
 - permission request and decision.
-- approval request and decision.
+- approval request and decision (including the Approve-then-Egress approval record and the re-sanitize loop).
 - policy dry-run.
 - secret metadata create/update/delete.
 - provider connection test.
 - data egress summary.
 - cloud call ledger.
+- ingress review request and result.
+- quarantine list, quarantine read (sandbox view), quarantine clean-and-proceed.
 
 Every IPC handler MUST:
 

@@ -380,13 +380,202 @@ redaction_records
   run_id
   model_call_id
   rule_version
+  rule_set_id
   before_hash
   after_hash
   summary
   residual_risk
   user_confirmed
+  user_confirmed_at
+  approval_id
   created_at
 ```
+
+### 3.8.1 Redaction Rule Sets and Versions
+
+Alpha MUST include queryable, version-stamped redaction rule sets so the audit chain and Data Safety Center can show which rules applied to a given model call:
+
+```text
+redaction_rule_sets
+  id
+  name
+  description
+  created_at
+  enabled
+
+redaction_rule_versions
+  id
+  rule_set_id
+  version
+  rules_json
+  content_hash
+  parent_version
+  created_at
+```
+
+The active redaction rule version MUST be recorded in `redaction_records.rule_version` and in the corresponding `run_events` and `model_calls` rows.
+
+### 3.8.2 Egress Mode and Re-Sanitize Iterations
+
+Alpha MUST record the egress mode chosen for each cloud call and the iteration history of any re-sanitize loop:
+
+```text
+egress_records
+  id
+  run_id
+  model_call_id
+  route_decision_id
+  approval_id
+  egress_mode: auto_redact | log_and_proceed | approve_then_egress
+  payload_hash
+  payload_summary
+  redaction_rule_version
+  payload_classification
+  created_at
+
+rejection_resanitize_iterations
+  id
+  run_id
+  approval_id
+  iteration_no
+  rule_version
+  before_hash
+  after_hash
+  decision: rejected | approved | aborted
+  decided_by
+  reason
+  created_at
+```
+
+Each rejection iteration MUST write a new `run_events` row. The loop MUST terminate on `approved` or `aborted` only.
+
+### 3.8.3 Ingress Review Findings and Quarantine
+
+Alpha MUST include first-class tables for the independent Ingress Review Agent so findings, severity, and isolation status are queryable:
+
+```text
+ingress_review_findings
+  id
+  run_id
+  source_kind: cloud_response | tool_output | a2a_message | mcp_result | local_agent_stdout
+  source_ref
+  pattern_id
+  layer: regex | semantic | combined
+  evidence
+  evidence_hash
+  severity: info | suspicious | malicious
+  finding_class: clean | suspicious | malicious
+  ingress_mode: auto_filter | log | approve
+  user_decision: approved | denied | pending
+  decided_by
+  created_at
+  decided_at
+
+quarantine_contents
+  id
+  run_id
+  ingress_finding_id
+  content_hash
+  summary
+  stored_blob_path
+  classification
+  user_can_view: true | false
+  status: quarantined | cleaned | discarded | released
+  created_at
+  updated_at
+```
+
+Quarantined content MUST be persisted under a path that renderer code cannot read directly. Renderer access MUST go through the policy-gated `quarantine.read` IPC, and only when the user has been notified of the risk.
+
+### 3.8.4 Skills Registry
+
+Alpha MUST include a registry for built-in and local-recipe skills so manifest, version pinning, and per-invocation audit are persistent:
+
+```text
+skills
+  id
+  name
+  version
+  description
+  capability_tags_json
+  runtime: local | cloud | hybrid
+  entrypoint: prompt | code | agent_group
+  source: builtin | local_recipe
+  trust_level: verified | user_trusted
+  manifest_json
+  content_hash
+  enabled
+  created_at
+  updated_at
+
+skill_invocations
+  id
+  run_id
+  skill_id
+  skill_version
+  input_hash
+  output_hash
+  policy_evaluation_id
+  approval_id
+  model_call_id
+  created_at
+```
+
+### 3.8.5 Scheduled and Continuous Agent Group Runs
+
+Alpha MUST include tables for interval and continuous Agent Group scheduling so lifecycle, bounds, and audit are persistent:
+
+```text
+scheduled_runs
+  id
+  workspace_id
+  agent_group_id
+  schedule_kind: interval | continuous
+  schedule_expr
+  task_template
+  max_iterations
+  max_total_duration_ms
+  max_total_tokens
+  max_concurrent_runs
+  failure_behavior: retry | skip | alert
+  notification_policy_json
+  enabled
+  last_iteration_at
+  next_run_at
+  created_at
+  updated_at
+
+scheduled_run_iterations
+  id
+  scheduled_run_id
+  run_id
+  iteration_no
+  started_at
+  completed_at
+  status
+  token_usage_json
+  duration_ms
+  error
+```
+
+### 3.8.6 Run Step Actions (ReAct Granularity)
+
+Alpha MUST persist the InternalAgentAdapter's Plan + ReAct iterations so runs can resume after crash or interruption:
+
+```text
+run_step_actions
+  id
+  run_step_id
+  action_no
+  thought
+  action_type: retrieve | generate | delegate | execute | read_file | write_file | ask_user | complete
+  action_payload_json
+  observation
+  observation_hash
+  created_at
+```
+
+ReAct action persistence MUST be transactional with the corresponding `run_events` row, and recovery MUST resume from the last persisted `action_no` for the in-progress step.
 
 ### 3.9 Policy Scopes and Allowlists
 

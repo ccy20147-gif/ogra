@@ -2,20 +2,23 @@
   "name": "ogra-desktop",
   "version": "0.1.0-alpha",
   "description": "Local-first, transparent-routing, auditable AI Agent workspace",
-  "main": "dist-electron/main/main.js",
+  "main": "dist-electron/electron/main/main.js",
   "scripts": {
     "dev": "concurrently \"npm run dev:renderer\" \"npm run dev:electron\"",
     "dev:renderer": "vite",
     "dev:electron": "wait-on http://localhost:5173 && electron .",
     "build": "tsc && vite build && tsc -p tsconfig.electron.json",
     "package": "npm run build && electron-builder --config electron-builder.json",
-    "test": "vitest run",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
+    "test": "npm run rebuild:sqlite:node && vitest run",
+    "test:watch": "npm run rebuild:sqlite:node && vitest",
+    "test:coverage": "npm run rebuild:sqlite:node && vitest run --coverage",
     "lint": "eslint src/ --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist dist-electron",
-    "reset": "rm -rf ~/.ogra"
+    "reset": "rm -rf ~/.ogra",
+    "rebuild:sqlite:node": "npm rebuild better-sqlite3 --build-from-source=false",
+    "rebuild:sqlite:electron": "electron-rebuild -f -w better-sqlite3",
+    "start:electron": "npm run rebuild:sqlite:electron && electron ."
   },
   "dependencies": {
     "better-sqlite3": "^11.0.0",
@@ -23,6 +26,7 @@
     "uuid": "^9.0.0"
   },
   "devDependencies": {
+    "@electron/rebuild": "^4.1.0",
     "@types/better-sqlite3": "^7.6.8",
     "@types/node": "^26.1.0",
     "@types/react": "^18.2.48",

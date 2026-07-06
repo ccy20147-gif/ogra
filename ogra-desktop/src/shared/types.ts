@@ -89,9 +89,12 @@ export enum ApprovalDecision {
 
 /** Pipeline execution status */
 export enum PipelineStatus {
+  Created = 'created',
   Running = 'running',
   Paused = 'paused',
   Cancelled = 'cancelled',
+  Completed = 'completed',
+  Failed = 'failed',
 }
 
 /** Agent group execution mode — Pipeline is implemented in Alpha;

@@ -18,13 +18,15 @@ Ogra 的长期方向是：
 >
 > 它把用户的本地文件、个人知识库、长期记忆、Agent Group、多模型能力和 Ogra Edge 本地运行时统一起来，让用户在处理企业数据、代码、合同、财务资料等敏感信息时，明确知道：哪些数据留在本地，哪些数据上云，为什么上云，是否脱敏，调用了哪个模型，留下了什么审计记录。
 
-Ogra 的差异化不是“大而全”，而是五个关键词：
+Ogra 的差异化不是“大而全”，而是七个关键词：
 
-1. **Local-first**：数据、知识库、记忆、审计默认本地。
-2. **Hybrid deployment**：同一任务可以拆成本地阶段、云端阶段、混合阶段。
-3. **Transparent routing**：每次路由决策可见、可解释、可复盘。
-4. **Auditable agent runs**：每次 Agent 协作都有本地审计轨迹和可导出的运行证据。
-5. **White-box memory and orchestration**：记忆和多 Agent 编排对用户透明、可编辑、可中断。
+1. **Local-first residency**：数据、知识库、记忆、审计默认本地。
+2. **Hybrid-default compute**：同一任务默认按"本地读取 + 脱敏 + 云端推理 + 本地合成"分阶段执行；纯本地仅作为高安全选项保留。
+3. **Three-tier egress**：所有出云动作必须经过 Auto-Filter-then-Egress / Log-then-Egress / Approve-then-Egress 三档确定性策略；Confidential 默认 Approve-then-Egress，Restricted 一律 Blocked。
+4. **Independent ingress review**：每个云响应、工具返回、A2A 消息、MCP 结果都要经过独立于发起请求的 InternalAgentAdapter 的 Ingress Review Agent；可疑或恶意内容进入 quarantine 隔离表，附 incident。
+5. **Transparent routing**：每次路由决策、出境模式、入境结论、re-sanitize 迭代历史都可见、可解释、可复盘。
+6. **Auditable agent runs**：每次 Agent 协作都有本地审计轨迹和可导出的运行证据；Plan + ReAct 中间件强制 sanitize / policy / route / audit。
+7. **White-box memory and orchestration**：记忆和多 Agent 编排对用户透明、可编辑、可中断；自组织 Agent Group 仍需用户明确确认。
 
 Ogra Edge 是 Ogra 的本地运行时与端侧协同层，不是独立做成另一个产品线。第一阶段，Ogra Edge 内嵌在桌面端；后续可以演进为独立 edge daemon，支持多设备和边缘服务器。
 
@@ -426,16 +428,25 @@ Ogra Desktop UI
 
 ## 3.2 Ogra Edge 负责什么
 
-Ogra Edge v0 只暴露四个最小接口：
+Ogra Edge v0 暴露以下最小接口：
 
 ```text
-routeTask(input) -> RouteDecision
-retrieveContext(query, scope) -> RetrievedContext
-invokeModel(request) -> ModelResult
-writeAuditEvent(event) -> AuditEventId
+planTask(input)                       -> Plan
+evaluatePolicy(input)                 -> PolicyEvaluationResult
+selectEgressMode(classification)      -> auto_redact | log_and_proceed | approve_then_egress | blocked
+runRedactionEngine(payload, version)  -> RedactedPayload
+awaitApproval(redaction)              -> approved | rejected
+reSanitize(payload)                   -> RedactedPayload  (stricter rule version)
+invokeModel(request)                  -> ModelResult
+reviewIngress(response)               -> IngressFinding  (separate process)
+quarantineIngress(finding, content)   -> QuarantineId
+retrieveContext(query, scope)         -> RetrievedContext
+writeAuditEvent(event)                -> AuditEventId
+manageSkills(query)                   -> Skill[]
+invokeSkill(skillId, params)          -> SkillResult
 ```
 
-长期来看，Ogra Edge 负责：
+Ogra Edge 负责：
 
 1. 本地模型调用
    - Ollama
@@ -451,14 +462,18 @@ writeAuditEvent(event) -> AuditEventId
 
 3. 本地策略执行
    - 数据分级
-   - 是否允许上云
-   - 是否需要脱敏
-   - 是否需要用户确认
+   - 出境模式选择（auto_redact / log_and_proceed / approve_then_egress / blocked）
+   - 脱敏引擎调用与版本管理
+   - Approve-then-Egress 用户审批与 re-sanitize 循环
+   - Ingress Review Agent 调用（独立进程）
+   - Quarantine 隔离与处理
 
 4. 本地审计
    - Run Trace
    - Agent Tool Calls
-   - Cloud Payload Hash
+   - Cloud Payload Hash（含出境模式与脱敏规则版本）
+   - Ingress Findings
+   - Re-sanitize 迭代历史
    - Route Decision
 
 5. 端云路由
@@ -467,7 +482,17 @@ writeAuditEvent(event) -> AuditEventId
    - hybrid
    - blocked
 
-6. 本地 Agent 控制
+6. Plan + ReAct 执行
+   - 本地 LLM 生成 Plan（只读任务抽象与能力清单）
+   - 每个 step 走 ReAct 循环，强制经过 sanitize / policy / route / audit 中间件
+   - run_step_actions 强持久化，支持 crash / 断电 / 用户中断后从最后 Observation 恢复
+
+7. Skills Market
+   - built-in 技能（报告生成、代码审查、数据分析）
+   - local-recipe 技能
+   - 每次 use_skill 写入 skill_invocations
+
+8. 本地 Agent 控制
    - 发现本机 Agent runtime
    - 注册 Agent capabilities
    - 启动 / 停止本地 Agent
@@ -475,60 +500,92 @@ writeAuditEvent(event) -> AuditEventId
    - 将本地 Agent 纳入 Agent Group
    - 对本地 Agent 执行过程生成 trace 和 audit
 
-本地 Agent runtime control 不进入 Alpha 核心闭环。Alpha 只做 InternalAgentAdapter；Beta 再做本地命令型 read-only adapter；v1.0 再做 Codex / Claude Code / Aider / Open Interpreter 等外部 Agent adapter。
+本地 Agent runtime control 不进入 Alpha 核心闭环。Alpha 只做 InternalAgentAdapter 和 LocalCommandAgentAdapter（read-only supervised）；v1.0 再做 Codex / Claude Code / Aider / Open Interpreter 等外部 Agent adapter。
 
 ## 3.3 端云混部
 
-端云混部不是“用户手动选本地模型或云端模型”，而是任务级分阶段执行。
+端云混部不是“用户手动选本地模型或云端模型”，而是任务级分阶段执行，并显式选择出境模式。
 
 典型混部模式：
 
 ```text
 Local-only
-  - 敏感文档
-  - 企业代码
-  - 合同
-  - 财务数据
+  - 严格受限数据
+  - 用户工作区策略强制
+  - 离线场景
 
 Cloud-only
   - 公开研究
   - 通用写作
   - 不含私有上下文的复杂推理
+  - 出境模式：Auto-Filter-then-Egress（Public / Internal 标准）
 
 Hybrid
   - 本地读取原始资料
   - 本地脱敏 / 摘要 / 特征提取
   - 云端复杂分析
   - 本地合成最终报告
+  - 出境模式取决于数据级别：
+      * Public / Internal(标准)       -> Auto-Filter-then-Egress
+      * Internal(高敏感)             -> Log-then-Egress
+      * Confidential                 -> Approve-then-Egress（预览 + 用户确认后出云）
+      * Restricted                   -> Blocked
 
 Blocked
   - 策略禁止
-  - 用户未确认
+  - 用户未确认（Approve 模式）
   - 模型不在白名单
+  - Restricted 触发
 ```
+
+### 3.3.1 出境三档
+
+```text
+Task requires cloud compute
+  -> Policy engine evaluates data classification
+    -> Public                       -> Auto-Filter-then-Egress
+    -> Internal(standard)           -> Auto-Filter-then-Egress
+    -> Internal(high-sensitivity)   -> Log-then-Egress
+    -> Confidential                 -> Approve-then-Egress
+    -> Restricted                   -> Blocked
+```
+
+Approve-then-Egress 的拒绝处理走 re-sanitize 循环：用户拒绝后系统记录 `rejected` 事件，应用更严格的脱敏规则版本（或用户指定的排除项），生成新预览，继续直到 `approved` 或 `aborted`。每一次迭代都写入审计。这是 "send back for rework" 循环，不是 "deny and block"。
+
+### 3.3.2 入境审核
+
+每个云响应、工具返回、A2A 消息、MCP 结果都要经过 Ingress Review Agent（独立于发起请求的 InternalAgentAdapter 进程）。Ingress Review Agent 产出 `clean / suspicious / malicious` 三类结论：
+
+- clean：进入本地合成；写入 `log` 入境记录。
+- suspicious：进入 quarantine 隔离表，触发 incident，用户通过受限沙箱视图查看 sanitized summary。
+- malicious：丢弃、incident、用户可尝试 "clean and proceed"（剥离注入、保留合法内容、过程计入审计）。
 
 ## 3.4 透明路由
 
-每次任务必须生成 Route Decision：
+每次任务必须生成 Route Decision 和 Egress Record：
 
 ```json
 {
   "task_id": "run_123",
   "route": "hybrid",
-  "data_classification": "internal",
+  "data_classification": "confidential",
+  "egress_mode": "approve_then_egress",
+  "redaction_rule_version": "rule_set_a_v3",
   "reason": [
-    "knowledge base contains internal files",
-    "cloud model requested for high-complexity reasoning",
-    "redaction policy enabled"
+    "knowledge base contains confidential files",
+    "redaction policy enabled",
+    "user approval required for confidential egress"
   ],
-  "local_steps": ["retrieve", "redact", "summarize"],
+  "local_steps": ["retrieve", "redact", "await_approval", "synthesize"],
   "cloud_steps": ["reason"],
   "requires_user_approval": true,
+  "approval_id": "approval_456",
+  "ingress_findings": ["ingress_789"],
   "audit_log_id": "audit_123"
 }
 ```
 
-透明路由是产品承诺。用户不能只看到最终答案，必须能看到决策路径。
+透明路由是产品承诺。用户不能只看到最终答案，必须能看到决策路径、出境模式、脱敏规则版本、审批记录、入境审核结论、re-sanitize 迭代历史。
 
 ---
 
@@ -538,12 +595,13 @@ Blocked
 
 Ogra 内置四级数据分类：
 
-| 级别 | 含义 | 默认路由 |
+| 级别 | 含义 | Alpha 默认出境模式 |
 |---|---|---|
-| Public | 公开信息 | 可上云 |
-| Internal | 内部信息 | 默认本地，允许脱敏后上云 |
-| Confidential | 机密信息 | 本地优先，默认禁止上云 |
-| Restricted | 严格受限 | 只允许指定本地模型和指定 Agent |
+| Public | 公开信息 | Auto-Filter-then-Egress（自动脱敏可放行；可上云） |
+| Internal(标准) | 一般内部信息 | Auto-Filter-then-Egress（自动脱敏后上云） |
+| Internal(高敏感) | 高敏感内部信息 | Log-then-Egress（脱敏后上云，全审计） |
+| Confidential | 机密信息 | Approve-then-Egress（脱敏 + 用户预览 + 用户批准） |
+| Restricted | 严格受限 | Blocked（只允许指定本地模型和指定 Agent） |
 
 数据分级来源：
 
@@ -701,21 +759,34 @@ Policy Simulator / Dry Run：
 
 Ogra 必须显式建模数据外泄路径：
 
-- 模型 payload
+**Ogra 受控的出/入境路径：**
+
+- 模型 payload（含出境模式、脱敏规则版本、payload hash、approval id）
 - embedding 请求
+- 入境审核结论（Ingress Review Agent 输出）
+- Quarantine 隔离内容与 incident
+- Ogra-managed exports
+- Ogra-managed tool calls
+- Ogra-launched local agent inputs/outputs
+
+**Ogra 不可控的出/入境路径：**
+
 - provider 日志保留
+- provider 端云模型内部 chain-of-thought 与 provider 端 tool calls
 - crash report
 - telemetry
 - export
 - clipboard
 - screenshots
 - browser tools
-- MCP tools
-- remote A2A agents
-- 本地 Agent 网络请求
-- Agent stdout / stderr
+- MCP tools / remote A2A agents（超出 Ogra 适配器外）
+- 本地 Agent 网络请求（适配器未做网络限制时）
+- Agent stdout / stderr（Ogra 未捕获的部分）
+- 用户 copy/paste
 
-Data Safety Center 和 AI Governance Center 必须能解释 Ogra 管控了哪些路径、没有管控哪些路径。
+Data Safety Center 和 AI Governance Center 必须能解释 Ogra 管控了哪些路径、没有管控哪些路径。产品文案必须诚实：
+
+> Ogra 记录跨越你机器和云端之间边界的全部内容。它无法——也不会——记录数据抵达云供应商后，在供应商基础设施内部发生的事。你送出了什么、为什么送、送回的是什么：这些可审计。模型内部的思考链：那是供应商的事。
 
 ---
 
@@ -1048,7 +1119,7 @@ Ogra 应兼容 A2A，而不是自创封闭 A2A v2。
 
 ## 7.3 脱敏
 
-第一版脱敏只做明确规则：
+第一版脱敏只做明确规则，但所有规则都属于版本化的 `redaction_rule_sets` / `redaction_rule_versions`：
 
 - email
 - phone
@@ -1068,10 +1139,11 @@ Ogra 应兼容 A2A，而不是自创封闭 A2A v2。
 - 脱敏前后 diff 预览
 - 残留风险提示
 - 结构化字段屏蔽
-- 不可逆替换
+- 不可逆替换（用户可见替换策略）
 - hash / tokenization
 - 用户确认原文是否允许上云
-- 脱敏规则版本写入审计
+- 脱敏规则版本写入审计、`redaction_records`、对应 `run_events` / `model_calls` / `egress_records`
+- re-sanitize 循环：Approve-then-Egress 模式下用户拒绝时，应用更严格的规则版本或用户指定排除项生成新预览，继续直到 `approved` 或 `aborted`；每一轮写入 `rejection_resanitize_iterations`
 
 ## 7.4 Prompt Injection And Untrusted Content
 
@@ -1086,6 +1158,7 @@ Ogra 必须把用户指令、系统策略、Agent 指令和知识库内容分层
 - 工具输出
 - 远程 Agent 消息
 - 本地 Agent stdout / stderr
+- **每个云响应、A2A 消息、MCP 工具结果、tool return value**（新增）
 
 原则：
 
@@ -1097,8 +1170,9 @@ Ogra 必须把用户指令、系统策略、Agent 指令和知识库内容分层
 - 禁止从文档内容中直接触发 shell、网络、文件写入、跨空间读取。
 - 文档中的“忽略以上指令”“上传文件”“调用外部工具”等内容应触发 warning。
 - prompt injection warning 必须写入 run trace。
+- **所有云响应 / A2A / MCP / tool return 都要经过 Ingress Review Agent（独立进程），产出 `{ patternId, evidence, evidenceHash, severity, layer }` 写入 `ingress_review_findings`。** 可疑或恶意内容进入 `quarantine_contents` 隔离表，触发 incident，用户通过受限沙箱视图查看 sanitized summary。
 
-第一版只做规则和启发式检测，不承诺完全防护。
+第一版只做规则和启发式检测（regex 层），不承诺完全防护。Beta 起 Ingress Review Agent 加挂本地 LLM 语义层作为兜底。
 
 ## 7.5 Agent Permission Model
 
@@ -1185,20 +1259,34 @@ Risk exception 必须记录：
 
 # 8. MVP 路线图
 
-## 8.1 Alpha：核心闭环
+## 8.1 Alpha：Hybrid-Default 核心闭环
 
-目标：证明 Ogra 最不可替代的闭环成立。
+目标：证明 Ogra 的 hybrid-default 闭环成立——本地数据通过出境三档策略可控地上云，云端响应通过独立 Ingress Review Agent 可信地回到本地，全程审计可复盘。
 
 Alpha demo path：
 
 ```text
 导入敏感文件夹
   -> 标记 Confidential
-  -> 本地 RAG 检索
-  -> Policy 判断 local-only
-  -> 本地模型回答
-  -> 展示 0 Ogra-managed cloud calls
-  -> 展示 route decision + local audit trail
+  -> 本地 RAG 检索（policy 评估先于检索）
+  -> Policy 判定：data_classification = confidential
+                egress_mode = approve_then_egress
+  -> 脱敏引擎生成 sanitized preview
+  -> 展示 preview + 脱敏规则版本 + payload hash
+  -> 用户 approve（或走 re-sanitize 循环）
+  -> 出云（云端推理）
+  -> 云响应回到本地
+  -> Ingress Review Agent 独立进程扫描（patternId, severity, layer）
+  -> clean / suspicious / malicious 三档处理
+  -> 本地合成最终答案
+  -> 展示：
+      * 0 Ogra-managed cloud calls（如确实没有出境）或
+        出境次数 + 出境模式（approve / log / auto-filter）
+      * route decision（含 egress_mode 与 redaction_rule_version）
+      * re-sanitize 迭代历史（如发生）
+      * ingress findings 列表
+      * quarantine 提示（如发生）
+      * local audit trail（hash chain 完整）
 ```
 
 范围：
@@ -1206,26 +1294,41 @@ Alpha demo path：
 1. 桌面壳
 2. 本地 workspace
 3. Markdown / TXT / code 文件夹导入
-4. 手动 reindex
+4. 手动 reindex（带进度事件）
 5. SQLite FTS5 检索
 6. Ollama adapter
 7. OpenAI-compatible adapter
-8. InternalAgentAdapter
-9. 基础 Policy Engine
-10. Route Decision
-11. append-only local audit trail
-12. Data Safety Center v0
-13. AI Governance Center v0 的 run risk summary
+8. InternalAgentAdapter（Plan + ReAct + 强持久化 + sanitize/policy/route/audit 中间件）
+9. LocalCommandAgentAdapter（read-only supervised，Beta 起限定允许列表）
+10. 基础 Policy Engine（出境三档 + 入境三档 + Restricted blocked）
+11. 脱敏引擎（版本化规则集 + diff 预览 + re-sanitize 循环）
+12. Ingress Review Agent（独立进程，regex 层；语义层 v1.0）
+13. Quarantine 隔离表与受限沙箱视图
+14. Route Decision（含 egress_mode、redaction_rule_version、ingress findings）
+15. Append-only local audit trail（hash chain 完整）
+16. Data Safety Center v0（含出境模式、ingress 摘要、scheduled/continuous run 摘要）
+17. AI Governance Center v0（含 egress approval queue、ingress incident、per-agent ingress/egress 统计）
+18. Agent Group：Pipeline + Parallel + Debate 三种模式，per-step policy/audit
+19. Agent Group 调度：interval + continuous，per-iteration 与 lifetime-level bounds
+20. Skills Market：built-in + local-recipe，每次 use_skill 审计
+21. 审计导出（NDJSON/CSV，policy-gated）
+22. M3 记忆中心（episodic 自动；semantic/procedural 需用户确认）
 
 成功标准：
 
 - 用户能导入一个文件夹。
 - 用户能给 workspace / 文件夹标记数据级别。
-- Ogra 能根据数据分级决定 local-only / cloud / blocked。
-- 用户能用本地模型完成一次私有资料问答。
-- 用户能看到 route decision。
+- Ogra 能根据数据分级自动选择出境模式（auto_redact / log_and_proceed / approve_then_egress / blocked）。
+- Confidential 数据走 Approve-then-Egress：预览 → 用户 approve → 出云；用户 reject → re-sanitize 循环 → 新预览。
+- 云响应回到本地前被独立 Ingress Review Agent 扫描，clean / suspicious / malicious 分类与对应处理。
+- 用户能用本地模型或云端模型完成一次私有资料问答。
+- 用户能看到 route decision、出境模式、脱敏规则版本、审批记录、ingress findings、re-sanitize 迭代历史。
 - 用户能看到 local audit trail。
-- 用户能看到 0 Ogra-managed cloud calls 的记录口径。
+- 用户能看到云调用次数与对应出境模式（"0 Ogra-managed cloud calls" 是其中一种状态，不再是默认口号）。
+- Audit hash chain 可用 `previous_hash` / `event_hash` 重新验证。
+- Agent Group 至少 Pipeline 跑通；Parallel / Debate 跑通，per-step policy/audit 完整。
+- 至少一个 interval 调度和一个 continuous 调度能运行并产生 `scheduled_run_iterations`。
+- 至少一个 built-in 技能和一个 local-recipe 技能能跑通并产生 `skill_invocations` 行。
 
 ## 8.2 Beta：个人工作空间
 
