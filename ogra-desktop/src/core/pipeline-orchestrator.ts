@@ -4,7 +4,8 @@ import { PolicyService, PolicyEvaluationInput } from './policy-service';
 import { RouteService } from './route-service';
 import { RagEngine } from '../edge/rag-engine';
 import { BaseModelAdapter } from './model-adapter';
-import { DataClassification, RunEventType, AgentGroupMode } from '../shared/types';
+import { DataClassification, RunEventType, AgentGroupMode, PipelineStatus } from '../shared/types';
+import { PromptInjectionDetector } from './prompt-injection-detector';
 import * as crypto from 'crypto';
 
 export interface PipelineStep {
@@ -21,6 +22,7 @@ export interface PipelineConfig {
   name: string;
   task: string;
   steps: PipelineStep[];
+  dataClassification?: DataClassification;
   maxSteps?: number;
   maxTokens?: number;
   maxDurationMs?: number;
@@ -48,10 +50,11 @@ export interface StepResult {
  * - per-step policy checks, route decisions, audit events
  * - policy check before each step
  */
-export type PipelineState = 'running' | 'paused' | 'cancelled';
+export type PipelineState = PipelineStatus;
 
 export class PipelineOrchestrator {
   private running: Map<string, PipelineState> = new Map();
+  private piDetector = new PromptInjectionDetector();
 
   constructor(
     private db: DatabaseService,
@@ -110,9 +113,10 @@ export class PipelineOrchestrator {
         const startedAt = new Date().toISOString();
 
         // Policy pre-check for this step
+        const classification = config.dataClassification || DataClassification.Internal;
         const policyInput: PolicyEvaluationInput = {
           workspaceId,
-          dataClassification: DataClassification.Internal,
+          dataClassification: classification,
           requestedCompute: step.modelAdapter.isLocal ? 'local' : 'cloud',
           providerId: step.modelAdapter.providerId,
           modelId: step.modelId,
@@ -122,7 +126,7 @@ export class PipelineOrchestrator {
 
         const policyResult = await this.policyService.evaluate(policyInput);
 
-        // Store step record
+        // Store step record — mark as running initially, will update on completion
         const stepId = `step_${groupRunId}_${i}`;
         this.db.getRawDB().prepare(`
           INSERT INTO run_steps (id, agent_group_run_id, step_index, agent_id, role, status, started_at)
@@ -171,6 +175,20 @@ export class PipelineOrchestrator {
             ).join('\n');
             promptParts.push({ role: 'context' as const, content: `Retrieved knowledge:\n${contextBlock}` });
             citations = this.ragEngine.assembleCitations(retrievedChunks);
+          }
+
+          // Prompt injection detection on retrieved content
+          for (const chunk of retrievedChunks) {
+            const matches = this.piDetector.detect(chunk.snippet);
+            for (const match of matches) {
+              this.db.appendRunEvent(groupRunId, workspaceId, RunEventType.PromptInjectionWarning, {
+                chunkId: chunk.chunkId,
+                patternId: match.patternId,
+                evidence: match.evidence,
+                evidenceHash: match.evidenceHash,
+                detectorVersion: match.detectorVersion,
+              });
+            }
           }
 
           // Invoke model
@@ -298,7 +316,7 @@ export class PipelineOrchestrator {
     if (state === 'paused') {
       this.running.set(groupRunId, 'running');
       this.db.getRawDB().prepare(
-        "UPDATE agent_group_runs SET status = 'created' WHERE id = ?"
+        "UPDATE agent_group_runs SET status = 'running' WHERE id = ?"
       ).run(groupRunId);
     }
   }
@@ -323,6 +341,10 @@ export class PipelineOrchestrator {
    * Each step performs real model invocation with policy checks,
    * route decisions, RAG retrieval, and token tracking.
    * Results are collected via Promise.all.
+   *
+   * BETA: This mode is reserved for Beta release. In Alpha, only
+   * runPipeline is supported. This method is kept for development
+   * and testing but will be gated behind a feature flag in Beta.
    */
   async runParallel(config: PipelineConfig, _workspaceId: string): Promise<{
     groupRunId: string; steps: StepResult[]; summary: string;
@@ -371,9 +393,10 @@ export class PipelineOrchestrator {
       const startedAt = new Date().toISOString();
 
       // Policy pre-check for this step
+      const classification = config.dataClassification || DataClassification.Internal;
       const policyInput: PolicyEvaluationInput = {
         workspaceId,
-        dataClassification: DataClassification.Internal,
+        dataClassification: classification,
         requestedCompute: step.modelAdapter.isLocal ? 'local' : 'cloud',
         providerId: step.modelAdapter.providerId,
         modelId: step.modelId,
@@ -422,6 +445,20 @@ export class PipelineOrchestrator {
           promptParts.push({ role: 'context' as const, content: `Retrieved knowledge:\n${contextBlock}` });
           citations = this.ragEngine.assembleCitations(retrievedChunks);
         }
+
+          // Prompt injection detection on retrieved content
+          for (const chunk of retrievedChunks) {
+            const matches = this.piDetector.detect(chunk.snippet);
+            for (const match of matches) {
+              this.db.appendRunEvent(groupRunId, workspaceId, RunEventType.PromptInjectionWarning, {
+                chunkId: chunk.chunkId,
+                patternId: match.patternId,
+                evidence: match.evidence,
+                evidenceHash: match.evidenceHash,
+                detectorVersion: match.detectorVersion,
+              });
+            }
+          }
 
         // Invoke model
         const modelRequest = {
@@ -531,6 +568,10 @@ export class PipelineOrchestrator {
    * Run debate mode — agents exchange arguments in rounds.
    * Each round: all agents respond in sequence, seeing the previous round's arguments.
    * Real model invocation with policy checks, route decisions, RAG retrieval, and token tracking.
+   *
+   * BETA: This mode is reserved for Beta release. In Alpha, only
+   * runPipeline is supported. This method is kept for development
+   * and testing but will be gated behind a feature flag in Beta.
    */
   async runDebate(config: PipelineConfig, _workspaceId: string): Promise<{
     groupRunId: string; steps: StepResult[]; summary: string;
@@ -596,9 +637,10 @@ export class PipelineOrchestrator {
         const startedAt = new Date().toISOString();
 
         // Policy pre-check for this utterance
+        const classification = config.dataClassification || DataClassification.Internal;
         const policyInput: PolicyEvaluationInput = {
           workspaceId,
-          dataClassification: DataClassification.Internal,
+          dataClassification: classification,
           requestedCompute: agent.modelAdapter.isLocal ? 'local' : 'cloud',
           providerId: agent.modelAdapter.providerId,
           modelId: agent.modelId,
@@ -660,6 +702,20 @@ export class PipelineOrchestrator {
             ).join('\n');
             promptParts.push({ role: 'context' as const, content: `Retrieved knowledge:\n${contextBlock}` });
             citations = this.ragEngine.assembleCitations(retrievedChunks);
+          }
+
+          // Prompt injection detection on retrieved content
+          for (const chunk of retrievedChunks) {
+            const matches = this.piDetector.detect(chunk.snippet);
+            for (const match of matches) {
+              this.db.appendRunEvent(groupRunId, workspaceId, RunEventType.PromptInjectionWarning, {
+                chunkId: chunk.chunkId,
+                patternId: match.patternId,
+                evidence: match.evidence,
+                evidenceHash: match.evidenceHash,
+                detectorVersion: match.detectorVersion,
+              });
+            }
           }
 
           // Invoke model

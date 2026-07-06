@@ -71,7 +71,7 @@ describe('InternalAgentAdapter', () => {
       routeService,
       mockAuditService,
       policyService,
-      { appDataDir: fixture.testDir, secretBroker: undefined, isDev: true } as OgraCoreConfig,
+      { appDataDir: fixture.testDir, secretBroker: undefined, isDev: true } as unknown as OgraCoreConfig,
     );
     ragEngine = new RagEngine(db);
     agent = new InternalAgentAdapter(db, policyService, routeService, runService, ragEngine);

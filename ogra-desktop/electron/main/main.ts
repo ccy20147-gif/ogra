@@ -110,7 +110,7 @@ function registerIpcHandlers(): void {
 
         // Validate argument count to catch mismatched IPC calls
         const expectedArgs = options?.argCount ?? 0;
-        if (expectedArgs > 0 && args.length < expectedArgs) {
+        if (expectedArgs > 0 && args.length !== expectedArgs) {
           return {
             success: false,
             error: { code: OgraErrorCode.INVALID_ARGUMENT, message: `Expected ${expectedArgs} arguments, got ${args.length}` },
@@ -282,6 +282,66 @@ function registerIpcHandlers(): void {
     { argCount: 1, requiresCaller: false },
   );
 
+  // Audit Export
+  registerHandler(
+    IpcChannel.AuditExport,
+    async (_event, format: string) => {
+      if (typeof format !== 'string') throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Export format is required');
+      return ograCore!.auditService.exportEvents(format);
+    },
+    { argCount: 1 },
+  );
+
+  // Permission/Approval channels (Alpha placeholder — full implementation deferred to Beta)
+  registerHandler(
+    IpcChannel.PermissionRequest,
+    async (_event, req: any) => {
+      if (!req || !req.runId) throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Permission request must include runId');
+      return { id: `perm_${Date.now()}`, status: 'pending', message: 'Permission workflow is reserved for Beta' };
+    },
+    { argCount: 1 },
+  );
+
+  registerHandler(
+    IpcChannel.PermissionDecision,
+    async (_event, req: any) => {
+      if (!req || !req.permissionId) throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Permission decision must include permissionId');
+      return { status: 'not_implemented', message: 'Permission decision workflow is reserved for Beta' };
+    },
+    { argCount: 1 },
+  );
+
+  registerHandler(
+    IpcChannel.ApprovalRequest,
+    async (_event, req: any) => {
+      if (!req || !req.runId) throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval request must include runId');
+      const approvalId = `apr_${Date.now()}`;
+      ograCore!.auditService.appendEvent({
+        runId: req.runId,
+        workspaceId: req.workspaceId || 'unknown',
+        eventType: 'approval_requested',
+        eventPayload: { approvalId, reason: req.reason } as Record<string, unknown>,
+      });
+      return { id: approvalId, status: 'pending' };
+    },
+    { argCount: 1 },
+  );
+
+  registerHandler(
+    IpcChannel.ApprovalDecision,
+    async (_event, req: any) => {
+      if (!req || !req.approvalId) throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval decision must include approvalId');
+      ograCore!.auditService.appendEvent({
+        runId: req.runId || 'unknown',
+        workspaceId: req.workspaceId || 'unknown',
+        eventType: 'approval_decision',
+        eventPayload: { approvalId: req.approvalId, decision: req.decision } as Record<string, unknown>,
+      });
+      return { status: 'recorded' };
+    },
+    { argCount: 1 },
+  );
+
   // Data Safety
   registerHandler(
     IpcChannel.DataSafetySummary,
@@ -414,27 +474,38 @@ function registerIpcHandlers(): void {
 }
 
 function validateCallerContext(event: Electron.IpcMainInvokeEvent): void {
-  // Main process validates that the caller is from the correct renderer
-  if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+  // Main process validates that the caller is from the correct renderer window.
+  // Uses BrowserWindow.fromWebContents to handle window rebuilds correctly.
+  const callerWindow = event.sender
+    ? (() => {
+        try { return require('electron').BrowserWindow.fromWebContents(event.sender); } catch { return null; }
+      })()
+    : null;
+  if (!callerWindow || callerWindow.id !== mainWindow?.id) {
     throw new OgraError(OgraErrorCode.PERMISSION_DENIED, 'Caller is not the main renderer');
   }
 }
 
 // ---- Shell open restrictions ----
 // Only these URLs may open in external browser via shell.openExternal
-const ALLOWED_EXTERNAL_URLS = [
-  'https://github.com/ccy20147-gif/ogra',
-  'https://ogra-desktop.dev',
+const ALLOWED_EXTERNAL_HOSTS = [
+  'github.com',
+  'ogra-desktop.dev',
 ];
 
 app.on('web-contents-created', (_event, contents) => {
   // Allow external URLs from the allowlist via shell.openExternal
   contents.setWindowOpenHandler(({ url }) => {
-    for (const allowedUrl of ALLOWED_EXTERNAL_URLS) {
-      if (url.startsWith(allowedUrl)) {
-        shell.openExternal(url);
-        return { action: 'deny' }; // deny window, already opened externally
+    try {
+      const parsed = new URL(url);
+      for (const allowedHost of ALLOWED_EXTERNAL_HOSTS) {
+        if (parsed.hostname === allowedHost || parsed.hostname.endsWith('.' + allowedHost)) {
+          shell.openExternal(url);
+          return { action: 'deny' };
+        }
       }
+    } catch {
+      // Invalid URL — block
     }
     // Block all other popups
     return { action: 'deny' };
@@ -469,6 +540,15 @@ app.whenReady().then(async () => {
   await ograCore.initialize();
 
   registerIpcHandlers();
+
+  // Wire up secret broker to audit service (must be after OgraCore init)
+  secretBroker.setAuditService(ograCore!.auditService);
+
+  // Wire up indexing progress events to renderer
+  ograCore!.knowledgeService.onProgress = (event) => {
+    mainWindow?.webContents.send(IpcChannel.IndexingProgress, event);
+  };
+
   createWindow();
 
   app.on('activate', () => {

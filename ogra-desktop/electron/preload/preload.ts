@@ -1,6 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron';
-import { IpcChannel } from '../../src/shared/ipc-channels';
-import { ALLOWED_IPC_CHANNELS } from '../../src/shared/ipc-channels';
+import { IpcChannel, IpcResult } from '../../src/shared/ipc-channels';
 
 /**
  * Typed preload bridge for Ogra Desktop.
@@ -9,15 +8,6 @@ import { ALLOWED_IPC_CHANNELS } from '../../src/shared/ipc-channels';
  * All IPC calls go through typed channel names. No generic
  * ipcRenderer.send or channel access is exposed.
  */
-
-// Build a typed invocation helper only for allowed channels
-const api: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
-
-for (const channel of ALLOWED_IPC_CHANNELS) {
-  api[channel.replace(':', '_')] = (...args: unknown[]) => {
-    return ipcRenderer.invoke(channel, ...args);
-  };
-}
 
 // Progress event subscriptions (approved streams only)
 const progressListeners = new Map<string, Set<(data: unknown) => void>>();
@@ -46,13 +36,19 @@ function subscribeProgress(channel: string, callback: (data: unknown) => void): 
   progressListeners.get(channel)!.add(callback);
 
   return () => {
-    progressListeners.get(channel)?.delete(callback);
+    const listeners = progressListeners.get(channel);
+    if (!listeners) return;
+    listeners.delete(callback);
+    // Clean up ipcRenderer listener when no more callbacks remain
+    if (listeners.size === 0) {
+      ipcRenderer.removeAllListeners(channel);
+      progressListeners.delete(channel);
+    }
   };
 }
 
 // Expose typed API
 contextBridge.exposeInMainWorld('ogra', {
-  ...api,
   // Indexing progress subscription
   onIndexingProgress: (callback: (data: unknown) => void) => subscribeProgress(IpcChannel.IndexingProgress, callback),
   // Workspace API
@@ -88,6 +84,7 @@ contextBridge.exposeInMainWorld('ogra', {
   audit: {
     events: (runId: string, limit?: number, offset?: number) =>
       ipcRenderer.invoke(IpcChannel.AuditEventFetch, { runId, limit, offset }),
+    export: (format: string) => ipcRenderer.invoke(IpcChannel.AuditExport, format),
   },
   // Data Safety
   dataSafety: {
@@ -101,12 +98,15 @@ contextBridge.exposeInMainWorld('ogra', {
   // Providers
   provider: {
     list: () => ipcRenderer.invoke(IpcChannel.ProviderList),
+    update: (req: unknown) => ipcRenderer.invoke(IpcChannel.ProviderUpdate, req),
     testConnection: (id: string) => ipcRenderer.invoke(IpcChannel.ProviderConnectTest, id),
   },
   // Secrets
   secret: {
     list: () => ipcRenderer.invoke(IpcChannel.SecretList),
     create: (req: unknown) => ipcRenderer.invoke(IpcChannel.SecretCreate, req),
+    update: (req: unknown) => ipcRenderer.invoke(IpcChannel.SecretUpdate, req),
+    delete: (id: string) => ipcRenderer.invoke(IpcChannel.SecretDelete, id),
   },
   // Policy
   policy: {
@@ -122,52 +122,56 @@ contextBridge.exposeInMainWorld('ogra', {
 // Type declaration for renderer
 export interface OgraAPI {
   workspace: {
-    create: (req: unknown) => Promise<unknown>;
-    list: () => Promise<unknown>;
-    select: (id: string) => Promise<unknown>;
-    updateClassification: (workspaceId: string, classification: string) => Promise<unknown>;
+    create: (req: unknown) => Promise<IpcResult>;
+    list: () => Promise<IpcResult>;
+    select: (id: string) => Promise<IpcResult>;
+    updateClassification: (workspaceId: string, classification: string) => Promise<IpcResult>;
   };
   folder: {
-    import: (req: unknown) => Promise<unknown>;
-    validate: (path: string) => Promise<unknown>;
+    import: (req: unknown) => Promise<IpcResult>;
+    validate: (path: string) => Promise<IpcResult>;
   };
   indexing: {
-    start: (kbId: string) => Promise<unknown>;
-    status: (kbId: string) => Promise<unknown>;
-    cancel: (kbId: string) => Promise<unknown>;
+    start: (kbId: string) => Promise<IpcResult>;
+    status: (kbId: string) => Promise<IpcResult>;
+    cancel: (kbId: string) => Promise<IpcResult>;
   };
   run: {
-    start: (req: unknown) => Promise<unknown>;
-    status: (runId: string) => Promise<unknown>;
-    cancel: (runId: string) => Promise<unknown>;
+    start: (req: unknown) => Promise<IpcResult>;
+    status: (runId: string) => Promise<IpcResult>;
+    cancel: (runId: string) => Promise<IpcResult>;
   };
   route: {
-    fetch: (runId: string) => Promise<unknown>;
+    fetch: (runId: string) => Promise<IpcResult>;
   };
   audit: {
-    events: (runId: string, limit?: number, offset?: number) => Promise<unknown>;
+    events: (runId: string, limit?: number, offset?: number) => Promise<IpcResult>;
+    export: (format: string) => Promise<IpcResult>;
   };
   dataSafety: {
-    summary: (workspaceId: string) => Promise<unknown>;
-    cloudCalls: (workspaceId: string) => Promise<unknown>;
+    summary: (workspaceId: string) => Promise<IpcResult>;
+    cloudCalls: (workspaceId: string) => Promise<IpcResult>;
   };
   governance: {
-    runRisk: (runId: string) => Promise<unknown>;
+    runRisk: (runId: string) => Promise<IpcResult>;
   };
   provider: {
-    list: () => Promise<unknown>;
-    testConnection: (id: string) => Promise<unknown>;
+    list: () => Promise<IpcResult>;
+    update: (req: unknown) => Promise<IpcResult>;
+    testConnection: (id: string) => Promise<IpcResult>;
   };
   secret: {
-    list: () => Promise<unknown>;
-    create: (req: unknown) => Promise<unknown>;
+    list: () => Promise<IpcResult>;
+    create: (req: unknown) => Promise<IpcResult>;
+    update: (req: unknown) => Promise<IpcResult>;
+    delete: (id: string) => Promise<IpcResult>;
   };
   policy: {
-    dryRun: (input: unknown) => Promise<unknown>;
-    list: () => Promise<unknown>;
+    dryRun: (input: unknown) => Promise<IpcResult>;
+    list: () => Promise<IpcResult>;
   };
   knowledge: {
-    listBases: (workspaceId: string) => Promise<unknown>;
+    listBases: (workspaceId: string) => Promise<IpcResult>;
   };
   onIndexingProgress: (callback: (data: unknown) => void) => () => void;
 }

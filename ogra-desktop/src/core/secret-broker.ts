@@ -1,4 +1,6 @@
 import { OgraError, OgraErrorCode } from '../shared/errors';
+import { RunEventType } from '../shared/types';
+import { AuditService } from './audit-service';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as crypto from 'crypto';
@@ -26,8 +28,10 @@ export class OgraSecretBroker {
   }> = new Map();
   private encryptionKey: Buffer;
   private loaded = false;
+  public auditService?: AuditService;
 
-  constructor(appDataDir: string) {
+  constructor(appDataDir: string, auditService?: AuditService) {
+    this.auditService = auditService;
     this.secretsFile = path.join(appDataDir, 'secrets', 'secrets.enc.json');
     // Use a randomly generated encryption key stored alongside the secrets file.
     // On first run, a new 32-byte key is generated and persisted with strict
@@ -35,6 +39,10 @@ export class OgraSecretBroker {
     // path, as an attacker must read the key file to decrypt secrets.
     // Production should use Electron safeStorage / OS keychain.
     this.encryptionKey = this.loadOrCreateEncryptionKey(appDataDir);
+  }
+
+  setAuditService(auditService: AuditService): void {
+    this.auditService = auditService;
   }
 
   private loadOrCreateEncryptionKey(appDataDir: string): Buffer {
@@ -123,6 +131,17 @@ export class OgraSecretBroker {
       createdAt: now,
     });
     this.save();
+    await this.auditService?.appendEvent({
+      runId: 'system',
+      workspaceId: 'system',
+      eventType: RunEventType.SecretUsed,
+      eventPayload: {
+        action: 'create',
+        secretId: id,
+        providerId: req.providerId,
+        displayName: req.displayName,
+      },
+    });
     return { id, maskedValue: this.maskValue(req.value), createdAt: now };
   }
 
@@ -133,12 +152,35 @@ export class OgraSecretBroker {
     if (req.value) existing.value = req.value;
     if (req.displayName) existing.displayName = req.displayName;
     this.save();
+    await this.auditService?.appendEvent({
+      runId: 'system',
+      workspaceId: 'system',
+      eventType: RunEventType.SecretUsed,
+      eventPayload: {
+        action: 'update',
+        secretId: id,
+        providerId: existing.providerId,
+        displayName: existing.displayName,
+      },
+    });
   }
 
   async delete(id: string): Promise<void> {
     this.ensureLoaded();
+    const existing = this.secrets.get(id);
     this.secrets.delete(id);
     this.save();
+    await this.auditService?.appendEvent({
+      runId: 'system',
+      workspaceId: 'system',
+      eventType: RunEventType.SecretUsed,
+      eventPayload: {
+        action: 'delete',
+        secretId: id,
+        providerId: existing?.providerId,
+        displayName: existing?.displayName,
+      },
+    });
   }
 
   async getValue(providerId: string): Promise<string | null> {
@@ -147,6 +189,17 @@ export class OgraSecretBroker {
       if (secret.providerId === providerId) {
         secret.lastUsedAt = new Date().toISOString();
         this.save();
+        await this.auditService?.appendEvent({
+          runId: 'system',
+          workspaceId: 'system',
+          eventType: RunEventType.SecretUsed,
+          eventPayload: {
+            action: 'read',
+            secretId: secret.id,
+            providerId: secret.providerId,
+            displayName: secret.displayName,
+          },
+        });
         return secret.value;
       }
     }

@@ -2,7 +2,7 @@ import { OgraDatabase } from './database';
 import * as crypto from 'crypto';
 import { DataClassification, WorkspaceType } from '../shared/types';
 import { OgraError, OgraErrorCode } from '../shared/errors';
-import { canonicalJSON } from './audit-service';
+import { canonicalJSON, GENESIS_HASH } from './audit-service';
 
 export interface WorkspaceRow {
   id: string;
@@ -35,14 +35,19 @@ export interface RouteDecisionRow {
   data_classification: string;
   high_water_sources_json: string | null;
   reason_json: string | null;
+  local_steps_json: string | null;
+  cloud_steps_json: string | null;
   requires_user_approval: number;
+  approval_id: string | null;
+  policy_evaluation_id: string | null;
   provider_id: string | null;
+  incident_ids_json: string | null;
   model_id: string | null;
   cloud_payload_hash: string | null;
   created_at: string;
 }
 
-const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+// GENESIS_HASH — imported from audit-service.ts
 
 /**
  * Database service providing typed query methods for Ogra Core.
@@ -64,6 +69,14 @@ export class DatabaseService {
     return this.db.getDB();
   }
 
+  initialize(): void {
+    // Placeholder — migrations run in constructor
+  }
+
+  close(): void {
+    this.db.close();
+  }
+
   /**
    * Update a single field on a run_event row by ID.
    * Intended for test scenarios that need to tamper with event data
@@ -80,11 +93,7 @@ export class DatabaseService {
     ).run(value, eventId);
   }
 
-  close(): void {
-    this.db.close();
-  }
 
-  // ---- Workspace Queries ----
 
   createWorkspace(name: string, type: WorkspaceType, defaultClassification: DataClassification): WorkspaceRow {
     const id = `ws_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
@@ -121,47 +130,58 @@ export class DatabaseService {
     policyVersionHash?: string,
     redactionRuleVersion?: string,
   ): RunEventRow {
-    // Get next sequence
-    const lastSeq = this.db.getDB().prepare(
-      'SELECT MAX(sequence) as seq FROM run_events WHERE run_id = ?'
-    ).get(runId) as { seq: number | null };
-    const seq = (lastSeq?.seq ?? 0) + 1;
+    // Use a transaction to ensure atomicity of hash chain append
+    const result = this.db.getDB().transaction(() => {
+      // Get next sequence
+      const lastSeq = this.db.getDB().prepare(
+        'SELECT MAX(sequence) as seq FROM run_events WHERE run_id = ?'
+      ).get(runId) as { seq: number | null };
+      const seq = (lastSeq?.seq ?? 0) + 1;
 
-    // Get previous event hash
-    const prevEvent = this.db.getDB().prepare(
-      'SELECT event_hash FROM run_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1'
-    ).get(runId) as { event_hash: string } | undefined;
-    const previousHash = prevEvent?.event_hash ?? GENESIS_HASH;
+      // Get previous event hash
+      const prevEvent = this.db.getDB().prepare(
+        'SELECT event_hash FROM run_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1'
+      ).get(runId) as { event_hash: string } | undefined;
+      const previousHash = prevEvent?.event_hash ?? GENESIS_HASH;
 
-    // Calculate payload hash and event hash
-    const payloadHash = crypto.createHash('sha256').update(canonicalJSON(eventPayload)).digest('hex');
-    const hashInput = canonicalJSON(eventPayload) + previousHash;
-    const eventHash = crypto.createHash('sha256').update(hashInput).digest('hex');
+      // Calculate payload hash and event hash
+      const payloadHash = crypto.createHash('sha256').update(canonicalJSON(eventPayload)).digest('hex');
+      const hashInput = canonicalJSON(eventPayload) + previousHash;
+      const eventHash = crypto.createHash('sha256').update(hashInput).digest('hex');
 
-    const id = `evt_${Date.now()}_${seq}_${crypto.randomBytes(4).toString('hex')}`;
-    const now = new Date().toISOString();
+      const id = `evt_${Date.now()}_${seq}_${crypto.randomBytes(4).toString('hex')}`;
+      const now = new Date().toISOString();
 
-    this.db.getDB().prepare(`
-      INSERT INTO run_events (id, run_id, workspace_id, sequence, event_type,
-        event_payload_json, payload_hash, previous_hash, event_hash,
-        policy_version_hash, redaction_rule_version, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(id, runId, workspaceId, seq, eventType, JSON.stringify(eventPayload),
-      payloadHash, previousHash, eventHash, policyVersionHash || null, redactionRuleVersion || null, now);
+      this.db.getDB().prepare(`
+        INSERT INTO run_events (id, run_id, workspace_id, sequence, event_type,
+          event_payload_json, payload_hash, previous_hash, event_hash,
+          policy_version_hash, redaction_rule_version, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(id, runId, workspaceId, seq, eventType, JSON.stringify(eventPayload),
+        payloadHash, previousHash, eventHash, policyVersionHash || null, redactionRuleVersion || null, now);
 
-    return {
-      id, run_id: runId, workspace_id: workspaceId, sequence: seq, event_type: eventType,
-      event_payload_json: JSON.stringify(eventPayload), payload_hash: payloadHash,
-      previous_hash: previousHash, event_hash: eventHash,
-      policy_version_hash: policyVersionHash || null, redaction_rule_version: redactionRuleVersion || null,
-      created_at: now,
-    };
+      return {
+        id, run_id: runId, workspace_id: workspaceId, sequence: seq, event_type: eventType,
+        event_payload_json: JSON.stringify(eventPayload), payload_hash: payloadHash,
+        previous_hash: previousHash, event_hash: eventHash,
+        policy_version_hash: policyVersionHash || null, redaction_rule_version: redactionRuleVersion || null,
+        created_at: now,
+      };
+    })();
+
+    return result;
   }
 
   getRunEvents(runId: string, limit = 100, offset = 0): RunEventRow[] {
     return this.db.getDB().prepare(`
       SELECT * FROM run_events WHERE run_id = ? ORDER BY sequence ASC LIMIT ? OFFSET ?
     `).all(runId, limit, offset) as RunEventRow[];
+  }
+
+  getAllRunEvents(): RunEventRow[] {
+    return this.db.getDB().prepare(
+      'SELECT * FROM run_events ORDER BY run_id, sequence ASC'
+    ).all() as RunEventRow[];
   }
 
   getWorkspaceEvents(workspaceId: string, limit = 100): RunEventRow[] {
@@ -216,6 +236,8 @@ export class DatabaseService {
     localSteps: string[];
     cloudSteps: string[];
     requiresUserApproval: boolean;
+    approvalId?: string;
+    policyEvaluationId?: string;
     providerId?: string;
     modelId?: string;
     cloudPayloadHash?: string;
@@ -225,9 +247,10 @@ export class DatabaseService {
     this.db.getDB().prepare(`
       INSERT INTO route_decisions (id, run_id, route, data_classification,
         high_water_sources_json, reason_json, local_steps_json, cloud_steps_json,
-        requires_user_approval, provider_id, model_id, cloud_payload_hash,
+        requires_user_approval, approval_id, policy_evaluation_id,
+        provider_id, model_id, cloud_payload_hash,
         incident_ids_json, created_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       decision.id, decision.runId, decision.route, decision.dataClassification,
       JSON.stringify(decision.highWaterSources),
@@ -235,6 +258,8 @@ export class DatabaseService {
       JSON.stringify(decision.localSteps),
       JSON.stringify(decision.cloudSteps),
       decision.requiresUserApproval ? 1 : 0,
+      decision.approvalId || null,
+      decision.policyEvaluationId || null,
       decision.providerId || null,
       decision.modelId || null,
       decision.cloudPayloadHash || null,
@@ -396,6 +421,69 @@ export class DatabaseService {
     `).run(status, status === 'succeeded' ? now : null, now, id);
   }
 
+  // ---- Document Queries (used by RagEngine) ----
+
+  insertDocument(doc: {
+    id: string; workspaceId: string; knowledgeBaseId: string;
+    filePath: string; fileName: string; extension: string;
+    contentHash: string; sizeBytes: number;
+    classification: string; classificationSource: string;
+  }): void {
+    this.db.getDB().prepare(`
+      INSERT INTO documents (id, workspace_id, knowledge_base_id, file_path, file_name,
+        extension, content_hash, size_bytes, classification, classification_source, indexed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).run(doc.id, doc.workspaceId, doc.knowledgeBaseId, doc.filePath, doc.fileName,
+      doc.extension, doc.contentHash, doc.sizeBytes, doc.classification, doc.classificationSource);
+  }
+
+  insertDocumentChunk(chunk: {
+    id: string; documentId: string; workspaceId: string;
+    content: string; contentHash: string;
+    sourceStartOffset: number; sourceEndOffset: number;
+    sourceLineStart: number | null; sourceLineEnd: number | null;
+    classificationSnapshot: string;
+    parserVersion: string; chunkerVersion: string;
+    allowedForContext: boolean; instructionalContentDetected: boolean;
+  }): void {
+    this.db.getDB().prepare(`
+      INSERT INTO document_chunks (id, document_id, workspace_id, content, content_hash,
+        source_start_offset, source_end_offset, source_line_start, source_line_end,
+        classification_snapshot, parser_version, chunker_version,
+        allowed_for_context, instructional_content_detected)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(chunk.id, chunk.documentId, chunk.workspaceId, chunk.content, chunk.contentHash,
+      chunk.sourceStartOffset, chunk.sourceEndOffset,
+      chunk.sourceLineStart, chunk.sourceLineEnd,
+      chunk.classificationSnapshot, chunk.parserVersion, chunk.chunkerVersion,
+      chunk.allowedForContext ? 1 : 0, chunk.instructionalContentDetected ? 1 : 0);
+  }
+
+  insertDocumentChunkFts(content: string, chunkId: string, workspaceId: string): void {
+    this.db.getDB().prepare(`
+      INSERT INTO document_chunks_fts (content, chunk_id, workspace_id)
+      VALUES (?, ?, ?)
+    `).run(content, chunkId, workspaceId);
+  }
+
+  deleteKnowledgeBaseDocuments(knowledgeBaseId: string): void {
+    this.db.getDB().prepare(`
+      DELETE FROM document_chunks_fts WHERE chunk_id IN (
+        SELECT id FROM document_chunks WHERE document_id IN (
+          SELECT id FROM documents WHERE knowledge_base_id = ?
+        )
+      )
+    `).run(knowledgeBaseId);
+    this.db.getDB().prepare(`
+      DELETE FROM document_chunks WHERE document_id IN (
+        SELECT id FROM documents WHERE knowledge_base_id = ?
+      )
+    `).run(knowledgeBaseId);
+    this.db.getDB().prepare(`
+      DELETE FROM documents WHERE knowledge_base_id = ?
+    `).run(knowledgeBaseId);
+  }
+
   // ---- Agent Run Queries ----
 
   storeRun(run: {
@@ -407,8 +495,11 @@ export class DatabaseService {
     completedAt?: string;
   }): void {
     this.db.getDB().prepare(`
-      INSERT OR REPLACE INTO agent_runs (id, workspace_id, task, status, started_at, completed_at)
+      INSERT INTO agent_runs (id, workspace_id, task, status, started_at, completed_at)
       VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        status = excluded.status,
+        completed_at = excluded.completed_at
     `).run(run.id, run.workspaceId, run.task, run.status, run.startedAt, run.completedAt || null);
   }
 
@@ -433,6 +524,9 @@ export class DatabaseService {
     promptHash?: string;
     requestPayloadHash?: string;
     uploadedPayloadHash?: string;
+    responseHash?: string;
+    redactionRuleVersion?: string;
+    approvalId?: string;
     tokenUsage?: { prompt: number; completion: number; total: number };
     errorCode?: string;
     startedAt: string;
@@ -441,12 +535,14 @@ export class DatabaseService {
     this.db.getDB().prepare(`
       INSERT INTO model_calls (id, run_id, status, adapter_kind, provider_id, model_id,
         route_decision_id, is_cloud, prompt_hash, request_payload_hash, uploaded_payload_hash,
+        response_hash, redaction_rule_version, approval_id,
         token_usage_json, error_code, started_at, completed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       call.id, call.runId, call.status, call.adapterKind, call.providerId, call.modelId,
       call.routeDecisionId || null, call.isCloud ? 1 : 0,
       call.promptHash || null, call.requestPayloadHash || null, call.uploadedPayloadHash || null,
+      call.responseHash || null, call.redactionRuleVersion || null, call.approvalId || null,
       call.tokenUsage ? JSON.stringify(call.tokenUsage) : null,
       call.errorCode || null, call.startedAt, call.completedAt || null,
     );

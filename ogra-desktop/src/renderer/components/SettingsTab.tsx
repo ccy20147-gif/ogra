@@ -88,7 +88,7 @@ const ProviderManagement: React.FC<{
 
   const handleAdd = async () => {
     try {
-      const result = await window.ogra.provider_update(form);
+      const result = await window.ogra.provider.update(form);
       if ((result as any)?.success) {
         onStatus(`Provider "${form.name}" added successfully`);
         resetForm();
@@ -116,7 +116,7 @@ const ProviderManagement: React.FC<{
   const handleUpdate = async () => {
     if (!editId) return;
     try {
-      const result = await window.ogra.provider_update({ id: editId, ...form });
+      const result = await window.ogra.provider.update({ id: editId, ...form });
       if ((result as any)?.success) {
         onStatus(`Provider "${form.name}" updated`);
         resetForm();
@@ -228,9 +228,9 @@ const ProviderManagement: React.FC<{
             {testResult?.id === p.id && (
               <div style={{
                 fontSize: '12px', marginTop: '4px',
-                color: testResult.success ? '#3fb950' : '#f85149',
+                color: testResult!.success ? '#3fb950' : '#f85149',
               }}>
-                {testResult.success ? '✓' : '✗'} {testResult.message}
+                {testResult!.success ? '✓' : '✗'} {testResult?.message}
               </div>
             )}
           </div>
@@ -287,7 +287,7 @@ const ApiKeyManagement: React.FC<{
 
   const handleDeleteKey = async (id: string) => {
     try {
-      const result = await window.ogra.secret_delete(id);
+      const result = await window.ogra.secret.delete(id);
       if ((result as any)?.success) {
         onStatus('API key deleted');
         loadSecrets();

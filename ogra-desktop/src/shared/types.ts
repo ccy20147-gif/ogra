@@ -87,10 +87,19 @@ export enum ApprovalDecision {
   Expired = 'expired',
 }
 
+/** Pipeline execution status */
+export enum PipelineStatus {
+  Running = 'running',
+  Paused = 'paused',
+  Cancelled = 'cancelled',
+}
+
 /** Agent group execution mode — Pipeline is implemented in Alpha;
  *  Parallel and Debate are planned for Beta. */
 export enum AgentGroupMode {
   Pipeline = 'pipeline',
+  Parallel = 'parallel',
+  Debate = 'debate',
 }
 
 /** Memory types */
@@ -111,11 +120,15 @@ export enum AuditLevel {
 export enum ProviderKind {
   Ollama = 'ollama',
   OpenAICompatible = 'openai_compatible',
+  Internal = 'internal',
+  LocalCommand = 'local_command',
+  A2A = 'a2a',
 }
 
 /** Event types for run_events */
 export enum RunEventType {
   RunCreated = 'run_created',
+  WorkspaceCreated = 'workspace_created',
   PolicyPrecheck = 'policy_precheck',
   RetrievalStarted = 'retrieval_started',
   RetrievalCompleted = 'retrieval_completed',

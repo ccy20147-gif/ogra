@@ -131,7 +131,18 @@ export class ProviderService {
   async testConnection(providerId: string): Promise<{ success: boolean; message: string }> {
     const provider = await this.getProvider(providerId);
     try {
-      const response = await fetch(`${provider.endpoint}/api/tags`, {
+      let endpoint: string;
+      let headers: Record<string, string> = {};
+
+      if (provider.kind === ProviderKind.Ollama) {
+        endpoint = `${provider.endpoint}/api/tags`;
+      } else {
+        // OpenAI-compatible endpoint
+        endpoint = `${provider.endpoint}/models`;
+      }
+
+      const response = await fetch(endpoint, {
+        headers,
         signal: AbortSignal.timeout(5000),
       });
       if (response.ok) {

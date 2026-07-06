@@ -76,7 +76,14 @@ export abstract class BaseModelAdapter {
   abstract testConnection(): Promise<ProviderHealth>;
 
   /**
-   * Validate that the request has proper policy gate evidence.
+   * Optional streaming method.
+   * Adapters that support streaming should override this.
+   */
+  stream?(request: ModelRequest): AsyncGenerator<ModelEvent>;
+
+  /**
+   * Validate that the request has proper policy gate evidence
+   * and that the provider/model IDs match the route decision.
    */
   protected validatePolicyGate(request: ModelRequest): void {
     if (!request.routeDecisionId) {
@@ -87,6 +94,19 @@ export abstract class BaseModelAdapter {
     }
     if (!request.policyVersionHash) {
       throw new OgraError(OgraErrorCode.POLICY_BLOCKED, 'Missing policy version hash');
+    }
+    // Cross-verify provider/model IDs match the route decision
+    if (request.allowedProviderId && this.providerId && request.allowedProviderId !== this.providerId) {
+      throw new OgraError(OgraErrorCode.POLICY_BLOCKED,
+        `Provider mismatch: route decision allows "${request.allowedProviderId}" but adapter is "${this.providerId}"`);
+    }
+    if (request.allowedModelId) {
+      const snap = request.routeDecisionSnapshot as Record<string, unknown>;
+      const snapModelId = snap?.modelId as string | undefined;
+      if (snapModelId && request.allowedModelId !== snapModelId) {
+        throw new OgraError(OgraErrorCode.POLICY_BLOCKED,
+          `Model mismatch: route decision allows "${snapModelId}" but request uses "${request.allowedModelId}"`);
+      }
     }
   }
 }

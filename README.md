@@ -107,7 +107,8 @@ Import sensitive folder
 │   │   ├── 05-model-agent-orchestration.md
 │   │   ├── 06-application-ui-ux.md
 │   │   ├── 07-verification-packaging-release-gates.md
-│   │   └── 08-memory-agentgroup-recipes-v1-requirements.md
+│   │   ├── 08-memory-agentgroup-recipes-v1-requirements.md
+│   │   └── 09-vNext-strategic-direction.md
 │   └── prd/
 │       └── 01-ogra-alpha-requirements.md
 ├── ogra-product-handbook.md

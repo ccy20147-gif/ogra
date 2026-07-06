@@ -17,14 +17,35 @@ export interface RunEventRecord {
   createdAt: string;
 }
 
-const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
+export const GENESIS_HASH = '0000000000000000000000000000000000000000000000000000000000000000';
 
 /**
- * Canonical JSON stringify with sorted keys — shared function so
+ * Canonical JSON stringify with recursive sorted keys — shared function so
  * AuditService and DatabaseService produce identical hashes.
  */
 export function canonicalJSON(obj: Record<string, unknown>): string {
-  return JSON.stringify(obj, Object.keys(obj).sort());
+  return JSON.stringify(obj, (_, val) => {
+    if (val !== null && typeof val === 'object' && !Array.isArray(val)) {
+      const sorted: Record<string, unknown> = {};
+      for (const k of Object.keys(val as Record<string, unknown>).sort()) {
+        sorted[k] = (val as Record<string, unknown>)[k];
+      }
+      return sorted;
+    }
+    if (Array.isArray(val)) {
+      return val.map(item => {
+        if (item !== null && typeof item === 'object') {
+          const sorted: Record<string, unknown> = {};
+          for (const k of Object.keys(item as Record<string, unknown>).sort()) {
+            sorted[k] = (item as Record<string, unknown>)[k];
+          }
+          return sorted;
+        }
+        return item;
+      });
+    }
+    return val;
+  });
 }
 
 /**
@@ -123,8 +144,16 @@ export class AuditService {
 
   private async getAllEventsFromDb(): Promise<any[]> {
     if (!this.dbService) return [];
-    const db = (this.dbService as any).db.getDB();
-    return db.prepare('SELECT * FROM run_events ORDER BY run_id, sequence ASC').all();
+    return this.dbService.getAllRunEvents();
+  }
+
+  async exportEvents(format: string): Promise<{ format: string; eventCount: number; exportId: string }> {
+    const allEvents = await this.getAllEvents();
+    return {
+      format,
+      eventCount: allEvents.length,
+      exportId: `export_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`,
+    };
   }
 
   async verifyChain(runId: string): Promise<{ valid: boolean; brokenAt?: number; errors: string[] }> {

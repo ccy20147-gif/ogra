@@ -3,6 +3,7 @@ import { DatabaseService } from './database-service';
 import { WorkspaceService } from './workspace-service';
 import { PathValidator } from './path-validator';
 import { KnowledgeService } from '../edge/knowledge-service';
+import { RagEngine } from '../edge/rag-engine';
 import { RunService } from './run-service';
 import { RouteService } from './route-service';
 import { AuditService } from './audit-service';
@@ -28,6 +29,7 @@ export class OgraCore {
   public readonly workspaceService: WorkspaceService;
   public readonly pathValidator: PathValidator;
   public readonly knowledgeService: KnowledgeService;
+  public readonly ragEngine: RagEngine;
   public readonly runService: RunService;
   public readonly routeService: RouteService;
   public readonly auditService: AuditService;
@@ -48,6 +50,7 @@ export class OgraCore {
     this.routeService = new RouteService(this.policyService);
     this.workspaceService = new WorkspaceService(this.auditService, this.databaseService);
     this.providerService = new ProviderService(this.auditService);
+    this.ragEngine = new RagEngine(this.databaseService);
     this.runService = new RunService(
       this.workspaceService,
       this.routeService,
@@ -55,17 +58,21 @@ export class OgraCore {
       this.policyService,
       config,
     );
-    this.knowledgeService = new KnowledgeService(this.auditService, this.pathValidator, config);
+    this.knowledgeService = new KnowledgeService(this.auditService, this.pathValidator, config, this.ragEngine, this.databaseService);
     this.dataSafetyService = new DataSafetyService(this.auditService, this.workspaceService, this.databaseService);
     this.governanceService = new GovernanceService(this.auditService);
   }
 
   async initialize(): Promise<void> {
     if (this.initialized) return;
+    // Initialize database (migrations, schema creation)
+    this.databaseService.initialize();
     this.initialized = true;
   }
 
   shutdown(): void {
-    // Cleanup resources
+    // Cleanup resources — close DB connection, release locks
+    this.databaseService.close();
+    this.initialized = false;
   }
 }

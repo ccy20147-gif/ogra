@@ -23,6 +23,41 @@ const ALLOWED_COMMANDS = new Set([
   'uniq', 'cut', 'wc', 'tree', 'git', 'npm', 'npx',
 ]);
 
+/** Agent manifest for LocalCommandAgentAdapter */
+export interface AgentManifest {
+  id: string;
+  name: string;
+  description: string;
+  adapterKind: string;
+  auditLevel: number;
+  capabilities: {
+    readOnlyCommands: boolean;
+    shellAccess: boolean;
+    fileRead: boolean;
+    fileWrite: boolean;
+    networkAccess: boolean;
+  };
+  allowedCommands: string[];
+  restrictedWorkdir: boolean;
+}
+
+export const LOCAL_COMMAND_MANIFEST: AgentManifest = {
+  id: 'local_command_agent',
+  name: 'Local Command Agent',
+  description: 'Executes read-only shell commands from an allowlist with full audit trail. No shell access, no write operations.',
+  adapterKind: 'local_command',
+  auditLevel: 2,
+  capabilities: {
+    readOnlyCommands: true,
+    shellAccess: false,
+    fileRead: true,
+    fileWrite: false,
+    networkAccess: false,
+  },
+  allowedCommands: Array.from(ALLOWED_COMMANDS),
+  restrictedWorkdir: true,
+};
+
 function isSafeReadonlyCommand(cmd: string): boolean {
   // Disallow shell metacharacters
   const unsafeChars = /[;&|`$(){}[\]<>!\\\n\r]/;

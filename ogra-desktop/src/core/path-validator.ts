@@ -33,11 +33,22 @@ export class PathValidator {
 
   validateImportPath(importPath: string): PathValidationResult {
     try {
-      // Check path traversal BEFORE any normalization — normalise() resolves ..
-      // so it can't detect traversal. Check the raw input instead.
+      // Resolve the full path first to detect traversal via normalization
+      const resolved = path.resolve(importPath);
       const forwardNormalized = importPath.replace(/\\/g, '/');
-      if (forwardNormalized.includes('..') || importPath.includes('..')) {
-        return { isValid: false, reason: 'Path traversal detected (.. not allowed)' };
+
+      // Path traversal detection: count how many levels .. goes up vs
+      // how many levels exist before the first .. segment.
+      // If .. goes up more levels than available, it escapes the intended tree.
+      // This catches `../../etc/passwd` without rejecting legitimate `some..project`.
+      if (forwardNormalized.includes('/../') || forwardNormalized.startsWith('../')) {
+        const segments = forwardNormalized.split('/').filter(s => s !== '' && s !== '.');
+        const dotDotCount = segments.filter(s => s === '..').length;
+        const firstDotDot = segments.indexOf('..');
+        const depthBeforeTraversal = firstDotDot >= 0 ? firstDotDot : segments.length;
+        if (dotDotCount > depthBeforeTraversal) {
+          return { isValid: false, reason: 'Path traversal detected' };
+        }
       }
 
       // Check path exists
@@ -48,6 +59,12 @@ export class PathValidator {
       const stat = fs.statSync(importPath);
       if (!stat.isDirectory()) {
         return { isValid: false, reason: 'Path is not a directory' };
+      }
+
+      // Reject hidden directories (starting with .)
+      const basename = path.basename(resolved);
+      if (basename.startsWith('.')) {
+        return { isValid: false, reason: 'Hidden directories are not allowed for import' };
       }
 
       // Resolve canonical path (resolves symlinks and normalizes)

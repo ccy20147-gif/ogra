@@ -265,6 +265,12 @@ export class MemoryService {
     failureNotes?: string;
     sourceRunId?: string;
   }): Promise<ProceduralMemory> {
+    // Policy check before writing procedural memory
+    const policy = await this.checkPolicy(memory.workspaceId, 'procedural', memory.sourceRunId);
+    if (!policy.allowed) {
+      throw new Error(`Policy blocked procedural memory write: ${policy.reason}`);
+    }
+
     const id = `mem_proc_${crypto.randomBytes(8).toString('hex')}`;
     const now = new Date().toISOString();
     const row = {

@@ -41,6 +41,7 @@ const App: React.FC = () => {
   const [contextSources, setContextSources] = useState<Array<{name: string; type: string; relevance: number}>>([]);
   const [runLoading, setRunLoading] = useState<boolean>(false);
   const [runError, setRunError] = useState<string | null>(null);
+  const [currentRunId, setCurrentRunId] = useState<string | null>(null);
 
   useEffect(() => {
     loadWorkspaces();
@@ -126,6 +127,20 @@ const App: React.FC = () => {
     }
   };
 
+  const handleCancelRun = () => {
+    if (currentRunId) {
+      window.ogra.run.cancel(currentRunId).then(() => {
+        setRunPhase('idle');
+        setRunLoading(false);
+        setStatus('Run cancelled');
+        setCurrentRunId(null);
+      }).catch(() => {
+        setRunPhase('error');
+        setRunError('Failed to cancel run');
+      });
+    }
+  };
+
   const runDemo = async () => {
     if (!currentWorkspace) {
       setStatus('Please create a workspace first');
@@ -140,6 +155,7 @@ const App: React.FC = () => {
       setStatus('Starting demo run...');
       setRunResult('');
       setRunPhase('policy_check');
+      setCurrentRunId(null);
       const result = await window.ogra.run.start({
         workspaceId: currentWorkspace.id,
         task,
@@ -147,6 +163,7 @@ const App: React.FC = () => {
       });
       if (result?.success && result?.data) {
         const run = result.data;
+        setCurrentRunId(run.id || null);
         setStatus(`Run ${run.id}: ${run.status}`);
         setRunResult(run.status);
 
@@ -218,6 +235,13 @@ const App: React.FC = () => {
     const result = await window.ogra.workspace.select(id);
     if (result?.success && result?.data) {
       setCurrentWorkspace(result.data);
+      // C6: Reset active run context on workspace switch
+      setRunPhase('idle');
+      setRunResult('');
+      setRunLoading(false);
+      setRunError(null);
+      setStatus(`Workspace: ${result.data.name}`);
+      setCurrentRunId(null);
     }
   };
 
@@ -538,6 +562,7 @@ const App: React.FC = () => {
               onTaskInputChange={setTaskInput}
               onRunDemo={runDemo}
               onModelChange={setModelId}
+              onCancelRun={handleCancelRun}
               runLoading={runLoading}
               runError={runError}
             />
@@ -572,7 +597,7 @@ const App: React.FC = () => {
                 recentAccess: safetySummary?.recentAccess || [],
                 recentCloudCalls: safetySummary?.recentCloudCalls ?? 0,
                 zeroCloudCallRuns: safetySummary?.zeroCloudCallRuns ?? 0,
-                limitationNote: safetySummary?.limitationNote || 'Ogra can prove calls made through Ogra-controlled adapters.',
+                limitationNote: safetySummary?.limitationNote || 'Ogra can prove calls made through Ogra-controlled adapters. Calls made outside Ogra-controlled adapters cannot be verified by this system.',
                 memoryStats: safetySummary?.memoryStats || { episodic: 0, semantic: 0, procedural: 0, total: 0 },
                 agentGroupStats: safetySummary?.agentGroupStats || { total: 0, pipeline: 0, completed: 0 },
                 // B31: Synthesize inheritance chain from workspace + KBs
@@ -635,7 +660,7 @@ const App: React.FC = () => {
                 { runId: governanceData.runs?.[1]?.runId || 'run_2', category: 'Data Sensitivity', details: 'Run includes both Public and Internal data. Mixed-classification runs require additional audit logging.', score: 30 },
               ]}
               onExportAudit={async (format) => {
-                await window.ogra?.actions?.exportAudit?.(format);
+                await window.ogra?.audit?.export?.(format);
               }}
               loading={loading}
             />

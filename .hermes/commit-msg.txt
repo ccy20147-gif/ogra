@@ -1,0 +1,19 @@
+fix(layer5): complete Model & Agent Orchestration Layer 5 fixes
+
+- Add stream?() abstract method + cross-validate provider/model in validatePolicyGate
+- Mark runParallel/runDebate as Beta (Alpha constraint)
+- Block Confidential/Restricted data in OpenAICompatibleAdapter
+- Add missing lifecycle transitions to RunService
+- Add retrieval_started/retrieval_completed events to InternalAgentAdapter
+- Add audit events to testConnection() for both adapters
+- Verify provider registration via ProviderService in generate()
+- Persist route decisions to SQLite in RunService
+- Add context_policy_check event and check
+- Replace string literals with PipelineStatus enum, fix resumePipeline status
+- Use real stored policyEvaluationId instead of constructed value
+- Support OpenAI-compatible endpoint in ProviderService.testConnection()
+- Add AgentManifest to LocalCommandAgentAdapter
+- Fill approvalId, fix hardcoded classification threshold, add uploadedPayloadHash
+- Add external cancellation support to both adapters
+- Read route decision from DB in RunService.startRun()
+- Add V9 migration with FK indexes for agent_runs references

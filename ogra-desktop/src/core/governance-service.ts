@@ -45,6 +45,7 @@ export class GovernanceService {
 
     const riskEvent = events.find(e => e.eventType === 'risk_classification');
     const routeEvent = events.find(e => e.eventType === 'route_decision');
+    const piWarnings = events.filter(e => e.eventType === 'prompt_injection_warning');
 
     if (!routeEvent) return null;
 
@@ -110,6 +111,14 @@ export class GovernanceService {
             }
           }
         }
+      }
+    }
+
+    // Include prompt injection warnings in risk reasons
+    if (piWarnings.length > 0) {
+      reasons.push(`${piWarnings.length} prompt injection warning(s) detected in retrieved content`);
+      if (riskLevel !== RiskLevel.Blocked && riskLevel !== RiskLevel.High) {
+        riskLevel = RiskLevel.Medium;
       }
     }
 

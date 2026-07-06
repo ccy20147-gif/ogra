@@ -94,10 +94,61 @@ export class RunService {
 
     const routeDecision = await this.routeService.evaluateRoute(policyInput);
 
-    // Store route decision
-    run.routeDecision = routeDecision;
+    // Persist route decision to SQLite
+    if (this.db) {
+      this.db.storeRouteDecision({
+        id: routeDecision.id,
+        runId,
+        route: routeDecision.route,
+        dataClassification: routeDecision.dataClassification,
+        highWaterSources: [],
+        reasons: routeDecision.reasons,
+        localSteps: routeDecision.localSteps,
+        cloudSteps: routeDecision.cloudSteps,
+        requiresUserApproval: routeDecision.requiresUserApproval,
+        providerId: req.requestedProvider,
+        modelId: req.requestedModel,
+        incidentIds: [],
+      });
 
-    // Event: route_decision
+      // Re-read route decision from DB for verification
+      const storedDecision = this.db.getRouteDecision(runId);
+      if (storedDecision) {
+        run.routeDecision = storedDecision as any;
+      }
+    } else {
+      // Store route decision
+      run.routeDecision = routeDecision;
+    }
+
+    // Step 2: Retrieval state
+    await this.transitionTo(runId, RunStatus.Retrieval);
+    await this.auditService.appendEvent({
+      runId,
+      workspaceId: req.workspaceId,
+      eventType: RunEventType.RetrievalStarted,
+      eventPayload: {
+        task: req.task,
+        workspaceId: req.workspaceId,
+        knowledgeBaseIds: req.knowledgeBaseIds,
+      },
+    });
+
+    // Step 3: Context policy check
+    await this.transitionTo(runId, RunStatus.ContextPolicy);
+    await this.auditService.appendEvent({
+      runId,
+      workspaceId: req.workspaceId,
+      eventType: RunEventType.ContextPolicyCheck,
+      eventPayload: {
+        route: routeDecision.route,
+        dataClassification: routeDecision.dataClassification,
+        reasons: routeDecision.reasons,
+      },
+    });
+
+    // Step 4: Route decision
+    await this.transitionTo(runId, RunStatus.RouteDecision);
     await this.auditService.appendEvent({
       runId,
       workspaceId: req.workspaceId,

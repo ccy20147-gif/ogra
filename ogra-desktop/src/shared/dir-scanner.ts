@@ -50,6 +50,25 @@ export function scanDirectory(
       } else if (entry.isFile()) {
         const ext = path.extname(entry.name).toLowerCase();
         if (isSupported(ext)) {
+          // Check file size (skip files > 50MB)
+          const stat = fs.statSync(fullPath);
+          if (stat.size > 50 * 1024 * 1024) {
+            skipped.push(fullPath);
+            skippedReasons.push(`File too large: ${(stat.size / 1024 / 1024).toFixed(1)}MB (>50MB limit)`);
+            continue;
+          }
+
+          // Check for binary content (null bytes in first 512 bytes)
+          const fd = fs.openSync(fullPath, 'r');
+          const buf = Buffer.alloc(512);
+          const bytesRead = fs.readSync(fd, buf, 0, 512, 0);
+          fs.closeSync(fd);
+          if (buf.subarray(0, bytesRead).includes(0)) {
+            skipped.push(fullPath);
+            skippedReasons.push('Binary file detected (contains null bytes)');
+            continue;
+          }
+
           supported.push(fullPath);
         } else {
           skipped.push(fullPath);

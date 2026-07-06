@@ -1,6 +1,6 @@
 import { DatabaseService } from './database-service';
 import { AuditService } from './audit-service';
-import { DataClassification, WorkspaceType } from '../shared/types';
+import { DataClassification, RunEventType, WorkspaceType } from '../shared/types';
 import { OgraError, OgraErrorCode } from '../shared/errors';
 
 export interface WorkspaceRecord {
@@ -34,6 +34,18 @@ export class WorkspaceService {
       req.defaultClassification || DataClassification.Internal,
     );
     this.currentWorkspaceId = row.id;
+    // Record audit event for workspace creation
+    await this.auditService.appendEvent({
+      runId: 'system',
+      workspaceId: row.id,
+      eventType: RunEventType.WorkspaceCreated,
+      eventPayload: {
+        workspaceId: row.id,
+        name: row.name,
+        type: row.type,
+        classification: row.default_data_classification,
+      },
+    });
     return this.rowToRecord(row);
   }
 

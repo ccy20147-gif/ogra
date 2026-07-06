@@ -96,6 +96,16 @@ export class OgraDatabase {
         name: 'memory-fts5-indexes',
         sql: this.getV7Schema(),
       },
+      {
+        version: 8,
+        name: 'content-hash-index',
+        sql: this.getV8Schema(),
+      },
+      {
+        version: 9,
+        name: 'agent-runs-fk-constraints',
+        sql: this.getV9Schema(),
+      },
     ];
   }
 
@@ -756,6 +766,29 @@ export class OgraDatabase {
         memory_id UNINDEXED,
         workspace_id UNINDEXED
       );
+    `;
+  }
+
+  private getV8Schema(): string {
+    return `
+      -- Indexes for content_hash lookups (dedup, verification)
+      CREATE INDEX IF NOT EXISTS idx_documents_content_hash ON documents(content_hash);
+      CREATE INDEX IF NOT EXISTS idx_chunks_content_hash ON document_chunks(content_hash);
+    `;
+  }
+
+  private getV9Schema(): string {
+    return `
+      -- Add FK constraints for agent_runs references
+      -- route_decisions.run_id -> agent_runs.id
+      -- model_calls.run_id -> agent_runs.id
+      -- run_events.run_id -> agent_runs.id
+      -- These are soft-FK via index + application-layer checks.
+      -- True SQLite FK constraints require parent records to exist first,
+      -- which is enforced by the application layer in database-service.ts.
+      CREATE INDEX IF NOT EXISTS idx_route_decisions_run_id ON route_decisions(run_id);
+      CREATE INDEX IF NOT EXISTS idx_model_calls_run_id ON model_calls(run_id);
+      CREATE INDEX IF NOT EXISTS idx_run_events_run_id ON run_events(run_id);
     `;
   }
 }

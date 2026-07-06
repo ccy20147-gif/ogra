@@ -49,6 +49,9 @@ The development requirements are split by responsibility layer:
 8. [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md)
    - M3 memory, Agent Group, recipes, self-building organization, Local Agent Control Plane, A2A/MCP, and Beta/v1 completion gates.
 
+9. [09 vNext Strategic Direction](09-vNext-strategic-direction.md)
+   - Post-Alpha product strategy: local-first semantic clarification, three-tier data egress/ingress policy, Agent Group scheduling, self-building direction, cloud agent transparency boundary.
+
 ## 3. Phase Definitions
 
 ### 3.1 Alpha: Trustable Core Loop

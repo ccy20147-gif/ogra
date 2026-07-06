@@ -48,24 +48,7 @@ export class RagEngine {
     let filesIndexed = 0;
     let chunksIndexed = 0;
 
-    const insertDoc = this.db.getRawDB().prepare(`
-      INSERT INTO documents (id, workspace_id, knowledge_base_id, file_path, file_name,
-        extension, content_hash, size_bytes, classification, classification_source, indexed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    `);
-
-    const insertChunk = this.db.getRawDB().prepare(`
-      INSERT INTO document_chunks (id, document_id, workspace_id, content, content_hash,
-        source_start_offset, source_end_offset, source_line_start, source_line_end,
-        classification_snapshot,
-        parser_version, chunker_version, allowed_for_context, instructional_content_detected)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `);
-
-    const insertFts = this.db.getRawDB().prepare(`
-      INSERT INTO document_chunks_fts (content, chunk_id, workspace_id)
-      VALUES (?, ?, ?)
-    `);
+    const db = this.db;
 
     const transaction = this.db.getRawDB().transaction(() => {
       for (const filePath of supported) {
@@ -88,26 +71,42 @@ export class RagEngine {
           parsed.workspaceId = workspaceId;
           parsed.knowledgeBaseId = knowledgeBaseId;
 
-          // Insert document
-          insertDoc.run(
-            parsed.id, workspaceId, knowledgeBaseId, filePath, fileName, ext,
-            parsed.contentHash, parsed.sizeBytes, classification, 'folder_import',
-          );
+          // Insert document (typed method)
+          db.insertDocument({
+            id: parsed.id,
+            workspaceId,
+            knowledgeBaseId,
+            filePath,
+            fileName,
+            extension: ext,
+            contentHash: parsed.contentHash,
+            sizeBytes: parsed.sizeBytes,
+            classification,
+            classificationSource: 'folder_import',
+          });
 
-          // Insert chunks
+          // Insert chunks (typed method)
           for (const chunk of parsed.chunks) {
             chunk.workspaceId = workspaceId;
-            insertChunk.run(
-              chunk.id, parsed.id, workspaceId, chunk.content, chunk.contentHash,
-              chunk.sourceStartOffset, chunk.sourceEndOffset,
-              chunk.sourceStartLine, chunk.sourceEndLine,
-              chunk.classificationSnapshot,
-              chunk.parserVersion, chunk.chunkerVersion, chunk.allowedForContext ? 1 : 0,
-              chunk.instructionalContentDetected ? 1 : 0,
-            );
+            db.insertDocumentChunk({
+              id: chunk.id,
+              documentId: parsed.id,
+              workspaceId,
+              content: chunk.content,
+              contentHash: chunk.contentHash,
+              sourceStartOffset: chunk.sourceStartOffset,
+              sourceEndOffset: chunk.sourceEndOffset,
+              sourceLineStart: chunk.sourceStartLine ?? null,
+              sourceLineEnd: chunk.sourceEndLine ?? null,
+              classificationSnapshot: chunk.classificationSnapshot,
+              parserVersion: chunk.parserVersion,
+              chunkerVersion: chunk.chunkerVersion,
+              allowedForContext: chunk.allowedForContext,
+              instructionalContentDetected: chunk.instructionalContentDetected,
+            });
 
-            // Insert into FTS5
-            insertFts.run(chunk.content, chunk.id, workspaceId);
+            // Insert into FTS5 (typed method)
+            db.insertDocumentChunkFts(chunk.content, chunk.id, workspaceId);
             chunksIndexed++;
           }
 
@@ -164,17 +163,8 @@ export class RagEngine {
     chunksIndexed: number;
     skippedReasons: string[];
   }> {
-    // Clear existing data for this KB
-    this.db.getRawDB().prepare(`
-      DELETE FROM document_chunks_fts WHERE chunk_id IN
-        (SELECT id FROM document_chunks WHERE workspace_id = ?)
-    `).run(workspaceId);
-    this.db.getRawDB().prepare(
-      'DELETE FROM document_chunks WHERE workspace_id = ?'
-    ).run(workspaceId);
-    this.db.getRawDB().prepare(
-      'DELETE FROM documents WHERE workspace_id = ?'
-    ).run(workspaceId);
+    // Clear existing data for this KB (typed method)
+    this.db.deleteKnowledgeBaseDocuments(knowledgeBaseId);
 
     // Re-index with audit tracking
     const runId = `run_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
@@ -194,7 +184,13 @@ export class RagEngine {
     runId?: string,
   ): RetrievalResult[] {
     // Escape FTS5 special characters
-    const sanitized = query.replace(/['"*()^$~\[\]{}|\\]/g, ' ').trim();
+    // FTS5 treats these as operators/syntax: + - " * ( ) ^ ~ : ! > < [ ] { } | \ NEAR AND OR NOT
+    // Remove them and wrap each word in quotes for literal matching
+    const sanitized = query
+      .replace(/[+\-*()^~:!><[\]{}|\\"]/g, ' ')
+      .replace(/\b(NEAR|AND|OR|NOT)\b/gi, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
     if (!sanitized) return [];
 
     const ftsQuery = sanitized.split(/\s+/).map(w => `"${w}"`).join(' OR ');
@@ -279,8 +275,8 @@ export class RagEngine {
       }
 
       return mapped;
-    } catch {
-      // FTS5 can throw on malformed queries
+    } catch (err) {
+      console.error(`[RagEngine] FTS5 query failed: query="${ftsQuery}", error=${(err as Error).message}`);
       return [];
     }
   }

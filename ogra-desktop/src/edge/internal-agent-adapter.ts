@@ -62,16 +62,91 @@ export class InternalAgentAdapter {
       knowledgeBaseIds,
     });
 
-    // Step 2: Retrieve RAG context
+    // Step 2: Compute preliminary high-water mark (workspace only — no RAG data yet)
+    const preliminarySources: Array<{ sourceType: string; sourceId: string; classification: string }> = [
+      { sourceType: 'workspace', sourceId: workspaceId, classification },
+    ];
+    const preliminaryHwm = this.highWaterMark.compute(preliminarySources);
+
+    // Step 3: Preliminary policy evaluation — check if retrieve operation is allowed
+    const preliminaryPolicyInput: PolicyEvaluationInput = {
+      workspaceId,
+      dataClassification: preliminaryHwm.highWaterMark as DataClassification,
+      requestedCompute: modelAdapter.isLocal ? 'local' : 'cloud',
+      providerId: modelAdapter.providerId,
+      modelId,
+      providerIsLocal: modelAdapter.isLocal,
+      requestedOperation: 'retrieve',
+    };
+
+    const preliminaryPolicyResult = await this.policyService.evaluate(preliminaryPolicyInput);
+
+    // Store preliminary policy evaluation
+    this.db.storePolicyEvaluation({
+      id: `pe_prelim_${crypto.randomBytes(8).toString('hex')}`,
+      runId,
+      inputSnapshot: preliminaryPolicyInput as any,
+      result: preliminaryPolicyResult as any,
+      matchedRules: preliminaryPolicyResult.matchedRules.map(r => r.name),
+    });
+
+    // Step 4: Preliminary route decision (using preliminary HWM)
+    const preliminaryRouteDecision = await this.routeService.evaluateRoute(preliminaryPolicyInput);
+    preliminaryRouteDecision.highWaterSources = preliminaryHwm.highWaterSources;
+    preliminaryRouteDecision.runId = runId;
+
+    this.db.storeRouteDecision({
+      id: preliminaryRouteDecision.id,
+      runId,
+      route: preliminaryRouteDecision.route,
+      dataClassification: preliminaryRouteDecision.dataClassification,
+      highWaterSources: preliminaryRouteDecision.highWaterSources,
+      reasons: preliminaryRouteDecision.reasons,
+      localSteps: preliminaryRouteDecision.localSteps,
+      cloudSteps: preliminaryRouteDecision.cloudSteps,
+      requiresUserApproval: preliminaryRouteDecision.requiresUserApproval,
+      providerId: preliminaryRouteDecision.providerId,
+      modelId: preliminaryRouteDecision.modelId,
+      incidentIds: preliminaryRouteDecision.incidentIds,
+    });
+
+    // Write preliminary route_decision event
+    this.db.appendRunEvent(runId, workspaceId, RunEventType.RouteDecision, {
+      route: preliminaryRouteDecision.route,
+      classification: preliminaryHwm.highWaterMark,
+      reasons: preliminaryRouteDecision.reasons,
+      highWaterSources: preliminaryHwm.highWaterSources,
+      stage: 'preliminary',
+    }, this.policyService.getPolicyVersionHash());
+
+    // Step 5: Execute RAG retrieval (only if preliminary policy/route allows)
     let retrievedChunks: any[] = [];
-    if (knowledgeBaseIds && knowledgeBaseIds.length > 0) {
-      retrievedChunks = this.ragEngine.retrieve(task, workspaceId, 5, classification);
-    } else {
-      // Try searching the entire workspace
-      retrievedChunks = this.ragEngine.retrieve(task, workspaceId, 5, classification);
+    const retrievalAllowed = preliminaryRouteDecision.route !== 'blocked';
+    if (retrievalAllowed) {
+      // Write retrieval_started event
+      this.db.appendRunEvent(runId, workspaceId, RunEventType.RetrievalStarted, {
+        task,
+        workspaceId,
+        knowledgeBaseIds,
+        query: task.substring(0, 200),
+      });
+
+      if (knowledgeBaseIds && knowledgeBaseIds.length > 0) {
+        retrievedChunks = this.ragEngine.retrieve(task, workspaceId, 5, classification);
+      } else {
+        // Try searching the entire workspace
+        retrievedChunks = this.ragEngine.retrieve(task, workspaceId, 5, classification);
+      }
+
+      // Write retrieval_completed event
+      this.db.appendRunEvent(runId, workspaceId, RunEventType.RetrievalCompleted, {
+        chunkCount: retrievedChunks.length,
+        workspaceId,
+        knowledgeBaseIds,
+      });
     }
 
-    // Step 3: Compute high-water mark
+    // Step 6: Compute full high-water mark with retrieval results
     const sources: Array<{ sourceType: string; sourceId: string; classification: string }> = [
       { sourceType: 'workspace', sourceId: workspaceId, classification },
     ];
@@ -80,23 +155,7 @@ export class InternalAgentAdapter {
     }
     const hwm = this.highWaterMark.compute(sources);
 
-    // Step 4: Check for prompt injection in retrieved content
-    const piWarnings: any[] = [];
-    for (const chunk of retrievedChunks) {
-      const matches = this.piDetector.detect(chunk.snippet);
-      for (const match of matches) {
-        piWarnings.push({ chunkId: chunk.chunkId, ...match });
-        this.db.appendRunEvent(runId, workspaceId, RunEventType.PromptInjectionWarning, {
-          chunkId: chunk.chunkId,
-          patternId: match.patternId,
-          evidence: match.evidence,
-          evidenceHash: match.evidenceHash,
-          detectorVersion: match.detectorVersion,
-        });
-      }
-    }
-
-    // Step 5: Policy evaluation
+    // Step 7: Re-run policy evaluation with real HWM (generate operation)
     const policyInput: PolicyEvaluationInput = {
       workspaceId,
       dataClassification: hwm.highWaterMark as DataClassification,
@@ -109,16 +168,26 @@ export class InternalAgentAdapter {
 
     const policyResult = await this.policyService.evaluate(policyInput);
 
-    // Store policy evaluation
+    // Store final policy evaluation
+    const finalPeId = `pe_final_${crypto.randomBytes(8).toString('hex')}`;
     this.db.storePolicyEvaluation({
-      id: `pe_${crypto.randomBytes(8).toString('hex')}`,
+      id: finalPeId,
       runId,
       inputSnapshot: policyInput as any,
       result: policyResult as any,
       matchedRules: policyResult.matchedRules.map(r => r.name),
     });
 
-    // Step 6: Route decision
+    // Write context_policy_check event
+    this.db.appendRunEvent(runId, workspaceId, RunEventType.ContextPolicyCheck, {
+      highWaterClassification: hwm.highWaterMark,
+      chunkCount: retrievedChunks.length,
+      policyDecision: policyResult.decision,
+      matchedRules: policyResult.matchedRules.map(r => r.name),
+      reasons: policyResult.reasons,
+    });
+
+    // Step 8: Re-run route decision with real HWM
     const routeDecision = await this.routeService.evaluateRoute(policyInput);
     routeDecision.highWaterSources = hwm.highWaterSources;
     routeDecision.runId = runId;
@@ -138,15 +207,32 @@ export class InternalAgentAdapter {
       incidentIds: routeDecision.incidentIds,
     });
 
-    // Write route_decision event
+    // Write final route_decision event
     this.db.appendRunEvent(runId, workspaceId, RunEventType.RouteDecision, {
       route: routeDecision.route,
       classification: hwm.highWaterMark,
       reasons: routeDecision.reasons,
       highWaterSources: hwm.highWaterSources,
+      stage: 'final',
     }, this.policyService.getPolicyVersionHash());
 
-    // Assemble context once using RagEngine (replaces manual assembly)
+    // Step 9: Check for prompt injection in retrieved content
+    const piWarnings: any[] = [];
+    for (const chunk of retrievedChunks) {
+      const matches = this.piDetector.detect(chunk.snippet);
+      for (const match of matches) {
+        piWarnings.push({ chunkId: chunk.chunkId, ...match });
+        this.db.appendRunEvent(runId, workspaceId, RunEventType.PromptInjectionWarning, {
+          chunkId: chunk.chunkId,
+          patternId: match.patternId,
+          evidence: match.evidence,
+          evidenceHash: match.evidenceHash,
+          detectorVersion: match.detectorVersion,
+        });
+      }
+    }
+
+    // Assemble context once using RagEngine
     const contextAssembly = retrievedChunks.length > 0
       ? this.ragEngine.assembleContext(retrievedChunks, task)
       : { contextBlock: '', highWaterClassification: 'Internal', citationCount: 0, citations: [] };
@@ -156,7 +242,7 @@ export class InternalAgentAdapter {
       chunkCount: retrievedChunks.length,
     });
 
-    // Step 7: If blocked, return
+    // Step 10: If blocked, return
     if (routeDecision.route === 'blocked') {
       this.db.appendRunEvent(runId, workspaceId, RunEventType.RunBlocked, {
         reasons: routeDecision.reasons,
@@ -177,7 +263,7 @@ export class InternalAgentAdapter {
       };
     }
 
-    // Step 8: Assemble prompt with context separation
+    // Step 11: Assemble prompt with context separation
     const promptParts: Array<{ role: 'system' | 'developer' | 'user' | 'assistant' | 'context'; content: string; sourceIds?: string[] }> = [
       {
         role: 'system',
@@ -200,7 +286,7 @@ export class InternalAgentAdapter {
       });
     }
 
-    // Step 9: Model invocation
+    // Step 12: Model invocation
     const policyVersionHash = this.policyService.getPolicyVersionHash();
     const payloadHash = crypto.createHash('sha256')
       .update(promptParts.map(p => p.content).join(''))
@@ -217,12 +303,13 @@ export class InternalAgentAdapter {
       runId,
       workspaceId,
       routeDecisionId: routeDecision.id,
-      policyEvaluationId: `pe_${runId}`,
+      policyEvaluationId: finalPeId,
       policyVersionHash,
       allowedProviderId: modelAdapter.providerId,
       allowedModelId: modelId,
       promptParts,
       contextSourceIds: retrievedChunks.map(c => c.chunkId),
+      approvalId: routeDecision.approvalId,
       payloadHash,
       routeDecisionSnapshot: routeDecision as any,
     };
@@ -250,6 +337,7 @@ export class InternalAgentAdapter {
         isCloud: !modelAdapter.isLocal,
         promptHash: payloadHash,
         requestPayloadHash: payloadHash,
+        uploadedPayloadHash: !modelAdapter.isLocal ? payloadHash : undefined,
         tokenUsage: modelResult.tokenUsage,
         startedAt: modelResult.startedAt,
         completedAt: modelResult.completedAt,
@@ -270,7 +358,7 @@ export class InternalAgentAdapter {
         routeDecision,
         riskSummary: {
           runId,
-          riskLevel: hwm.highWaterMark === DataClassification.Confidential ? 'high' : 'low',
+          riskLevel: hwm.highWaterMark === DataClassification.Confidential || hwm.highWaterMark === DataClassification.Restricted ? 'high' : 'low',
           riskReasons: routeDecision.reasons,
           requiredApprovals: [],
           approvalStatus: 'not_required',

@@ -27,13 +27,14 @@ interface RunWorkspaceTabProps {
   /* B28 new props */
   modelId: string;
   modelOptions: string[];
-  runPhase: string;         // idle | policy_check | route_decision | rag_retrieval | model_call | complete | error
+  runPhase: string;         // idle | created | policy_check | risk_classification | route_decision | rag_retrieval | approval_redaction | model_call | final_output | audit_complete | complete | error
   riskLevel: string;        // low | medium | high | critical
   contextSources: ContextSource[];
   citations?: CitationInfo[];
 
   onTaskInputChange: (value: string) => void;
   onRunDemo: () => void;
+  onCancelRun: () => void;
   onModelChange?: (model: string) => void;
   runLoading?: boolean;
   runError?: string | null;
@@ -41,11 +42,17 @@ interface RunWorkspaceTabProps {
 
 /* ─── Constants ───────────────────────────────────────── */
 
+/** Full 9-stage Run Timeline as specified in 06-application-ui-ux.md §6 */
 const PHASES: { key: string; label: string }[] = [
+  { key: 'created', label: 'Created' },
   { key: 'policy_check', label: 'Policy Check' },
+  { key: 'risk_classification', label: 'Risk Class' },
   { key: 'route_decision', label: 'Route Decision' },
   { key: 'rag_retrieval', label: 'RAG Retrieval' },
+  { key: 'approval_redaction', label: 'Approval' },
   { key: 'model_call', label: 'Model Call' },
+  { key: 'final_output', label: 'Final Output' },
+  { key: 'audit_complete', label: 'Audit' },
   { key: 'complete', label: 'Complete' },
 ];
 
@@ -354,6 +361,7 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
   onTaskInputChange,
   onRunDemo,
   onModelChange,
+  onCancelRun,
   runLoading = false,
   runError = null,
 }) => {
@@ -393,7 +401,7 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
         </button>
         {runPhase !== 'idle' && runPhase !== 'complete' && runPhase !== 'error' && (
           <button
-            onClick={() => {}}
+            onClick={onCancelRun}
             style={{ ...secondaryButtonStyle, color: '#f85149', borderColor: '#da3633' }}
           >
             Cancel

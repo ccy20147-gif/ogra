@@ -365,7 +365,13 @@ export class PolicyService {
   }
 
   getPolicyVersionHash(): string {
-    const allNames = Array.from(this.policies.keys()).sort().join(',');
-    return crypto.createHash('sha256').update(allNames).digest('hex');
+    const allContent = Array.from(this.policies.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([name, rules]) => {
+        const rulesJson = rules.map(r => JSON.stringify(r)).sort().join('|');
+        return `${name}:${rulesJson}`;
+      })
+      .join(';');
+    return crypto.createHash('sha256').update(allContent).digest('hex');
   }
 }

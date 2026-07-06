@@ -116,7 +116,7 @@ export class DocumentParser {
         parserVersion: this.parserVersion,
         chunkerVersion: this.chunkerVersion,
         instructionalContentDetected: this.detectInstructionalContent(chunk.content),
-        allowedForContext: true,
+        allowedForContext: classification !== DataClassification.Confidential && classification !== DataClassification.Restricted,
       })),
     };
   }

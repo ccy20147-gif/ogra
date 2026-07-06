@@ -5,10 +5,16 @@
  */
 
 /** Common IPC result shape returned by most backend handlers. */
+export interface IpcError {
+  code: string;
+  message: string;
+  details?: Record<string, unknown>;
+}
+
 export interface IpcResult<T = any> {
   success: boolean;
   data?: T;
-  error?: string;
+  error?: IpcError;
 }
 
 export interface OgraAPI {
@@ -37,6 +43,7 @@ export interface OgraAPI {
   };
   audit: {
     events: (runId: string, limit?: number, offset?: number) => Promise<IpcResult>;
+    export: (format: string) => Promise<IpcResult>;
   };
   dataSafety: {
     summary: (workspaceId: string) => Promise<IpcResult>;
@@ -47,11 +54,14 @@ export interface OgraAPI {
   };
   provider: {
     list: () => Promise<IpcResult>;
+    update: (req: unknown) => Promise<IpcResult>;
     testConnection: (id: string) => Promise<IpcResult>;
   };
   secret: {
     list: () => Promise<IpcResult>;
     create: (req: unknown) => Promise<IpcResult>;
+    update: (req: unknown) => Promise<IpcResult>;
+    delete: (id: string) => Promise<IpcResult>;
   };
   policy: {
     dryRun: (input: unknown) => Promise<IpcResult>;
