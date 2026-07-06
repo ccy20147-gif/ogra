@@ -55,6 +55,7 @@ const StatusBar: React.FC<{ status: string }> = ({ status }) => {
           color: t.fg,
           backgroundColor: t.bg,
           fontVariantNumeric: 'tabular-nums',
+          letterSpacing: '-0.165px', // Linear-style small-text tracking
         }}
       >
         {showSpinner && <span aria-hidden="true" style={spinnerStyle} />}
@@ -288,11 +289,18 @@ const App: React.FC = () => {
     const result = await window.ogra.workspace.select(id);
     if (result?.success && result?.data) {
       setCurrentWorkspace(result.data);
-      // C6: Reset active run context on workspace switch
+      // C6: Reset active run context on workspace switch.
+      // Also reset the workspace-scoped run evidence so the next render
+      // does not flash stale data from the previous workspace (review-report L6 J).
       setRunPhase('idle');
       setRunResult('');
       setRunLoading(false);
       setRunError(null);
+      setRouteDecision(null);
+      setContextSources([]);
+      setRiskLevel('low');
+      setModelId('');
+      setTaskInput('');
       setStatus(`Workspace: ${result.data.name}`);
       setCurrentRunId(null);
     }
@@ -413,7 +421,24 @@ const App: React.FC = () => {
         justifyContent: 'space-between',
       }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-          <h1 style={{ fontSize: '18px', fontWeight: 600, margin: 0 }}>Ogra Desktop</h1>
+          {/* Ogra mark — concentric ring around a solid core.
+              Echoes the product's "local-first, hybrid-default" idea: a
+              solid center (the local runtime) ringed by an outer edge
+              (the cloud boundary) you can audit. No third-party font
+              dependency; pure inline SVG so it scales crisply. */}
+          <svg width="22" height="22" viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="12" cy="12" r="10" fill="none" stroke="#58a6ff" strokeWidth="1.5" opacity="0.45" />
+            <circle cx="12" cy="12" r="6"  fill="none" stroke="#58a6ff" strokeWidth="1.5" opacity="0.75" />
+            <circle cx="12" cy="12" r="2.5" fill="#58a6ff" />
+          </svg>
+          <h1
+            style={{
+              fontSize: '15px',
+              fontWeight: 600,
+              margin: 0,
+              letterSpacing: '-0.165px',
+            }}
+          >Ogra Desktop</h1>
           <span style={{
             fontSize: '11px',
             backgroundColor: '#1f6feb',

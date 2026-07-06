@@ -304,6 +304,7 @@ const PhaseTimeline: React.FC<{ currentPhase: string }> = ({ currentPhase }) => 
                   fontSize: '10px', color: active ? '#e1e4e8' : '#8b949e',
                   marginTop: '4px', textAlign: 'center', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis',
                   fontWeight: active ? 600 : 400, maxWidth: '90px',
+                  letterSpacing: '-0.15px', // tiny labels read tighter
                 }}>
                   {phase.label}
                 </span>

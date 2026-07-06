@@ -90,6 +90,41 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
   const [progressMap, setProgressMap] = useState<Record<string, IndexingProgressEvent>>({});
 
   const unsubRef = useRef<(() => void) | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  /**
+   * Best-effort "Browse folder" via the renderer-side
+   * `<input webkitdirectory>` primitive. Electron 28 deprecated `File.path`
+   * and exposes the absolute path only through `webUtils.getPathForFile`,
+   * which is not on `window.ogra` in the current preload. Until the
+   * preload grows a `dialog.showOpenDialog` IPC, this helper can:
+   *   (a) confirm the user picked a folder (webkitdirectory fires only on
+   *       folder selection — no file is read),
+   *   (b) surface a `nameHint` like "…/<folderName>/" so the user knows
+   *       what they picked and can paste / type the absolute path.
+   * Real path resolution remains the user's responsibility for now.
+   */
+  const handleBrowseFolder = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handlePickedFolder = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+    // The first file's webkitRelativePath is "FolderName/innerFile".
+    // Extract FolderName so we can give the user a meaningful hint.
+    const first = files[0] as File & { webkitRelativePath?: string };
+    const rel = first.webkitRelativePath || first.name;
+    const folderName = rel.split('/')[0] || '';
+    if (folderName) {
+      setImportStatus(
+        `Picked folder "${folderName}" (${files.length} file${files.length === 1 ? '' : 's'} detected). ` +
+        `Electron folder-picker IPC not yet exposed — type or paste the absolute path to import.`
+      );
+    }
+    // Reset so re-picking the same folder fires onchange again.
+    e.target.value = '';
+  }, []);
 
   // Update classification when workspace changes
   useEffect(() => {
@@ -230,6 +265,31 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
             >
               {importLoading ? 'Importing...' : 'Import & Index'}
             </button>
+            {/* Best-effort folder picker; see handleBrowseFolder for why the
+                real native picker is still gated on a preload IPC. */}
+            <button
+              type="button"
+              style={secondaryButtonStyle}
+              onClick={handleBrowseFolder}
+              disabled={importLoading}
+              title="Open a folder-selection dialog. Currently surfaces the folder name only — type or paste the full path to import."
+            >
+              📁 Browse…
+            </button>
+            {/* Hidden file input that fires the webkitdirectory picker.
+                Kept off-DOM-flow but mounted so clicks reach it. */}
+            <input
+              ref={fileInputRef}
+              type="file"
+              // @ts-expect-error — webkitdirectory is the de-facto Chromium
+              // attribute; React's typings omit it.
+              webkitdirectory=""
+              multiple
+              onChange={handlePickedFolder}
+              style={{ display: 'none' }}
+              aria-hidden="true"
+              tabIndex={-1}
+            />
           </div>
 
           {importStatus && (
