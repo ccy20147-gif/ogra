@@ -21,6 +21,17 @@ interface WorkspaceOverviewTabProps {
   onRefreshWorkspaces: () => void;
   onSelectWorkspace: (id: string) => void;
   loading?: boolean;
+  /**
+   * Optional real-data overrides for the four quick-glance cards.
+   * When provided, the card uses the override instead of deriving
+   * from `recentRuns` / `safetySummary`. Parent (App.tsx) computes
+   * these from the data sources it owns; this component keeps the
+   * fallback for callers that only pass the legacy props.
+   */
+  agentCount?: number;
+  memoryTotalCount?: number;
+  openIncidentCount?: number;
+  cloudCallTotalCount?: number;
 }
 
 const cardCx: React.CSSProperties = {
@@ -60,6 +71,10 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
   onRefreshWorkspaces,
   onSelectWorkspace,
   loading = false,
+  agentCount,
+  memoryTotalCount,
+  openIncidentCount,
+  cloudCallTotalCount,
 }) => {
   const kbs = safetySummary?.knowledgeBases;
   const kbCount = kbs?.length || 0;
@@ -80,27 +95,35 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
   // Until a dedicated agents IPC lands, fall back to the set of agent
   // ids embedded in the policy/pipeline state. Memory / incidents /
   // cloud-call counts come from safetySummary and recentRuns.
+  // When the parent provides the optional override props (agentCount,
+  // memoryTotalCount, openIncidentCount, cloudCallTotalCount), those
+  // win — they are computed at the App.tsx level where the underlying
+  // data sources are owned.
   const policyDerivedAgents: string[] = Array.from(new Set([
     ...(activePolicies || []).map((p: any) => p.targetAgent || p.agentId).filter(Boolean),
     ...(recentRuns || []).map((r: any) => r.routeDecision?.assignedAdapter).filter(Boolean),
   ])) as string[];
 
+  const agentsAvail = agentCount ?? policyDerivedAgents.length;
+
   const memoryCount =
-    (safetySummary?.memoryStats?.total as number | undefined) ??
-    (safetySummary?.memoryStats?.episodic ?? 0) +
-      (safetySummary?.memoryStats?.semantic ?? 0) +
-      (safetySummary?.memoryStats?.procedural ?? 0);
+    memoryTotalCount ??
+    ((safetySummary?.memoryStats?.total as number | undefined) ??
+      (safetySummary?.memoryStats?.episodic ?? 0) +
+        (safetySummary?.memoryStats?.semantic ?? 0) +
+        (safetySummary?.memoryStats?.procedural ?? 0));
 
   // Incidents aren't yet wired through safetySummary, so we count
   // blocked runs as a session-scoped proxy. When the incidents IPC
   // lands this is replaced with `safetySummary.openIncidents`.
-  const incidentCount = (recentRuns || []).filter(
+  const incidentsFromRuns = (recentRuns || []).filter(
     (r: any) => r.status === 'blocked' || r.routeDecision?.route === 'blocked'
   ).length;
+  const incidentCount = openIncidentCount ?? incidentsFromRuns;
 
   // Ogra-managed cloud calls. The summary already tracks total
   // recentCloudCalls + zeroCloudCallRuns; we surface the count here.
-  const cloudCallCount = safetySummary?.recentCloudCalls ?? 0;
+  const cloudCallCount = cloudCallTotalCount ?? (safetySummary?.recentCloudCalls ?? 0);
 
   return (
     <div>
@@ -310,8 +333,8 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
         <SummaryCard
           icon="🤖"
           label="Agents available"
-          primary={policyDerivedAgents.length}
-          sub={policyDerivedAgents.length === 0 ? 'No manifests registered' : `${policyDerivedAgents.slice(0, 2).join(', ')}…`}
+          primary={agentsAvail}
+          sub={agentsAvail === 0 ? 'No manifests registered' : `${policyDerivedAgents.slice(0, 2).join(', ')}…`}
         />
         <SummaryCard
           icon="🧠"

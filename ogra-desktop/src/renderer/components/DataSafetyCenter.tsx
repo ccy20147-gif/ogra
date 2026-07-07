@@ -81,6 +81,85 @@ const classificationColors: Record<string, string> = {
 
 const CLASSIFICATIONS = ['Public', 'Internal', 'Confidential', 'Restricted'];
 
+/**
+ * Compact 4-card grid for the top of Data Safety Center. Surfaces
+ * asset totals, classification distribution, recent cloud-call count,
+ * and zero-cloud-call run count. Reused inline here to keep the
+ * component self-contained; the same pattern is in
+ * WorkspaceOverviewTab's `SummaryCard`.
+ */
+const AssetOverviewGrid: React.FC<{
+  totalAssets: number;
+  classified: Record<string, number>;
+  recentCloudCalls: number;
+  zeroCloudCallRuns: number;
+}> = ({ totalAssets, classified, recentCloudCalls, zeroCloudCallRuns }) => {
+  const top = (() => {
+    let best = { name: '—', n: 0 };
+    for (const k of Object.keys(classified)) {
+      const n = classified[k] ?? 0;
+      if (n > best.n) best = { name: k, n };
+    }
+    return best;
+  })();
+  return (
+    <div
+      aria-label="Asset overview"
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))',
+        gap: '10px',
+        marginBottom: '20px',
+      }}
+    >
+      <AssetMini label="Total assets" value={totalAssets} sub={totalAssets === 0 ? 'Nothing imported yet' : `${Object.keys(classified).length} classification${Object.keys(classified).length === 1 ? '' : 's'} in use`} />
+      <AssetMini label="Top classification" value={top.name} sub={top.n === 0 ? '—' : `${top.n} asset${top.n === 1 ? '' : 's'}`} accent={top.name === 'Restricted' ? '#f85149' : top.name === 'Confidential' ? '#d29922' : top.name === 'Internal' ? '#58a6ff' : '#3fb950'} />
+      <AssetMini label="Recent cloud calls" value={recentCloudCalls} sub={recentCloudCalls === 0 ? '0 Ogra-managed this session' : `${recentCloudCalls} this session`} accent={recentCloudCalls === 0 ? '#3fb950' : '#d29922'} />
+      <AssetMini label="Zero-cloud runs" value={zeroCloudCallRuns} sub="0 Ogra-managed cloud calls" accent="#3fb950" />
+    </div>
+  );
+};
+
+const AssetMini: React.FC<{
+  label: string;
+  value: number | string;
+  sub: string;
+  accent?: string;
+}> = ({ label, value, sub, accent = '#58a6ff' }) => (
+  <div
+    style={{
+      padding: '10px 12px',
+      border: '1px solid #30363d',
+      borderLeft: `3px solid ${accent}`,
+      borderRadius: '4px',
+      background: '#161b22',
+    }}
+  >
+    <div
+      style={{
+        fontSize: '10px',
+        color: '#8b949e',
+        textTransform: 'uppercase',
+        letterSpacing: '0.5px',
+        marginBottom: '4px',
+      }}
+    >
+      {label}
+    </div>
+    <div
+      style={{
+        fontSize: '20px',
+        fontWeight: 600,
+        color: accent,
+        fontVariantNumeric: 'tabular-nums',
+      }}
+    >
+      {value}
+    </div>
+    <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '2px' }}>{sub}</div>
+  </div>
+);
+
 export const DataSafetyCenter: React.FC<DataSafetyProps> = ({ summary, onAdjustClassification, onViewEvidence }) => {
   // Local "View Evidence" dialog state. Holds the access record whose
   // evidence is currently shown; null when the dialog is closed.
@@ -115,6 +194,19 @@ export const DataSafetyCenter: React.FC<DataSafetyProps> = ({ summary, onAdjustC
           Data asset map, classification summary, provider/model allowlist, and cloud call ledger.
         </p>
       </div>
+
+      {/* 4-card asset overview — shown only when there is data.
+          The empty state below gives a richer first-run onboarding
+          path, so the overview is suppressed to avoid double empty
+          states. */}
+      {!hasNoData && (
+        <AssetOverviewGrid
+          totalAssets={summary.totalAssets}
+          classified={summary.byClassification}
+          recentCloudCalls={summary.recentCloudCalls}
+          zeroCloudCallRuns={summary.zeroCloudCallRuns}
+        />
+      )}
 
       {/* Empty state when no data exists */}
       {hasNoData && (

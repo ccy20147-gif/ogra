@@ -679,6 +679,16 @@ const App: React.FC = () => {
               onRefreshWorkspaces={loadWorkspaces}
               onSelectWorkspace={handleSelectWorkspace}
               loading={loading}
+              /* Real-data overrides for the four quick-glance cards.
+                  Computed at the App.tsx level so the source of truth
+                  (safetySummary, governanceData, recentRuns) lives in
+                  one place. WorkspaceOverviewTab falls back to deriving
+                  these from recentRuns when the props are absent, so
+                  keeping these as explicit inputs is the upgrade path. */
+              agentCount={(providers || []).reduce((acc: number, p: any) => acc + (p.models?.length || 0), 0)}
+              memoryTotalCount={safetySummary?.memoryStats?.total}
+              openIncidentCount={(governanceData.incidents || []).filter((i: any) => i.status !== 'resolved').length}
+              cloudCallTotalCount={safetySummary?.recentCloudCalls}
             />
           )}
         </div>
