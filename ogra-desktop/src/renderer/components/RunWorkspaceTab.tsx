@@ -612,7 +612,8 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
         <button onClick={onRunDemo} style={buttonStyle} disabled={!currentWorkspace || runLoading}>
           {runLoading ? 'Running...' : (taskInput.trim() ? 'Run Task' : 'Run Demo Query')}
         </button>
-        {runPhase !== 'idle' && runPhase !== 'complete' && runPhase !== 'error' && (
+        {runPhase !== 'idle' && runPhase !== 'complete' && runPhase !== 'error'
+          && runPhase !== 'final_output' && runPhase !== 'audit_complete' && (
           <button
             onClick={onCancelRun}
             style={{ ...secondaryButtonStyle, color: '#f85149', borderColor: '#da3633' }}

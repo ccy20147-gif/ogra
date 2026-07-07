@@ -16,12 +16,12 @@
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf dist dist-electron",
     "reset": "rm -rf ~/.ogra",
-    "rebuild:sqlite:node": "npm rebuild better-sqlite3 --build-from-source=false",
+    "rebuild:sqlite:node": "bash scripts/rebuild-sqlite-node.sh",
     "rebuild:sqlite:electron": "electron-rebuild -f -w better-sqlite3",
     "start:electron": "npm run rebuild:sqlite:electron && electron ."
   },
   "dependencies": {
-    "better-sqlite3": "^11.0.0",
+    "better-sqlite3": "^11.10.0",
     "electron-store": "^8.2.0",
     "uuid": "^9.0.0"
   },

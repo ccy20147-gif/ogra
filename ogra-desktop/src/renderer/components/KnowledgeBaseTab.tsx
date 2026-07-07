@@ -112,14 +112,20 @@ const KnowledgeBaseTab: React.FC<KnowledgeBaseTabProps> = ({
     const files = e.target.files;
     if (!files || files.length === 0) return;
     // The first file's webkitRelativePath is "FolderName/innerFile".
-    // Extract FolderName so we can give the user a meaningful hint.
+    // Extract FolderName so we can give the user a meaningful hint and
+    // pre-populate the path field with a recognisable placeholder until
+    // they confirm / paste the absolute path.
     const first = files[0] as File & { webkitRelativePath?: string };
     const rel = first.webkitRelativePath || first.name;
     const folderName = rel.split('/')[0] || '';
     if (folderName) {
+      // Prefill the path input with the picked folder name. The import
+      // IPC still needs an absolute path, so the status text makes the
+      // remaining action explicit.
+      setFolderPath(folderName);
       setImportStatus(
         `Picked folder "${folderName}" (${files.length} file${files.length === 1 ? '' : 's'} detected). ` +
-        `Electron folder-picker IPC not yet exposed — type or paste the absolute path to import.`
+        `Type or paste the absolute path to import — the webkit picker does not expose it.`
       );
     }
     // Reset so re-picking the same folder fires onchange again.
