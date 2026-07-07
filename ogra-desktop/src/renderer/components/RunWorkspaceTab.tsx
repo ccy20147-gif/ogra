@@ -193,10 +193,13 @@ const RouteSummaryCard: React.FC<{
           {route}
         </span>
 
-        {/* Egress mode badge — only present when the backend writes
-            egressMode. Older runs (pre-09) won't have it; the UI stays
-            usable either way. */}
-        {egress && (
+        {/* Egress mode badge — surfaced when the backend writes
+            `egressMode`. The neutral "n/a" placeholder is shown for
+            older runs (pre-09) or for local-only runs where the route
+            service deliberately omits the field. Tooltip explains the
+            possible states so the user knows whether the silence is
+            a real missing-mode signal or a local-only pass-through. */}
+        {egress ? (
           <span
             title={`Egress mode: ${egressMode}`}
             style={{
@@ -207,6 +210,23 @@ const RouteSummaryCard: React.FC<{
             }}
           >
             Egress: {egress.label}
+          </span>
+        ) : (
+          <span
+            title={
+              route === 'local'
+                ? 'Local-only run — no egress mode applies.'
+                : 'Route service did not record an egress mode. Check the audit chain for details.'
+            }
+            style={{
+              background: 'transparent', color: '#484f58',
+              border: '1px dashed #30363d',
+              padding: '2px 9px', borderRadius: '10px',
+              fontSize: '11px', fontWeight: 500, textTransform: 'uppercase',
+              letterSpacing: '0.02em',
+            }}
+          >
+            Egress: n/a
           </span>
         )}
 
