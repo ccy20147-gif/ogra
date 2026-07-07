@@ -120,8 +120,7 @@ These fields are surfaced in `DataSafetyCenter` and `AiGovernanceCenter` risk su
 
 ## 7. Out of scope for Alpha
 
-- **Google Gemini** — non-OpenAI-compatible, similar scope as Anthropic.
-- **AWS Bedrock** — non-OpenAI-compatible and adds AWS SigV4 signing on top.
+- **AWS Bedrock** — non-OpenAI-compatible and adds AWS SigV4 signing on top. Beyond `AnthropicAdapter` and `GeminiAdapter` (see §7a), Bedrock also pulls in the `@aws-sdk/*` runtime, which is its own architectural decision.
 - **Cohere / Mistral / AI21 / OpenRouter-native** — the OpenAI-compatible adapter already covers most of them; only OpenRouter's native API would need a separate adapter.
 - **Tool calling / function calling** — `supports_tool_calling` is recorded but the runtime does not yet wire it through (A2A/MCP is planned for v1.0 per `plans/08-memory-agentgroup-recipes-v1-requirements.md` §7).
 
@@ -149,9 +148,23 @@ Until those three steps land, the file is dead code that compiles but never runs
 - Token usage is `usage.input_tokens / output_tokens`, not `usage.prompt_tokens / completion_tokens`.
 - Streaming is `event: content_block_delta` + `event: message_delta`, not `data: {...}` chunks.
 
+### 7a.2. Gemini (Google) — PoC available, not wired
+
+A standalone `GeminiAdapter` lives at `src/edge/gemini-adapter.ts` (see the file's header comment for the full status). It mirrors `AnthropicAdapter`'s shape: full `BaseModelAdapter` contract, streaming via SSE, `validatePolicyGate()` + an egress block, `cancel()` via `AbortController`, `testConnection()` probe.
+
+Unlike Anthropic, Gemini's protocol differs from OpenAI in a different set of places, and the file documents each one inline:
+
+- **Auth** is the API key as the `key` query parameter (`?key=…`) on every request — **not** a header. The same `OgraSecretBroker` value is reused; only the transport differs.
+- The endpoint is `POST /v1beta/models/{model}:generateContent` (or `:streamGenerateContent?alt=sse` for streaming). Model is in the path, not the body.
+- System prompt is a top-level `systemInstruction: { role: 'system', parts: [{ text }] }` field, not a `system` role message.
+- Response envelope is `candidates[0].content.parts[0].text` — a third indentation for the same idea. Token usage is `usageMetadata.promptTokenCount / candidatesTokenCount / totalTokenCount`.
+- Streaming is `data: {json}` lines (no `event:` field) — and **requires `alt=sse` on the URL**, otherwise Gemini returns a single newline-delimited JSON object instead of a real event stream.
+
+Activation is the same three steps as Anthropic (`ProviderKind` enum, main.ts dispatch, API Keys panel association with `providerId = 'gemini'`). Until those land, the file is dead code that compiles but never runs.
+
 ## 8. To add a new adapter (now from a known-good starting point)
 
-Use `AnthropicAdapter` (this PR) as the reference for a non-OpenAI-compatible shape, or `OpenAICompatibleAdapter` for the OpenAI-compatible shape:
+Use `AnthropicAdapter` and `GeminiAdapter` (both PoC, in this branch) as the reference for a non-OpenAI-compatible shape, or `OpenAICompatibleAdapter` for the OpenAI-compatible shape:
 
 1. Implement `BaseModelAdapter` (`src/core/model-adapter.ts`).
 2. Add the new value to `ProviderKind` in `src/shared/types.ts`.
