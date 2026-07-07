@@ -20,6 +20,12 @@ interface WorkspaceOverviewTabProps {
   onCreateWorkspace: () => void;
   onRefreshWorkspaces: () => void;
   onSelectWorkspace: (id: string) => void;
+  /**
+   * Open a specific run in the Run tab. The parent typically uses this
+   * to flip to the `run` tab and pre-populate the runId so the
+   * RouteTraceViewer / citation list reload against the chosen run.
+   */
+  onSelectRun?: (runId: string) => void;
   loading?: boolean;
   /**
    * Optional real-data overrides for the four quick-glance cards.
@@ -70,6 +76,7 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
   onCreateWorkspace,
   onRefreshWorkspaces,
   onSelectWorkspace,
+  onSelectRun,
   loading = false,
   agentCount,
   memoryTotalCount,
@@ -285,32 +292,60 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
               <span style={{ fontWeight: 500 }}>{recentRuns.length}</span>
             </div>
             <div style={{ marginTop: '8px', fontSize: '12px' }}>
-              {recentRuns.slice(0, 5).reverse().map((r: any) => (
-                <div key={r.id} style={{
-                  padding: '6px 8px', marginBottom: '4px',
-                  border: '1px solid #21262d', borderRadius: '4px',
-                  background: '#0d1117',
-                }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span style={{ color: '#c9d1d9', fontWeight: 500 }}>
-                      {r.id?.substring(0, 12)}…
-                    </span>
-                    <span style={{
-                      color: r.status === 'completed' || r.status === 'complete' ? '#3fb950'
-                        : r.status === 'error' || r.status === 'failed' || r.status === 'blocked' ? '#f85149'
-                        : r.status === 'running' || r.status === 'in_progress' ? '#58a6ff'
-                        : '#d29922',
-                    }}>
-                      {r.status}
-                    </span>
-                  </div>
-                  {r.routeDecision?.route && (
-                    <div style={{ color: '#484f58', marginTop: '2px' }}>
-                      Route: {r.routeDecision.route}
+              {recentRuns.slice(0, 5).reverse().map((r: any) => {
+                // Each recent run is a button — opens the Run tab with
+                // the run pre-loaded so the user can re-read the
+                // route decision, citations, and audit chain without
+                // re-running the task.
+                const interactive = !!onSelectRun && !!r.id;
+                const statusColor = r.status === 'completed' || r.status === 'complete' ? '#3fb950'
+                  : r.status === 'error' || r.status === 'failed' || r.status === 'blocked' ? '#f85149'
+                  : r.status === 'running' || r.status === 'in_progress' ? '#58a6ff'
+                  : '#d29922';
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    disabled={!interactive}
+                    onClick={() => interactive && onSelectRun!(r.id)}
+                    title={interactive
+                      ? `Open run ${r.id} in the Run tab`
+                      : 'Run-open is unavailable in this build'}
+                    style={{
+                      display: 'block',
+                      width: '100%',
+                      textAlign: 'left',
+                      padding: '6px 8px', marginBottom: '4px',
+                      border: '1px solid #21262d', borderRadius: '4px',
+                      background: '#0d1117',
+                      color: '#c9d1d9',
+                      cursor: interactive ? 'pointer' : 'default',
+                      opacity: interactive ? 1 : 0.7,
+                      transition: 'border-color 0.12s',
+                    }}
+                    onMouseEnter={(e) => {
+                      if (interactive) (e.currentTarget as HTMLButtonElement).style.borderColor = '#58a6ff';
+                    }}
+                    onMouseLeave={(e) => {
+                      (e.currentTarget as HTMLButtonElement).style.borderColor = '#21262d';
+                    }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <span style={{ fontWeight: 500 }}>
+                        {r.id?.substring(0, 12)}…
+                      </span>
+                      <span style={{ color: statusColor }}>
+                        {r.status}
+                      </span>
                     </div>
-                  )}
-                </div>
-              ))}
+                    {r.routeDecision?.route && (
+                      <div style={{ color: '#484f58', marginTop: '2px' }}>
+                        Route: {r.routeDecision.route}
+                      </div>
+                    )}
+                  </button>
+                );
+              })}
             </div>
           </>
         ) : (

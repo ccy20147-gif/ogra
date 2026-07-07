@@ -62,6 +62,17 @@ const StatusBar: React.FC<{ status: string }> = ({ status }) => {
         <span aria-hidden="true" style={{ fontWeight: 600, width: '12px', textAlign: 'center' }}>{t.icon}</span>
         <span style={{ fontWeight: 500, opacity: 0.7, marginRight: '4px' }}>{t.label}:</span>
         <span style={{ flex: 1 }}>{status}</span>
+        <span
+          aria-hidden="true"
+          style={{
+            fontSize: '10px',
+            color: '#484f58',
+            letterSpacing: '0',
+            fontVariantNumeric: 'normal',
+          }}
+        >
+          Ctrl 1-5: tabs · Ctrl R: refresh
+        </span>
       </div>
     </>
   );
@@ -108,6 +119,58 @@ const App: React.FC = () => {
   useEffect(() => {
     loadWorkspaces();
   }, []);
+
+  // Keyboard shortcuts (spec §15 / 06-application-ui-ux.md). The keys
+  // mirror the tab order so a power user can fly through the app
+  // without touching the mouse:
+  //
+  //   Cmd/Ctrl + 1..5   switch tabs (workspace / run / knowledge / data / settings)
+  //   Cmd/Ctrl + R      refresh the current tab's data
+  //   ?                 show this shortcut sheet (focus help)
+  //
+  // Modifier-agnostic: works on macOS (Cmd) and Linux/Windows (Ctrl).
+  // We swallow the event only when a recognised shortcut fires so the
+  // browser's own Ctrl-R (reload renderer) still works.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (!mod && e.key !== '?') return;
+      const tabs = ['workspace', 'run', 'knowledge', 'data', 'settings'];
+      if (mod && e.key >= '1' && e.key <= '5') {
+        e.preventDefault();
+        setActiveTab(tabs[parseInt(e.key, 10) - 1]);
+        return;
+      }
+      if (mod && (e.key === 'r' || e.key === 'R')) {
+        e.preventDefault();
+        // Refresh all workspace-scoped data in parallel. This mirrors
+        // what happens on workspace change, so the user gets the same
+        // shape they would see if they had re-selected the workspace.
+        const wsId = currentWorkspace?.id;
+        loadWorkspaces();
+        if (wsId) {
+          Promise.all([
+            window.ogra.dataSafety?.summary?.(wsId),
+            window.ogra.policy?.list?.(),
+            window.ogra.provider?.list?.(),
+          ]).then(([safetyResult, policiesResult, providersResult]: any[]) => {
+            if (safetyResult?.success) setSafetySummary(safetyResult.data);
+            if (policiesResult?.success) {
+              setGovernanceData((prev: any) => ({ ...prev, policies: policiesResult.data || [] }));
+            }
+            if (providersResult?.success) {
+              const data = providersResult.data;
+              setProviders(data?.providers || data || []);
+            }
+          }).catch(() => { /* ignore refresh failure */ });
+        }
+        setStatus('Refreshed');
+        return;
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [currentWorkspace]);
 
   // Load safety and governance data when workspace changes
   useEffect(() => {
@@ -347,6 +410,42 @@ const App: React.FC = () => {
       setTaskInput('');
       setStatus(`Workspace: ${result.data.name}`);
       setCurrentRunId(null);
+    }
+  };
+
+  /**
+   * Jump to the Run tab and load a specific historical run.
+   *
+   * The Overview tab fires this when the user clicks a recent run
+   * row, so they can re-read the route decision / citations / audit
+   * chain without re-running the task. We flip the tab, set
+   * `currentRunId`, and ask the run service for the run's current
+   * status so the phase timeline paints the right thing.
+   */
+  const handleSelectRun = async (runId: string) => {
+    setActiveTab('run');
+    setCurrentRunId(runId);
+    setStatus(`Loading run ${runId.substring(0, 12)}…`);
+    try {
+      const result = await window.ogra.run.status(runId);
+      if (result?.success && result?.data) {
+        const run = (result as any).data;
+        if (run.routeDecision) setRouteDecision(run.routeDecision);
+        if (run.status === 'completed' || run.status === 'complete') {
+          setRunPhase('complete');
+          setRunResult(typeof run.output === 'string' ? run.output : JSON.stringify(run.output));
+        } else if (run.status === 'error' || run.status === 'failed' || run.status === 'blocked') {
+          setRunPhase('error');
+          setRunError(run.error || 'Run did not complete');
+        } else {
+          setRunPhase('complete');
+        }
+        setStatus(`Run ${run.id?.substring(0, 12)}… · ${run.status}`);
+      } else {
+        setStatus(`Run ${runId.substring(0, 12)}…: ${(result as any)?.error?.message || 'not found'}`);
+      }
+    } catch (err) {
+      setStatus(`Failed to load run ${runId.substring(0, 12)}…: ${(err as Error).message}`);
     }
   };
 
@@ -678,6 +777,7 @@ const App: React.FC = () => {
               onCreateWorkspace={createWorkspace}
               onRefreshWorkspaces={loadWorkspaces}
               onSelectWorkspace={handleSelectWorkspace}
+              onSelectRun={handleSelectRun}
               loading={loading}
               /* Real-data overrides for the four quick-glance cards.
                   Computed at the App.tsx level so the source of truth
