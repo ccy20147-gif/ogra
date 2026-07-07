@@ -120,19 +120,46 @@ These fields are surfaced in `DataSafetyCenter` and `AiGovernanceCenter` risk su
 
 ## 7. Out of scope for Alpha
 
-- **Anthropic** (Claude) — non-OpenAI-compatible. Adding a `ClaudeAdapter` would mean a parallel implementation of the message format, SSE events, prompt-caching fields, and the prompt-caching-aware redaction. Estimated ~300 lines + tests; not a blocker for Alpha.
 - **Google Gemini** — non-OpenAI-compatible, similar scope as Anthropic.
 - **AWS Bedrock** — non-OpenAI-compatible and adds AWS SigV4 signing on top.
 - **Cohere / Mistral / AI21 / OpenRouter-native** — the OpenAI-compatible adapter already covers most of them; only OpenRouter's native API would need a separate adapter.
 - **Tool calling / function calling** — `supports_tool_calling` is recorded but the runtime does not yet wire it through (A2A/MCP is planned for v1.0 per `plans/08-memory-agentgroup-recipes-v1-requirements.md` §7).
 
-To add a new adapter:
+## 7a. Anthropic (Claude) — PoC available, not wired
+
+A standalone `AnthropicAdapter` lives at `src/edge/anthropic-adapter.ts` (see the file's header comment for the full status). It implements the full `BaseModelAdapter` contract including:
+
+- Non-streaming `generate()` against `POST /v1/messages`
+- SSE `stream()` with `content_block_delta` / `message_delta` / `message_start` framing
+- `validatePolicyGate()` + a Confidential / Restricted egress block
+- `cancel()` via `AbortController`
+- `testConnection()` that pings with a `max_tokens: 1` probe
+
+It is **not yet wired into `ProviderService` or `main.ts`**. To activate, you have to do the three things listed in the file's JSDoc:
+
+1. Add `anthropic` to `ProviderKind` in `src/shared/types.ts`.
+2. In `electron/main/main.ts`, dispatch on the new kind and instantiate the adapter.
+3. Wire the API Keys panel to call into the broker with `providerId = 'anthropic'`.
+
+Until those three steps land, the file is dead code that compiles but never runs. We left it as a PoC so the integration shape is concrete and reviewers can compare it against the `OpenAICompatibleAdapter` to see what a non-OpenAI-compatible cloud provider costs. The endpoint differences that drove the extra ~300 lines are documented inline:
+
+- Header is `x-api-key` + `anthropic-version`, not `Authorization: Bearer`.
+- System prompt is a top-level `system` field, not a `system` role message.
+- The response envelope is `content: [{type: 'text', text: '…'}]`, not `choices[0].message.content`.
+- Token usage is `usage.input_tokens / output_tokens`, not `usage.prompt_tokens / completion_tokens`.
+- Streaming is `event: content_block_delta` + `event: message_delta`, not `data: {...}` chunks.
+
+## 8. To add a new adapter (now from a known-good starting point)
+
+Use `AnthropicAdapter` (this PR) as the reference for a non-OpenAI-compatible shape, or `OpenAICompatibleAdapter` for the OpenAI-compatible shape:
 
 1. Implement `BaseModelAdapter` (`src/core/model-adapter.ts`).
-2. Register a `ProviderKind` in `src/shared/types.ts`.
-3. Add the dispatch arm in `ProviderService` if your kind isn't `ollama` or `openai_compatible`.
-4. Write a connection test in the new adapter's `testConnection()`.
-5. Add a test fixture under `tests/unit/` and a render-only check in `tests/integration/`.
+2. Add the new value to `ProviderKind` in `src/shared/types.ts`.
+3. Add the dispatch arm in `ProviderService` if the new kind isn't `ollama` or `openai_compatible`.
+4. Register the adapter instance in `electron/main/main.ts` alongside the existing ones.
+5. Add a Secret in the API Keys panel (UI: `Settings → API Keys → Provider`).
+6. Write a connection test in the new adapter's `testConnection()`.
+7. Add a test fixture under `tests/unit/` and a render-only check in `tests/integration/`.
 
 ## 8. Troubleshooting
 
