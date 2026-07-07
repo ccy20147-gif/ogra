@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 
 interface InheritanceChainItem {
   source: string;
@@ -60,6 +60,15 @@ interface DataSafetyProps {
     allowlist?: AllowlistEntry[];
     classificationAdjustments?: ClassificationAdjustment;
   };
+  /** Optional handler for the new "View Evidence" affordance. The dialog
+   *  is rendered internally so a missing handler still shows the
+   *  affordance in disabled state. */
+  onViewEvidence?: (access: {
+    documentId: string;
+    fileName: string;
+    classification: string;
+    accessedAt: string;
+  }) => void;
   onAdjustClassification?: (target: string, newClassification: string) => void;
 }
 
@@ -72,7 +81,23 @@ const classificationColors: Record<string, string> = {
 
 const CLASSIFICATIONS = ['Public', 'Internal', 'Confidential', 'Restricted'];
 
-export const DataSafetyCenter: React.FC<DataSafetyProps> = ({ summary, onAdjustClassification }) => {
+export const DataSafetyCenter: React.FC<DataSafetyProps> = ({ summary, onAdjustClassification, onViewEvidence }) => {
+  // Local "View Evidence" dialog state. Holds the access record whose
+  // evidence is currently shown; null when the dialog is closed.
+  const [evidenceAccess, setEvidenceAccess] = useState<{
+    documentId: string;
+    fileName: string;
+    classification: string;
+    accessedAt: string;
+  } | null>(null);
+
+  const openEvidence = (access: typeof evidenceAccess) => {
+    if (!access) return;
+    onViewEvidence?.(access);
+    setEvidenceAccess(access);
+  };
+  const closeEvidence = () => setEvidenceAccess(null);
+
   const hasNoData = summary.totalAssets === 0
     && summary.knowledgeBases.length === 0
     && summary.recentAccess.length === 0
@@ -323,11 +348,24 @@ export const DataSafetyCenter: React.FC<DataSafetyProps> = ({ summary, onAdjustC
                   marginRight: '6px',
                 }}>
                   {access.classification}
-                </span>
-                {new Date(access.accessedAt).toLocaleString()}
-                <span style={{ marginLeft: '8px', fontSize: '10px', color: '#484f58' }}>ID: {access.documentId.slice(0, 12)}…</span>
-              </div>
-            </div>
+                  </span>
+                  {new Date(access.accessedAt).toLocaleString()}
+                  <span style={{ marginLeft: '8px', fontSize: '10px', color: '#484f58' }}>ID: {access.documentId.slice(0, 12)}…</span>
+                  <button
+                  type="button"
+                  onClick={() => openEvidence(access)}
+                  title="Open the evidence panel for this access event."
+                  style={{
+                    marginLeft: 'auto', padding: '2px 8px',
+                    border: '1px solid #30363d', borderRadius: '3px',
+                    background: 'transparent', color: '#58a6ff',
+                    fontSize: '10px', cursor: 'pointer',
+                  }}
+                  >
+                  View evidence
+                  </button>
+                  </div>
+                  </div>
           ))}
         </div>
       )}
@@ -439,9 +477,79 @@ export const DataSafetyCenter: React.FC<DataSafetyProps> = ({ summary, onAdjustC
         {summary.limitationNote}
       </div>
       </>)}
+
+      {/* ── View-Evidence dialog (F-1) ──
+          Inline, role=dialog, no portal needed. Backdrop click closes.
+          Shows the access record + a placeholder for evidence rows that
+          will be wired to `document_access_events` once a backend IPC
+          exposes them. Until then the dialog is informational only. */}
+      {evidenceAccess && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Evidence for ${evidenceAccess.fileName}`}
+          onClick={closeEvidence}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000,
+            background: 'rgba(0, 0, 0, 0.6)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center',
+            padding: '20px',
+          }}
+        >
+          <div
+            onClick={e => e.stopPropagation()}
+            style={{
+              background: '#161b22',
+              border: '1px solid #30363d',
+              borderRadius: '8px',
+              maxWidth: '520px', width: '100%',
+              padding: '20px',
+              boxShadow: 'rgba(0, 0, 0, 0.5) 0px 8px 24px',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', marginBottom: '12px' }}>
+              <h3 style={{ fontSize: '14px', color: '#e1e4e8', margin: 0, flex: 1 }}>
+                Evidence — {evidenceAccess.fileName}
+              </h3>
+              <button
+                type="button"
+                onClick={closeEvidence}
+                aria-label="Close evidence panel"
+                style={{
+                  padding: '2px 8px', border: '1px solid #30363d',
+                  borderRadius: '4px', background: 'transparent',
+                  color: '#8b949e', cursor: 'pointer', fontSize: '12px',
+                }}
+              >
+                ✕
+              </button>
+            </div>
+            <dl style={{ margin: 0, fontSize: '12px', lineHeight: 1.6 }}>
+              <Row k="Document ID" v={evidenceAccess.documentId} mono />
+              <Row k="Classification" v={evidenceAccess.classification} />
+              <Row k="Accessed at" v={new Date(evidenceAccess.accessedAt).toLocaleString()} />
+              <Row k="Run ID" v="(not yet wired to a specific run)" />
+              <Row k="Audit event IDs" v="(not yet wired to document_access_events)" />
+            </dl>
+            <p style={{ fontSize: '11px', color: '#8b949e', marginTop: '12px', marginBottom: 0 }}>
+              When the renderer-side `document_access_events` IPC is exposed,
+              the two placeholder rows above will be filled with real run
+              and audit event references. Click outside this panel to close.
+            </p>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
+
+/** Compact key/value row used inside the evidence dialog. */
+const Row: React.FC<{ k: string; v: string; mono?: boolean }> = ({ k, v, mono }) => (
+  <div style={{ display: 'flex', gap: '12px', margin: '2px 0' }}>
+    <dt style={{ width: '110px', flexShrink: 0, color: '#8b949e' }}>{k}</dt>
+    <dd style={{ margin: 0, color: '#e1e4e8', fontFamily: mono ? 'ui-monospace, SFMono-Regular, Menlo, monospace' : 'inherit', wordBreak: 'break-all' }}>{v}</dd>
+  </div>
+);
 
 const cardStyle: React.CSSProperties = {
   padding: '16px',

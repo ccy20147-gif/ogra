@@ -76,6 +76,32 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
   const cloudProviders = providers.filter((p: any) => !p.isLocal).length;
   const totalModels = providers.reduce((acc: number, p: any) => acc + (p.models?.length || 0), 0);
 
+  // ── Derived data for the 4b summary cards ──
+  // Until a dedicated agents IPC lands, fall back to the set of agent
+  // ids embedded in the policy/pipeline state. Memory / incidents /
+  // cloud-call counts come from safetySummary and recentRuns.
+  const policyDerivedAgents: string[] = Array.from(new Set([
+    ...(activePolicies || []).map((p: any) => p.targetAgent || p.agentId).filter(Boolean),
+    ...(recentRuns || []).map((r: any) => r.routeDecision?.assignedAdapter).filter(Boolean),
+  ])) as string[];
+
+  const memoryCount =
+    (safetySummary?.memoryStats?.total as number | undefined) ??
+    (safetySummary?.memoryStats?.episodic ?? 0) +
+      (safetySummary?.memoryStats?.semantic ?? 0) +
+      (safetySummary?.memoryStats?.procedural ?? 0);
+
+  // Incidents aren't yet wired through safetySummary, so we count
+  // blocked runs as a session-scoped proxy. When the incidents IPC
+  // lands this is replaced with `safetySummary.openIncidents`.
+  const incidentCount = (recentRuns || []).filter(
+    (r: any) => r.status === 'blocked' || r.routeDecision?.route === 'blocked'
+  ).length;
+
+  // Ogra-managed cloud calls. The summary already tracks total
+  // recentCloudCalls + zeroCloudCallRuns; we surface the count here.
+  const cloudCallCount = safetySummary?.recentCloudCalls ?? 0;
+
   return (
     <div>
       {/* Loading indicator */}
@@ -271,6 +297,50 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
         )}
       </div>
 
+      {/* 4b. Quick summary cards — derived from the data already in
+          the component (runs, safetySummary, policies). No new IPC.
+          Each card has a placeholder "real source" note where the
+          underlying aggregation is still wired to a stub. */}
+      <div style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+        gap: '12px',
+        marginBottom: '20px',
+      }}>
+        <SummaryCard
+          icon="🤖"
+          label="Agents available"
+          primary={policyDerivedAgents.length}
+          sub={policyDerivedAgents.length === 0 ? 'No manifests registered' : `${policyDerivedAgents.slice(0, 2).join(', ')}…`}
+        />
+        <SummaryCard
+          icon="🧠"
+          label="Memory status"
+          primary={memoryCount}
+          sub={
+            memoryCount === 0
+              ? 'No episodic / semantic / procedural entries yet'
+              : `${safetySummary?.memoryStats?.episodic ?? 0} episodic · ${safetySummary?.memoryStats?.semantic ?? 0} semantic`
+          }
+        />
+        <SummaryCard
+          icon="⚠️"
+          label="Risk & incidents"
+          primary={incidentCount}
+          sub={incidentCount === 0 ? 'No open incidents' : `${incidentCount} incident${incidentCount === 1 ? '' : 's'} in current session`}
+          tone={incidentCount > 0 ? 'warning' : 'neutral'}
+        />
+        <SummaryCard
+          icon="☁️"
+          label="Cloud calls"
+          primary={cloudCallCount}
+          sub={cloudCallCount === 0
+            ? '0 Ogra-managed cloud calls this session'
+            : `${cloudCallCount} cloud call${cloudCallCount === 1 ? '' : 's'} · ${recentRuns.length} run${recentRuns.length === 1 ? '' : 's'} total`}
+          tone={cloudCallCount === 0 ? 'good' : 'neutral'}
+        />
+      </div>
+
       {/* 5. Risk / Classification Summary */}
       <div style={cardCx}>
         <div style={sectionTitle}>📊 Data Classification</div>
@@ -339,3 +409,37 @@ const WorkspaceOverviewTab: React.FC<WorkspaceOverviewTabProps> = ({
 };
 
 export default WorkspaceOverviewTab;
+
+/**
+ * Compact summary card used in the 4b quick-glance grid. Tones
+ * influence the right border accent + primary color so the user can
+ * scan for warnings at a glance.
+ */
+const SummaryCard: React.FC<{
+  icon: string;
+  label: string;
+  primary: number | string;
+  sub: string;
+  tone?: 'neutral' | 'good' | 'warning' | 'danger';
+}> = ({ icon, label, primary, sub, tone = 'neutral' }) => {
+  const accent = (
+    tone === 'good'    ? '#3fb950' :
+    tone === 'warning' ? '#d29922' :
+    tone === 'danger'  ? '#f85149' : '#484f58'
+  );
+  return (
+    <div
+      style={{
+        ...cardCx,
+        borderLeft: `3px solid ${accent}`,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+        <span aria-hidden="true" style={{ fontSize: '14px' }}>{icon}</span>
+        <span style={{ fontSize: '11px', color: '#8b949e', textTransform: 'uppercase', letterSpacing: '0.5px' }}>{label}</span>
+      </div>
+      <div style={{ fontSize: '22px', fontWeight: 600, color: accent, fontVariantNumeric: 'tabular-nums' }}>{primary}</div>
+      <div style={{ fontSize: '11px', color: '#8b949e', marginTop: '2px' }}>{sub}</div>
+    </div>
+  );
+};
