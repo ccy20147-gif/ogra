@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { buttonStyle, secondaryButtonStyle } from '../styles';
 
 interface SettingsTabProps {
@@ -543,7 +543,29 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
   const handleStatus = (msg: string) => {
     setLocalMsg(msg);
     onStatusChange?.(msg);
+    // Mirror every status transition into the session audit log so
+    // the user can see what they just did, even if the bottom status
+    // bar scrolled past it. Cheap: only fires on user actions that
+    // already went through a child component.
+    addAudit('status', msg);
   };
+
+  // Session-only audit log. Captures recent SettingsTab-side actions
+  // (provider test / add / update, secret add / delete) for the user
+  // to see what they just did. Backed by useRef to avoid re-rendering
+  // on every append; the `version` tick forces a re-render when the
+  // panel needs to update. When the preload grows `audit.writeEvent`,
+  // the same surface can mirror to a real audit event without changing
+  // its prop shape.
+  const auditLog = useRef<Array<{ at: string; kind: string; msg: string }>>([]);
+  const [auditVersion, setAuditVersion] = useState(0);
+  const addAudit = useCallback((kind: string, msg: string) => {
+    auditLog.current = [
+      { at: new Date().toISOString(), kind, msg },
+      ...auditLog.current,
+    ].slice(0, 50);
+    setAuditVersion(v => v + 1);
+  }, []);
 
   return (
     <div>
@@ -593,6 +615,70 @@ const SettingsTab: React.FC<SettingsTabProps> = ({
         <button style={secondaryButtonStyle} onClick={onShowDataDir}>
           Show Data Directory
         </button>
+      </div>
+
+      {/* Session audit log. Renders the last few status transitions so
+          the user can see what they just did. auditVersion is the re-
+          render trigger; the entries array itself is in the ref. */}
+      <div
+        aria-label="Settings audit history"
+        style={{
+          marginTop: '16px',
+          padding: '10px 12px',
+          border: '1px dashed #21262d',
+          borderRadius: '6px',
+          background: '#0d1117',
+          fontSize: '11px',
+          color: '#8b949e',
+        }}
+      >
+        <div
+          style={{
+            textTransform: 'uppercase', letterSpacing: '0.5px', fontWeight: 600,
+            marginBottom: '6px',
+          }}
+        >
+          Settings audit history{' '}
+          <span style={{ color: '#484f58' }}>
+            (session-only · {auditLog.current.length})
+          </span>
+        </div>
+        {auditLog.current.length === 0 ? (
+          <div style={{ color: '#484f58' }}>
+            No audit entries yet. Test, add, or modify a provider or
+            secret; status messages appear here.
+          </div>
+        ) : (
+          auditLog.current.slice(0, 8).map((e, i) => (
+            <div
+              key={`${e.at}-${i}`}
+              style={{
+                display: 'flex', gap: '8px', alignItems: 'baseline',
+                padding: '1px 0',
+                fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                fontSize: '10px',
+              }}
+            >
+              <span style={{ color: '#484f58', flexShrink: 0 }}>
+                {new Date(e.at).toLocaleTimeString()}
+              </span>
+              <span
+                title={e.kind}
+                style={{
+                  color: e.kind === 'status' ? '#58a6ff' : '#8b949e',
+                  fontWeight: 600, minWidth: '60px',
+                }}
+              >{e.kind}</span>
+              <span
+                style={{
+                  color: '#c9d1d9',
+                  overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  flex: 1,
+                }}
+              >{e.msg}</span>
+            </div>
+          ))
+        )}
       </div>
     </div>
   );
