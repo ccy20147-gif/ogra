@@ -79,6 +79,18 @@ const App: React.FC = () => {
   const [governanceData, setGovernanceData] = useState<any>({ runs: [], incidents: [], policies: [] });
   const [providers, setProviders] = useState<any[]>([]);
   const [recentRuns, setRecentRuns] = useState<any[]>([]);
+  // Approval queue surfaced in AiGovernanceCenter. Until the IPC
+  // exposes a real approval stream, the user can demo the
+  // approve/deny UI by clicking the "Seed demo approval" button
+  // in the governance tab (only visible while the queue is empty).
+  const [pendingApprovals, setPendingApprovals] = useState<Array<{
+    id: string;
+    runId?: string;
+    approvalType: string;
+    requestedScope: Record<string, unknown>;
+    reason: string;
+    createdAt: string;
+  }>>([]);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string | null>(null);
   const [apiAvailable, setApiAvailable] = useState<boolean>(true);
@@ -189,6 +201,38 @@ const App: React.FC = () => {
         setRunError('Failed to cancel run');
       });
     }
+  };
+
+  /**
+   * Approve / deny an item in the pending-approval queue. Real IPC
+   * (`approval.decision`) is not yet exposed; the local mirror is the
+   * only source of truth for now. The selected item is dropped from
+   * the queue regardless of the decision, and the StatusBar reflects
+   * the outcome so the user sees what they just did.
+   */
+  const handleApprovalDecision = (approvalId: string, decision: 'approve' | 'deny') => {
+    setPendingApprovals(prev => prev.filter(a => a.id !== approvalId));
+    setStatus(`Approval ${decision}d`);
+  };
+
+  /**
+   * Add a synthetic approval to the queue. Visible only when the
+   * queue is empty so the user has a way to demo the approve/deny UI
+   * before the real approval IPC is wired.
+   */
+  const seedDemoApproval = () => {
+    const id = `apr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    setPendingApprovals(prev => [
+      ...prev,
+      {
+        id,
+        runId: `run_${id.slice(-6)}`,
+        approvalType: 'egress',
+        requestedScope: { mode: 'approve_then_egress', classification: 'Confidential' },
+        reason: 'High-water classification reached Confidential. Approve-to-egress required.',
+        createdAt: new Date().toISOString(),
+      },
+    ]);
   };
 
   const runDemo = async () => {
@@ -716,7 +760,10 @@ const App: React.FC = () => {
                 { id: 'pol_4', name: 'public-cloud-allowed', enabled: true, version: 1 },
               ]}
               requiredApprovals={['Data export approval', 'Cloud compute approval']}
-              approvalStatus="pending"
+              approvalStatus={pendingApprovals.length > 0 ? 'pending' : 'not_required'}
+              approvalRequests={pendingApprovals}
+              onApprovalDecision={handleApprovalDecision}
+              onSeedDemoApproval={seedDemoApproval}
               policyEvaluations={[
                 {
                   runId: governanceData.runs?.[0]?.runId || 'run_1',

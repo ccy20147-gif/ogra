@@ -75,8 +75,25 @@ export const MemoryCenter: React.FC<MemoryCenterProps> = ({
       <div style={{ marginBottom: '20px' }}>
         <h3 style={{ fontSize: '14px', marginBottom: '8px', color: '#e1e4e8' }}>Recent Episodic Memories</h3>
         {recentEpisodic.length === 0 ? (
-          <div style={{ color: '#8b949e', fontSize: '13px', padding: '12px', border: '1px dashed #30363d', borderRadius: '6px' }}>
-            No episodic memories yet. Run an agent query to create one.
+          <div style={{
+            color: '#8b949e', fontSize: '13px',
+            padding: '12px', border: '1px dashed #30363d', borderRadius: '6px',
+          }}>
+            <div>No episodic memories yet. Run an agent query to create one.</div>
+            <div style={{ marginTop: '6px', fontSize: '11px', color: '#586069' }}>
+              Episodic memories are auto-written from completed runs. Semantic and
+              procedural memories require explicit user confirmation.
+              See{' '}
+              <a
+                href="https://github.com/ccy20147-gif/ogra/blob/main/docs/plans/08-memory-agentgroup-recipes-v1-requirements.md"
+                target="_blank"
+                rel="noreferrer"
+                style={{ color: '#58a6ff', textDecoration: 'underline' }}
+              >
+                M3 memory requirements
+              </a>{' '}
+              for the full model.
+            </div>
           </div>
         ) : (
           recentEpisodic.map(m => (

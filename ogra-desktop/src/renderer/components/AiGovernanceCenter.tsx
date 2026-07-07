@@ -70,6 +70,10 @@ interface GovernanceProps {
    * currently exposed in preload; until it is, this is a UI-only callback.
    */
   onApprovalDecision?: (approvalId: string, decision: 'approve' | 'deny') => void;
+  /** Optional seed for the approval queue. Shown as a dashed-border
+   *  button when the queue is empty; hidden once a real request is
+   *  present. */
+  onSeedDemoApproval?: () => void;
   /** Policy evaluation results for each run */
   policyEvaluations?: PolicyEvaluation[];
   /** Registered models in the workspace */
@@ -146,7 +150,7 @@ const badgeStyle: React.CSSProperties = {
 
 export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
   runs, incidents, policies, requiredApprovals, approvalStatus,
-  approvalRequests = [], onApprovalDecision,
+  approvalRequests = [], onApprovalDecision, onSeedDemoApproval,
   policyEvaluations = [], registeredModels = [], riskDetails = [],
   onExportAudit,
   loading = false,
@@ -475,6 +479,32 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
                 </div>
               ))}
             </>
+          )}
+
+          {/* Demo-seed button. The real `approval.decision` IPC is not
+              yet exposed; until then the only way to populate the
+              queue is this button, which adds a synthetic Confidential
+              egress request so the user can exercise the Approve / Deny
+              flow. Hidden once the queue already has items, since the
+              goal is to clear the queue — not to spam it. */}
+          {approvalRequests.length === 0 && onSeedDemoApproval && (
+            <button
+              type="button"
+              onClick={onSeedDemoApproval}
+              title="Adds a synthetic Confidential egress approval so you can try the Approve / Deny flow. Real approval IPC will replace this."
+              style={{
+                marginTop: '4px',
+                padding: '6px 12px',
+                fontSize: '11px',
+                color: '#58a6ff',
+                background: 'transparent',
+                border: '1px dashed #30363d',
+                borderRadius: '4px',
+                cursor: 'pointer',
+              }}
+            >
+              + Seed demo approval (Confidential egress)
+            </button>
           )}
 
           {/* Individual approval requests with Approve / Deny buttons (spec §10 & §12). */}
