@@ -143,6 +143,17 @@ The active implementation planning documents are under [docs/plans](docs/plans/)
 
 These plans replace the earlier Alpha demo task breakdown. They are organized by product and architecture layer: desktop runtime, local data/audit/governance store, policy/routing/safety, RAG, model and Agent orchestration, UI/UX, verification/release gates, and Beta/v1 memory/Agent Group/recipes/interoperability completion.
 
+## Provider Configuration
+
+If you are wiring a model endpoint for the first time, see [docs/providers.md](docs/providers.md). It covers:
+
+- The two-adapter model (`OllamaAdapter` + `OpenAICompatibleAdapter`) and what each is good for
+- Quick-start recipes for Ollama, llama.cpp (OpenAI-compatible mode), and OpenAI cloud
+- The three things a "provider" actually is (record + models + optional secret)
+- Provider metadata fields (retention / region / ZDR / tool calling) and how the policy engine uses them
+- Out-of-scope adapters for Alpha (Anthropic, Gemini, Bedrock) and how to add a new adapter
+- Troubleshooting matrix
+
 ## Repository Status
 
 This directory is now a git repository.
