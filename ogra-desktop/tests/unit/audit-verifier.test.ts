@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import * as crypto from 'crypto';
 import { DatabaseService } from '../../src/core/database-service';
+import { envelopeV2Hash, HASH_ENVELOPE_VERSION_V2 } from '../../src/core/audit-envelope';
 import { DataClassification, WorkspaceType, RunEventType } from '../../src/shared/types';
 import { createTestDb } from '../helpers/test-db';
 
@@ -87,13 +87,49 @@ describe('Alpha Audit Verifier', () => {
 
     const event = db.appendRunEvent(runId, wsId, 'reproducible', payload);
 
-    // Recompute the hash manually
-    const canonicalJson = JSON.stringify(payload, Object.keys(payload).sort());
-    const expectedHash = crypto.createHash('sha256')
-      .update(canonicalJson + event.previous_hash)
-      .digest('hex');
+    // v18 writers sign the canonical v2 envelope, not only the
+    // payload and previous hash used by legacy v1 rows.
+    const expectedHash = envelopeV2Hash({
+      id: event.id,
+      runId,
+      workspaceId: wsId,
+      sequence: event.sequence,
+      eventType: event.event_type,
+      eventPayloadJson: event.event_payload_json,
+      payloadHash: event.payload_hash,
+      policyVersionHash: event.policy_version_hash,
+      redactionRuleVersion: event.redaction_rule_version,
+      createdAt: event.created_at,
+      previousHash: event.previous_hash,
+    });
 
     expect(event.event_hash).toBe(expectedHash);
+    expect(event.hash_envelope_version).toBe(HASH_ENVELOPE_VERSION_V2);
+  });
+
+  it('writes and verifies independent v2 chains with overlapping sequence numbers', () => {
+    const first = db.appendRunEvent('verify_seq_run', wsId, 'v2_a', { a: 1 });
+    const second = db.appendRunEvent('verify_unique_run', wsId, 'v2_b', { b: 2 });
+    expect(first.sequence).toBeGreaterThan(0);
+    expect(second.sequence).toBeGreaterThan(0);
+    expect(db.verifyRunChain('verify_seq_run').valid).toBe(true);
+    expect(db.verifyRunChain('verify_unique_run').valid).toBe(true);
+  });
+
+  it('detects non-payload envelope field tampering on production-written v2 rows', () => {
+    const runId = 'verify_v2_envelope_tamper';
+    const row = db.appendRunEvent(runId, wsId, 'safe_event', { safe: true });
+    db.getRawDB().prepare('UPDATE run_events SET event_type = ? WHERE id = ?')
+      .run('tampered_event', row.id);
+    expect(db.verifyRunChain(runId).valid).toBe(false);
+  });
+
+  it('rejects non-canonical payload bytes on production-written v2 rows', () => {
+    const runId = 'verify_v2_payload_bytes';
+    const row = db.appendRunEvent(runId, wsId, 'safe_event', { a: 1, b: 2 });
+    db.getRawDB().prepare('UPDATE run_events SET event_payload_json = ? WHERE id = ?')
+      .run('{"b":2,"a":1}', row.id);
+    expect(db.verifyRunChain(runId).valid).toBe(false);
   });
 
   it('should verify chain integrity', () => {

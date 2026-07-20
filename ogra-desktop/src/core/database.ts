@@ -189,12 +189,326 @@ export class OgraDatabase {
           db.exec('CREATE INDEX IF NOT EXISTS idx_approvals_run_decision ON approvals(run_id, decision);');
         },
       },
+      // Sequence 1A Milestone 0: durable runtime kernel.
+      // v18 adds hash_envelope_version on run_events (canonical v2
+      // envelope) plus all frame/effect/receipt/binding/repair/lease/
+      // audit_edges/tool_registry tables. Append-only: never alters
+      // or rewrites a previously shipped migration.
+      {
+        version: 18,
+        name: 'durable-runtime-kernel-m0',
+        sql: this.getV18Schema(),
+        preflight: (db: any) => {
+          // run_events.hash_envelope_version is the discriminator
+          // between legacy (v1) and canonical-envelope (v2) rows.
+          // Pre-v18 rows are v1; new rows may carry either version
+          // depending on the producer's envelope choice.
+          const cols = db.prepare(
+            "SELECT name FROM pragma_table_info('run_events')",
+          ).all() as Array<{ name: string }>;
+          const names = new Set(cols.map(c => c.name));
+          if (!names.has('hash_envelope_version')) {
+            db.exec(
+              'ALTER TABLE run_events ADD COLUMN hash_envelope_version TEXT;',
+            );
+          }
+          if (!names.has('frame_id')) {
+            db.exec('ALTER TABLE run_events ADD COLUMN frame_id TEXT;');
+          }
+          if (!names.has('effect_id')) {
+            db.exec('ALTER TABLE run_events ADD COLUMN effect_id TEXT;');
+          }
+          if (!names.has('repair_transaction_id')) {
+            db.exec(
+              'ALTER TABLE run_events ADD COLUMN repair_transaction_id TEXT;',
+            );
+          }
+          if (!names.has('caused_by_event_id')) {
+            db.exec(
+              'ALTER TABLE run_events ADD COLUMN caused_by_event_id TEXT;',
+            );
+          }
+          if (!names.has('idempotency_key_hash')) {
+            db.exec(
+              'ALTER TABLE run_events ADD COLUMN idempotency_key_hash TEXT;',
+            );
+          }
+          if (!names.has('external_receipt_hash')) {
+            db.exec(
+              'ALTER TABLE run_events ADD COLUMN external_receipt_hash TEXT;',
+            );
+          }
+          if (!names.has('target_subtree_revision')) {
+            db.exec(
+              'ALTER TABLE run_events ADD COLUMN target_subtree_revision INTEGER;',
+            );
+          }
+        },
+      },
     ];
   }
 
   private getV17Schema(): string {
     return `
       SELECT 1;
+    `;
+  }
+
+  private getV18Schema(): string {
+    // Sequence 1A Milestone 0: durable runtime kernel tables.
+    // All tables are append-only here. Constraints carry the
+    // primary invariants from plan 10 §3-§6 and plan 11 §5/§6:
+    // - one receipt row per (effect_id, attempt_no) — never overwritten
+    // - one approval binding per (effect_id, callback_attempt_no)
+    // - one repair step per (transaction_id, step_index)
+    // - one audit edge per (from_kind, from_id, relation, to_kind, to_id)
+    // - an idempotency_key_hash denotes one logical effect globally
+    return `
+      -- Execution Frames
+      CREATE TABLE IF NOT EXISTS run_frames (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        parent_frame_id TEXT REFERENCES run_frames(id),
+        run_step_id TEXT,
+        frame_kind TEXT NOT NULL CHECK(frame_kind IN
+          ('root','plan_step','react','repair','synthesis')),
+        status TEXT NOT NULL CHECK(status IN
+          ('pending','running','awaiting_approval','completed',
+           'failed','cancelled')),
+        path_json TEXT NOT NULL DEFAULT '[]',
+        node_revision INTEGER NOT NULL DEFAULT 1,
+        subtree_revision INTEGER NOT NULL DEFAULT 1,
+        input_hash TEXT,
+        output_hash TEXT,
+        created_event_id TEXT,
+        terminal_event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_frames_run_status
+        ON run_frames(run_id, status);
+      CREATE INDEX IF NOT EXISTS idx_frames_parent
+        ON run_frames(parent_frame_id);
+      -- A run has exactly one execution root. Child frames use a
+      -- non-NULL parent_frame_id, so this partial index does not
+      -- constrain their fan-out.
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_root_frame_per_run
+        ON run_frames(run_id) WHERE parent_frame_id IS NULL;
+
+      -- Effect Ledger
+      CREATE TABLE IF NOT EXISTS run_effects (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        owner_frame_id TEXT NOT NULL REFERENCES run_frames(id),
+        effect_type TEXT NOT NULL,
+        adapter_kind TEXT NOT NULL,
+        payload_fingerprint TEXT NOT NULL,
+        callback_capsule_ref TEXT,
+        callback_capsule_hash TEXT,
+        callback_capsule_format_version TEXT,
+        idempotency_key_ref TEXT,
+        idempotency_key_hash TEXT,
+        state TEXT NOT NULL CHECK(state IN (
+          'planned','in_flight','unknown','received','committed',
+          'quarantined','compensating','compensated','failed',
+          'cancelled_before_send')),
+        allowed_repair_actions_json TEXT NOT NULL DEFAULT '[]',
+        dependency_effect_ids_json TEXT NOT NULL DEFAULT '[]',
+        effect_revision INTEGER NOT NULL DEFAULT 1,
+        route_decision_id TEXT,
+        policy_evaluation_id TEXT,
+        current_approval_id TEXT,
+        egress_record_id TEXT,
+        ingress_finding_id TEXT,
+        external_request_id TEXT,
+        authoritative_receipt_id TEXT,
+        external_receipt_hash TEXT,
+        created_event_id TEXT,
+        terminal_event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_effects_run_state
+        ON run_effects(run_id, state);
+      CREATE INDEX IF NOT EXISTS idx_effects_owner_frame
+        ON run_effects(owner_frame_id);
+      -- An idempotency key identifies one logical external effect. It
+      -- MUST NOT be rebound to a different frame, payload, or run.
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_effects_idem_hash
+        ON run_effects(idempotency_key_hash)
+        WHERE idempotency_key_hash IS NOT NULL;
+
+      -- Effect Receipts: callback attempt vs physical application evidence
+      CREATE TABLE IF NOT EXISTS effect_receipts (
+        id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+        attempt_no INTEGER NOT NULL,
+        request_id TEXT,
+        request_hash TEXT,
+        response_hash TEXT,
+        result_capsule_ref TEXT,
+        result_capsule_hash TEXT,
+        result_capsule_format_version TEXT,
+        provider_status TEXT,
+        application_status TEXT NOT NULL CHECK(application_status IN
+          ('not_applied','applied','unknown')),
+        receipt_hash TEXT NOT NULL,
+        received_at TEXT NOT NULL DEFAULT (datetime('now')),
+        event_id TEXT,
+        UNIQUE(effect_id, attempt_no)
+      );
+
+      -- Per-attempt immutable approval lineage
+      CREATE TABLE IF NOT EXISTS effect_approval_bindings (
+        id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+        callback_attempt_no INTEGER NOT NULL,
+        approval_id TEXT NOT NULL,
+        approval_revision INTEGER NOT NULL,
+        binding_kind TEXT NOT NULL CHECK(binding_kind IN
+          ('initial','recovery_retry')),
+        created_event_id TEXT,
+        UNIQUE(effect_id, callback_attempt_no)
+      );
+
+      -- Approval consumptions: counter rows consumed atomically
+      -- before callback (plan 02 §3.4)
+      CREATE TABLE IF NOT EXISTS approval_consumptions (
+        id TEXT PRIMARY KEY,
+        approval_id TEXT NOT NULL,
+        effect_id TEXT NOT NULL,
+        callback_attempt_no INTEGER NOT NULL,
+        approval_revision INTEGER NOT NULL,
+        consumed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        event_id TEXT,
+        UNIQUE(approval_id, effect_id, callback_attempt_no)
+      );
+
+      -- Repair transactions and steps (plan 10 §3.3)
+      CREATE TABLE IF NOT EXISTS repair_transactions (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        target_frame_id TEXT NOT NULL REFERENCES run_frames(id),
+        target_subtree_revision INTEGER NOT NULL,
+        authorized_effect_revisions_json TEXT NOT NULL DEFAULT '[]',
+        proposed_plan_json TEXT NOT NULL DEFAULT '[]',
+        verification_result_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN
+          ('open','accepted','rejected','committed','aborted')),
+        rejection_reason TEXT,
+        created_event_id TEXT,
+        terminal_event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_repair_run_status
+        ON repair_transactions(run_id, status);
+
+      CREATE TABLE IF NOT EXISTS repair_steps (
+        id TEXT PRIMARY KEY,
+        repair_transaction_id TEXT NOT NULL REFERENCES repair_transactions(id) ON DELETE CASCADE,
+        step_index INTEGER NOT NULL,
+        effect_id TEXT NOT NULL REFERENCES run_effects(id),
+        action TEXT NOT NULL CHECK(action IN
+          ('retry','compensate','preserve','amend','reconcile','escalate')),
+        status TEXT NOT NULL,
+        outcome_hash TEXT,
+        event_id TEXT,
+        UNIQUE(repair_transaction_id, step_index)
+      );
+
+      -- Recovery Lease (plan 10 §3.4): single local holder
+      CREATE TABLE IF NOT EXISTS recovery_leases (
+        run_id TEXT PRIMARY KEY REFERENCES agent_runs(id) ON DELETE CASCADE,
+        holder_id TEXT NOT NULL,
+        lease_version INTEGER NOT NULL DEFAULT 1,
+        acquired_at TEXT NOT NULL DEFAULT (datetime('now')),
+        expires_at TEXT NOT NULL,
+        renewed_at TEXT NOT NULL DEFAULT (datetime('now')),
+        released_at TEXT,
+        last_event_id TEXT
+      );
+
+      -- Audit Edges (plan 10 §6): bidirectional rebuildable index.
+      -- Distinct from run_events; an edge projection over L0+L1.
+      CREATE TABLE IF NOT EXISTS audit_edges (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        from_kind TEXT NOT NULL CHECK(from_kind IN
+          ('run','frame','effect','repair','memory','event')),
+        from_id TEXT NOT NULL,
+        relation TEXT NOT NULL,
+        to_kind TEXT NOT NULL CHECK(to_kind IN
+          ('run','frame','effect','repair','route','policy','approval',
+           'egress','ingress','receipt','memory','event')),
+        to_id TEXT NOT NULL,
+        source_event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(from_kind, from_id, relation, to_kind, to_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_edges_run ON audit_edges(run_id);
+      CREATE INDEX IF NOT EXISTS idx_edges_from ON audit_edges(from_kind, from_id);
+      CREATE INDEX IF NOT EXISTS idx_edges_to ON audit_edges(to_kind, to_id);
+
+      -- Tool Descriptor / Version / Workspace Binding (plan 11 §5/§6).
+      -- T1 boundary: register immutable contracts, do not enable
+      -- any transport or actual callback.
+      CREATE TABLE IF NOT EXISTS tool_descriptors (
+        id TEXT PRIMARY KEY,
+        source_kind TEXT NOT NULL CHECK(source_kind IN
+          ('builtin','skill','mcp')),
+        source_ref TEXT NOT NULL,
+        logical_name TEXT NOT NULL,
+        owner TEXT NOT NULL,
+        latest_version_id TEXT,
+        lifecycle_state TEXT NOT NULL CHECK(lifecycle_state IN
+          ('discovered','pending_review','enabled','stale','revoked')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_tool_descriptor_sourceref
+        ON tool_descriptors(source_kind, source_ref, logical_name);
+
+      CREATE TABLE IF NOT EXISTS tool_versions (
+        id TEXT PRIMARY KEY,
+        descriptor_id TEXT NOT NULL REFERENCES tool_descriptors(id) ON DELETE CASCADE,
+        source_version TEXT NOT NULL,
+        descriptor_hash TEXT NOT NULL,
+        input_schema_json TEXT NOT NULL,
+        input_schema_hash TEXT NOT NULL,
+        output_schema_json TEXT,
+        output_schema_hash TEXT,
+        effect_class TEXT NOT NULL CHECK(effect_class IN
+          ('read_only','local_mutation','external_mutation')),
+        permissions_json TEXT NOT NULL DEFAULT '{}',
+        data_compatibility_json TEXT NOT NULL DEFAULT '{}',
+        recovery_capabilities_json TEXT NOT NULL DEFAULT '{}',
+        provenance_json TEXT NOT NULL DEFAULT '{}',
+        status TEXT NOT NULL CHECK(status IN
+          ('discovered','pending_review','enabled','stale','revoked')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS uniq_tool_versions
+        ON tool_versions(descriptor_id, source_version);
+
+      CREATE TABLE IF NOT EXISTS workspace_tool_bindings (
+        id TEXT PRIMARY KEY,
+        logical_binding_id TEXT NOT NULL,
+        parent_binding_id TEXT REFERENCES workspace_tool_bindings(id),
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        tool_version_id TEXT NOT NULL REFERENCES tool_versions(id),
+        revision INTEGER NOT NULL DEFAULT 1,
+        binding_hash TEXT NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        policy_id TEXT,
+        approval_mode TEXT NOT NULL CHECK(approval_mode IN
+          ('none','allowlist','each_call','workflow_step','administrative')),
+        constraints_json TEXT NOT NULL DEFAULT '{}',
+        auth_binding_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(workspace_id, logical_binding_id, revision)
+      );
     `;
   }
 

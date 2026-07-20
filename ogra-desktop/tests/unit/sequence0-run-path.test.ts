@@ -916,6 +916,23 @@ describe('Sequence 0 — v15→v16 migration adds model_calls.http_body_hash', (
         );
         INSERT INTO _migrations (version, name)
           VALUES (15, 'approvals-revision-and-binding-fields');
+        -- minimal run_events so v18 preflight (which probes
+        -- pragma_table_info for hash_envelope_version) succeeds.
+        CREATE TABLE run_events (
+          id TEXT PRIMARY KEY,
+          run_id TEXT,
+          workspace_id TEXT,
+          sequence INTEGER NOT NULL,
+          event_type TEXT NOT NULL,
+          event_payload_json TEXT NOT NULL DEFAULT '{}',
+          payload_hash TEXT,
+          previous_hash TEXT NOT NULL,
+          event_hash TEXT NOT NULL UNIQUE,
+          policy_version_hash TEXT,
+          redaction_rule_version TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(run_id, sequence)
+        );
         CREATE TABLE model_calls (
           id TEXT PRIMARY KEY,
           run_id TEXT,
@@ -1189,6 +1206,17 @@ describe('Sequence 0 — v16→v17 approval preview migration', () => {
       raw.exec(`
         CREATE TABLE _migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT NOT NULL DEFAULT (datetime('now')));
         INSERT INTO _migrations (version, name) VALUES (16, 'model-calls-http-body-hash');
+        -- minimal run_events so v18 preflight probes succeed
+        CREATE TABLE run_events (
+          id TEXT PRIMARY KEY, run_id TEXT, workspace_id TEXT,
+          sequence INTEGER NOT NULL, event_type TEXT NOT NULL,
+          event_payload_json TEXT NOT NULL DEFAULT '{}',
+          payload_hash TEXT, previous_hash TEXT NOT NULL,
+          event_hash TEXT NOT NULL UNIQUE,
+          policy_version_hash TEXT, redaction_rule_version TEXT,
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          UNIQUE(run_id, sequence)
+        );
         CREATE TABLE approvals (
           id TEXT PRIMARY KEY, run_id TEXT, workspace_id TEXT, approval_type TEXT,
           requested_scope_json TEXT, scope_hash TEXT, payload_fingerprint TEXT,

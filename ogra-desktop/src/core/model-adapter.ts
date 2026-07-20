@@ -1,5 +1,6 @@
 import { RunEventType } from '../shared/types';
 import { OgraError, OgraErrorCode } from '../shared/errors';
+import type { RecoveryCapabilities } from './durable-runtime-types';
 
 /**
  * Model adapter contract for Ogra Desktop.
@@ -88,12 +89,36 @@ export interface ProviderHealth {
 
 /**
  * Abstract base class for model adapters.
+ *
+ * Milestone 0 (Sequence 1A) — every adapter MUST declare its
+ * recovery capabilities (plan 10 §5). The default is the most
+ * conservative: no idempotency, no outcome query, no compensation.
+ * Subclasses that bridge to providers supporting idempotency keys
+ * or outcome queries MUST override.
  */
 export abstract class BaseModelAdapter {
   abstract readonly id: string;
   abstract readonly providerId: string;
   abstract readonly isLocal: boolean;
   abstract readonly capabilities: ModelCapabilities;
+
+  /**
+   * Recovery capability declaration. Defaults are conservative —
+   * everything false / low / lossless=false. Adapters that support
+   * idempotency keys or outcome queries MUST override.
+   */
+  recoveryCapabilities(): RecoveryCapabilities {
+    return {
+      supportsIdempotencyKey: false,
+      supportsOutcomeQuery: false,
+      supportsCancel: false,
+      supportsCompensation: false,
+      compensationIsLossless: false,
+      retryCostRisk: 'high',
+      duplicateEffectRisk: 'high',
+      auditLevel: 'summary',
+    };
+  }
 
   abstract generate(request: ModelRequest): Promise<ModelResult>;
   abstract testConnection(): Promise<ProviderHealth>;

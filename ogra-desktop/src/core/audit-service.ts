@@ -14,6 +14,8 @@ export interface RunEventRecord {
   eventHash: string;
   policyVersionHash?: string;
   redactionRuleVersion?: string;
+  /** NULL/undefined denotes a legacy v1 event written before v18. */
+  hashEnvelopeVersion?: string;
   createdAt: string;
 }
 
@@ -220,6 +222,7 @@ export class AuditService {
       eventHash: row.event_hash,
       policyVersionHash: row.policy_version_hash ?? undefined,
       redactionRuleVersion: row.redaction_rule_version ?? undefined,
+      hashEnvelopeVersion: row.hash_envelope_version ?? undefined,
       createdAt: row.created_at,
     };
   }

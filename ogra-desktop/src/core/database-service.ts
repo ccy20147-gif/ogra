@@ -2,7 +2,15 @@ import { OgraDatabase } from './database';
 import * as crypto from 'crypto';
 import { DataClassification, WorkspaceType } from '../shared/types';
 import { OgraError, OgraErrorCode } from '../shared/errors';
-import { canonicalJSON, GENESIS_HASH } from './audit-service';
+import {
+  canonicalJSON,
+  composeV2Envelope,
+  envelopeV1Hash,
+  envelopeV2Hash,
+  GENESIS_HASH,
+  HASH_ENVELOPE_VERSION_V1,
+  HASH_ENVELOPE_VERSION_V2,
+} from './audit-envelope';
 
 export interface WorkspaceRow {
   id: string;
@@ -25,6 +33,7 @@ export interface RunEventRow {
   event_hash: string;
   policy_version_hash: string | null;
   redaction_rule_version: string | null;
+  hash_envelope_version?: string | null;
   created_at: string;
 }
 
@@ -144,27 +153,49 @@ export class DatabaseService {
       ).get(runId) as { event_hash: string } | undefined;
       const previousHash = prevEvent?.event_hash ?? GENESIS_HASH;
 
-      // Calculate payload hash and event hash
-      const payloadHash = crypto.createHash('sha256').update(canonicalJSON(eventPayload)).digest('hex');
-      const hashInput = canonicalJSON(eventPayload) + previousHash;
-      const eventHash = crypto.createHash('sha256').update(hashInput).digest('hex');
-
       const id = `evt_${Date.now()}_${seq}_${crypto.randomBytes(4).toString('hex')}`;
       const now = new Date().toISOString();
-
-      this.db.getDB().prepare(`
-        INSERT INTO run_events (id, run_id, workspace_id, sequence, event_type,
-          event_payload_json, payload_hash, previous_hash, event_hash,
-          policy_version_hash, redaction_rule_version, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(id, runId, workspaceId, seq, eventType, JSON.stringify(eventPayload),
-        payloadHash, previousHash, eventHash, policyVersionHash || null, redactionRuleVersion || null, now);
+      const v2Enabled = this.db.getDB().prepare(
+        "SELECT 1 FROM pragma_table_info('run_events') WHERE name = 'hash_envelope_version'",
+      ).get();
+      const eventPayloadJson = canonicalJSON(eventPayload);
+      const payloadHash = crypto.createHash('sha256').update(eventPayloadJson).digest('hex');
+      let eventHash: string;
+      let envelopeVersion: string | null = null;
+      if (v2Enabled) {
+        const composed = composeV2Envelope({
+          id, runId, workspaceId, sequence: seq, eventType, eventPayload,
+          policyVersionHash: policyVersionHash ?? null,
+          redactionRuleVersion: redactionRuleVersion ?? null,
+          createdAt: now, previousHash,
+        });
+        eventHash = composed.eventHash;
+        envelopeVersion = composed.envelopeVersion;
+        this.db.getDB().prepare(`
+          INSERT INTO run_events (id, run_id, workspace_id, sequence, event_type,
+            event_payload_json, payload_hash, previous_hash, event_hash,
+            hash_envelope_version, policy_version_hash, redaction_rule_version, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, runId, workspaceId, seq, eventType, composed.eventPayloadJson,
+          composed.payloadHash, previousHash, eventHash, envelopeVersion,
+          policyVersionHash || null, redactionRuleVersion || null, now);
+      } else {
+        eventHash = envelopeV1Hash(eventPayloadJson, previousHash);
+        this.db.getDB().prepare(`
+          INSERT INTO run_events (id, run_id, workspace_id, sequence, event_type,
+            event_payload_json, payload_hash, previous_hash, event_hash,
+            policy_version_hash, redaction_rule_version, created_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(id, runId, workspaceId, seq, eventType, eventPayloadJson,
+          payloadHash, previousHash, eventHash, policyVersionHash || null, redactionRuleVersion || null, now);
+      }
 
       return {
         id, run_id: runId, workspace_id: workspaceId, sequence: seq, event_type: eventType,
-        event_payload_json: JSON.stringify(eventPayload), payload_hash: payloadHash,
+        event_payload_json: eventPayloadJson, payload_hash: payloadHash,
         previous_hash: previousHash, event_hash: eventHash,
         policy_version_hash: policyVersionHash || null, redaction_rule_version: redactionRuleVersion || null,
+        hash_envelope_version: envelopeVersion,
         created_at: now,
       };
     })();
@@ -211,10 +242,42 @@ export class DatabaseService {
         return { valid: false, brokenAt: i, errors };
       }
 
-      // Recompute event_hash
-      const payload = JSON.parse(evt.event_payload_json);
-      const hashInput = canonicalJSON(payload) + evt.previous_hash;
-      const recomputedHash = crypto.createHash('sha256').update(hashInput).digest('hex');
+      const version = evt.hash_envelope_version ?? HASH_ENVELOPE_VERSION_V1;
+      let payloadJson: string;
+      try {
+        payloadJson = canonicalJSON(JSON.parse(evt.event_payload_json));
+      } catch {
+        errors.push(`Event ${evt.id}: event_payload_json is invalid JSON`);
+        return { valid: false, brokenAt: i, errors };
+      }
+      // v2 producers always persist canonical JSON. Reject any byte-level
+      // alteration (including harmless-looking whitespace/order changes)
+      // rather than normalizing it away before validating the envelope.
+      // Legacy v1 rows retain their original verifier behavior.
+      if (version === HASH_ENVELOPE_VERSION_V2 && evt.event_payload_json !== payloadJson) {
+        errors.push(`Event ${evt.id}: event_payload_json is not canonical`);
+        return { valid: false, brokenAt: i, errors };
+      }
+      const recomputedPayloadHash = crypto.createHash('sha256').update(payloadJson).digest('hex');
+      if (evt.payload_hash !== recomputedPayloadHash) {
+        errors.push(`Event ${evt.id}: payload_hash mismatch`);
+        return { valid: false, brokenAt: i, errors };
+      }
+      let recomputedHash: string;
+      if (version === HASH_ENVELOPE_VERSION_V2) {
+        recomputedHash = envelopeV2Hash({
+          id: evt.id, runId: evt.run_id, workspaceId: evt.workspace_id ?? null,
+          sequence: evt.sequence, eventType: evt.event_type, eventPayloadJson: payloadJson,
+          payloadHash: evt.payload_hash, policyVersionHash: evt.policy_version_hash,
+          redactionRuleVersion: evt.redaction_rule_version, createdAt: evt.created_at,
+          previousHash: evt.previous_hash,
+        });
+      } else if (version === HASH_ENVELOPE_VERSION_V1) {
+        recomputedHash = envelopeV1Hash(payloadJson, evt.previous_hash);
+      } else {
+        errors.push(`Event ${evt.id}: unknown hash_envelope_version ${version}`);
+        return { valid: false, brokenAt: i, errors };
+      }
       if (evt.event_hash !== recomputedHash) {
         errors.push(`Event ${evt.id}: event_hash mismatch`);
         return { valid: false, brokenAt: i, errors };
