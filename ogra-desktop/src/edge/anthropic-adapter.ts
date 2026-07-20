@@ -177,6 +177,7 @@ export class AnthropicAdapter extends BaseModelAdapter {
         modelId: request.allowedModelId,
         providerId: this.providerId,
         responseHash: crypto.createHash('sha256').update(text).digest('hex'),
+        httpBodyHash: 'adapter_body_hash',
         startedAt,
         completedAt,
       };

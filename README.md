@@ -25,14 +25,16 @@ Its core promise:
 - **Three-tier egress policy**: every cloud call falls into one of `auto_redact`, `log_and_proceed`, `approve_then_egress` (with re-sanitize loop on rejection), or `blocked`. The mode is selected from the data classification high-water mark.
 - **Independent ingress review**: every cloud response, tool return, A2A message, and MCP result is processed by an Ingress Review Agent that runs in a separate process boundary from the InternalAgentAdapter that produced the original request. Suspicious or malicious findings land in a quarantine table with an incident.
 - **Transparent routing**: every task produces a route decision, an egress record (mode + payload hash + redaction rule version), ingress findings, and an audit event.
+- **Durable scoped execution**: every side effect belongs to a persistent task frame and carries revision, idempotency, route, approval, and audit evidence so interrupted runs can recover without repairing unrelated branches or silently repeating unsafe work.
 - **Data Safety Center**: data safety surface for data classification, model allowlists, redaction rule sets, egress mode, ingress findings summary, scheduled/continuous run assets, and the explicit limitation of audit scope (Ogra-controlled boundary only; cloud-internal reasoning is outside Ogra's audit).
 - **AI Governance Center**: governance surface for run risk, approval queue, re-sanitize history, ingress incident records, scheduled run risk summaries, policy registry, model registry, and audit reports.
 - **RAG personal knowledge base**: first-class local knowledge layer for documents, code, PDFs, and project files.
 - **Agent Group orchestration**: bounded Pipeline, Parallel, and Debate modes, each with per-step policy, route, and audit. Interval and continuous scheduling with lifetime-level bounds.
-- **Skills Market**: built-in and local-recipe skills loaded via manifest, evaluated by policy, audited per invocation.
+- **Capability Gateway**: one Ogra-controlled boundary for tools and Agent delegation. Its Tool Broker pins built-in, Skill-derived, and later MCP capabilities to immutable versions and routes every invocation through policy, owned effects, receipts, ingress review, and audit.
+- **Skills Market**: Beta built-in and declarative local-recipe skills lower to pinned Tool Broker capabilities; a Skill is not an independent permission boundary.
 - **M3 memory**: audit-linked white-box memory split into episodic, semantic, and procedural memory.
 - **Human-confirmed self-building organization**: agents can recommend adding capabilities, but users must approve. Self-building is deferred from Alpha as a recruitment decision; the data structures are reserved.
-- **Local Agent Control Plane**: supervised launcher plus transcript/audit wrapper for local agent runtimes. Alpha includes InternalAgentAdapter (Plan + ReAct) and LocalCommandAgentAdapter (read-only supervised). External adapters (Codex, Claude Code, Hermes, Aider, Open Interpreter) are v1.0.
+- **Local Agent Control Plane**: supervised launcher plus transcript/audit wrapper for local agent runtimes. Alpha includes InternalAgentAdapter; Beta adds a restricted and tested LocalCommandAgentAdapter profile. External adapters (Codex, Claude Code, Hermes, Aider, Open Interpreter) are v1.0.
 
 ## Recommended Product Shape
 
@@ -65,20 +67,17 @@ Alpha should prove the hybrid-default loop:
 6. Ollama model adapter.
 7. OpenAI-compatible adapter.
 8. InternalAgentAdapter as Plan + ReAct + strong-persistence engine with sanitize/policy/route/audit middleware.
-9. LocalCommandAgentAdapter (read-only supervised).
-10. Basic policy engine with three-tier egress (`auto_redact` / `log_and_proceed` / `approve_then_egress`) and three-tier ingress.
-11. Redaction engine (versioned rule sets, diff preview, re-sanitize loop).
-12. Ingress Review Agent (separate process boundary, regex layer).
-13. Quarantine table and restricted sandbox view.
-14. Route decisions (with egress_mode, redaction_rule_version, ingress findings).
-15. Append-only local audit trail with hash-chain integrity.
-16. Data Safety Center v0.
-17. AI Governance Center v0 (with egress approval queue, ingress incidents, scheduled run summaries).
-18. Agent Group Pipeline + Parallel + Debate.
-19. Agent Group interval + continuous scheduling.
-20. Skills Market (built-in + local-recipe).
-21. Audit export (NDJSON/CSV, policy-gated).
-22. M3 memory center (episodic auto; semantic/procedural user-confirmed).
+9. SHD-inspired durable execution kernel (persistent frames, effect ownership, revisions, idempotency, typed repair verification, recovery lease, audit packets).
+10. Tool Broker contract plus one read-only `knowledge.search` vertical slice; MCP remains disabled.
+11. Basic policy engine with three-tier egress (`auto_redact` / `log_and_proceed` / `approve_then_egress`) and three-tier ingress.
+12. Redaction engine (versioned rule sets, diff preview, re-sanitize loop).
+13. Ingress Review Agent (separate process boundary, regex layer).
+14. Quarantine table and restricted sandbox view.
+15. Route decisions (with egress_mode, redaction_rule_version, ingress findings).
+16. Append-only local audit trail with hash-chain integrity.
+17. Data Safety Center v0.
+18. AI Governance Center v0 (with egress approval queue and ingress incidents).
+19. Audit export endpoint (NDJSON/CSV, policy-gated).
 
 Alpha demo path:
 
@@ -126,7 +125,9 @@ Import sensitive folder
 │   │   ├── 06-application-ui-ux.md
 │   │   ├── 07-verification-packaging-release-gates.md
 │   │   ├── 08-memory-agentgroup-recipes-v1-requirements.md
-│   │   └── 09-vNext-strategic-direction.md
+│   │   ├── 09-vNext-strategic-direction.md
+│   │   ├── 10-shd-inspired-durable-execution-runtime.md
+│   │   └── 11-tool-broker-mcp-integration-runtime.md
 │   └── prd/
 │       └── 01-ogra-alpha-requirements.md
 ├── ogra-product-handbook.md
@@ -142,6 +143,21 @@ The active implementation planning documents are under [docs/plans](docs/plans/)
 - [docs/plans/00-development-requirements-index.md](docs/plans/00-development-requirements-index.md)
 
 These plans replace the earlier Alpha demo task breakdown. They are organized by product and architecture layer: desktop runtime, local data/audit/governance store, policy/routing/safety, RAG, model and Agent orchestration, UI/UX, verification/release gates, and Beta/v1 memory/Agent Group/recipes/interoperability completion.
+
+Durable execution and recovery are specified in:
+
+- [docs/plans/10-shd-inspired-durable-execution-runtime.md](docs/plans/10-shd-inspired-durable-execution-runtime.md)
+
+This plan adopts SHD-inspired runtime invariants in Ogra's native TypeScript and SQLite stack. The SHD Python research prototype is a behavioral reference, not a production dependency.
+
+Tool and MCP integration are specified in:
+
+- [docs/plans/11-tool-broker-mcp-integration-runtime.md](docs/plans/11-tool-broker-mcp-integration-runtime.md)
+
+The plan establishes the Capability Gateway and Tool Broker contract first,
+ships a read-only built-in slice before Skills, and defers MCP transport work to
+v1.0 after durable effects, scoped approval, independent ingress, and secret
+storage hardening are real.
 
 ## Provider Configuration
 
@@ -160,9 +176,9 @@ This directory is now a git repository.
 
 Current state:
 
-- Initialized with `git init`.
-- Current default branch: `master`.
-- No initial commit has been made yet.
+- Git repository with history and remote tracking.
+- Current branch: `main`, tracking `origin/main`.
+- Always inspect the worktree before editing; do not assume it is clean.
 
 Recommended workflow for future agents:
 

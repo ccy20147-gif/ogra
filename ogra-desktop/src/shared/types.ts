@@ -18,6 +18,12 @@ export enum RouteDecisionType {
   Local = 'local',
   Cloud = 'cloud',
   Hybrid = 'hybrid',
+  /**
+   * Approve-then-Egress tier (Plan 03 §3.6). Cloud egress is
+   * allowed only after a scope-bound approval AND a deterministic
+   * redaction-engine pass on the egress payload.
+   */
+  Redact_Then_Egress = 'redact_then_egress',
   Blocked = 'blocked',
 }
 
@@ -131,6 +137,7 @@ export enum ProviderKind {
 /** Event types for run_events */
 export enum RunEventType {
   RunCreated = 'run_created',
+  RunResumed = 'run_resumed',
   WorkspaceCreated = 'workspace_created',
   PolicyPrecheck = 'policy_precheck',
   RetrievalStarted = 'retrieval_started',
@@ -143,6 +150,7 @@ export enum RunEventType {
   ApprovalDecision = 'approval_decision',
   ModelCallStarted = 'model_call_started',
   ModelCallCompleted = 'model_call_completed',
+  ModelCallFailed = 'model_call_failed',
   CloudCallLedgerUpdated = 'cloud_call_ledger_updated',
   FinalOutput = 'final_output',
   AuditComplete = 'audit_complete',

@@ -46,6 +46,13 @@ export class OgraDatabase {
     const migrations = this.getMigrations().filter(m => m.version > currentVersion);
     for (const migration of migrations) {
       this.db.transaction(() => {
+        // P1 fix: migrations may need a JS-driven preflight before
+        // running their SQL (because SQLite lacks ADD COLUMN IF
+        // NOT EXISTS). The preflight hook is keyed by version and
+        // runs INSIDE the same transaction as the SQL.
+        if (migration.preflight) {
+          migration.preflight(this.db);
+        }
         this.db.exec(migration.sql);
         this.db.prepare(
           'INSERT INTO _migrations (version, name) VALUES (?, ?)'
@@ -59,7 +66,10 @@ export class OgraDatabase {
     return row?.version ?? 0;
   }
 
-  private getMigrations(): Array<{ version: number; name: string; sql: string }> {
+  private getMigrations(): Array<{
+    version: number; name: string; sql: string;
+    preflight?: (db: any) => void;
+  }> {
     return [
       {
         version: 1,
@@ -106,7 +116,265 @@ export class OgraDatabase {
         name: 'agent-runs-fk-constraints',
         sql: this.getV9Schema(),
       },
+      {
+        version: 10,
+        name: 'approvals-workspace-and-scope',
+        sql: this.getV10Schema(),
+      },
+      {
+        version: 11,
+        name: 'agent-runs-final-output-and-error',
+        sql: this.getV11Schema(),
+      },
+      {
+        version: 12,
+        name: 'route-redact-then-egress',
+        sql: this.getV12Schema(),
+      },
+      {
+        version: 13,
+        name: 'egress-records',
+        sql: this.getV13Schema(),
+      },
+      {
+        version: 14,
+        name: 'model-calls-add-fields',
+        sql: this.getV14Schema(),
+      },
+      {
+        version: 15,
+        name: 'approvals-revision-and-binding-fields',
+        sql: this.getV15Schema(),
+      },
+      {
+        version: 16,
+        name: 'model-calls-http-body-hash',
+        sql: this.getV16Schema(),
+        preflight: (db: any) => {
+          // P1 fix: an existing v15 database lacks this column.
+          // SQLite ALTER TABLE throws "duplicate column" if it
+          // already exists, so we MUST detect first and conditionally
+          // ALTER. We check via pragma_table_info and run the ALTER
+          // inside the same transaction as the migration version row
+          // — so if the ALTER fails, the version is not committed.
+          const has = db.prepare(
+            `SELECT COUNT(*) AS c FROM pragma_table_info('model_calls')
+              WHERE name = 'http_body_hash'`,
+          ).get() as { c: number };
+          if (has.c === 0) {
+            db.exec('ALTER TABLE model_calls ADD COLUMN http_body_hash TEXT;');
+          }
+        },
+      },
+      {
+        version: 17,
+        name: 'approvals-sanitized-preview-evidence',
+        sql: this.getV17Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approvals'",
+          ).get();
+          // Some migration fixtures deliberately model only the table
+          // under test. A real v16 installation always has approvals,
+          // but do not make a partial recovery database unopenable.
+          if (!table) return;
+          const columns = db.prepare("SELECT name FROM pragma_table_info('approvals')").all() as Array<{ name: string }>;
+          const names = new Set(columns.map(column => column.name));
+          if (!names.has('sanitized_preview')) {
+            db.exec('ALTER TABLE approvals ADD COLUMN sanitized_preview TEXT;');
+          }
+          if (!names.has('redaction_rule_version')) {
+            db.exec('ALTER TABLE approvals ADD COLUMN redaction_rule_version TEXT;');
+          }
+          db.exec('CREATE INDEX IF NOT EXISTS idx_approvals_run_decision ON approvals(run_id, decision);');
+        },
+      },
     ];
+  }
+
+  private getV17Schema(): string {
+    return `
+      SELECT 1;
+    `;
+  }
+
+  private getV16Schema(): string {
+    // Sequence 0 v16: persist the hash of the actual HTTP body
+    // (sha256 of the JSON sent to the provider's HTTP endpoint) so
+    // the audit chain can verify which bytes actually left the
+    // machine.
+    //
+    // Fresh databases (created after this migration was added to
+    // initial schema) already have the column. Older databases
+    // upgraded from v15 need the column added. SQLite ALTER TABLE
+    // throws "duplicate column" if it exists, so we conditionally
+    // add it by querying pragma_table_info. The driver throws if
+    // http_body_hash is missing on a v15 upgrade, so we MUST
+    // upgrade existing databases or storeModelCall() fails.
+    //
+    // Implementation: a CTE picks whether the ALTER is needed.
+    // SQLite parses this as a single statement, executes it
+    // exactly once, then we run a follow-up statement that does
+    // the actual DDL. db.exec() supports multiple statements
+    // separated by `;`.
+    return `
+      -- Conditional ALTER: SQLite 3.35+ supports ALTER TABLE
+      -- ... ADD COLUMN IF NOT EXISTS, but our embedded version
+      -- (which ships with most node-sqlite3 builds) does not.
+      -- Use a guarded approach via the _v16_pending table.
+      CREATE TABLE IF NOT EXISTS _v16_pending (k TEXT PRIMARY KEY);
+      INSERT OR IGNORE INTO _v16_pending (k) VALUES ('add_http_body_hash');
+      -- recopy to a temp table only if column missing
+      INSERT INTO _v16_pending (k)
+        SELECT 'add_http_body_hash' WHERE NOT EXISTS (
+          SELECT 1 FROM pragma_table_info('model_calls')
+          WHERE name = 'http_body_hash'
+        );
+      -- Now we can't conditionally ALTER inside SQL only; we
+      -- must do it from JS. Detect here via a sentinel row that
+      -- means "the column is missing and must be added by JS".
+      DELETE FROM _v16_pending WHERE k = 'add_http_body_hash'
+        AND EXISTS (
+          SELECT 1 FROM pragma_table_info('model_calls')
+          WHERE name = 'http_body_hash'
+        );
+    `;
+  }
+
+  private getV15Schema(): string {
+    // Sequence 0 v15: Approval row schema upgrade.
+    //
+    // Earlier databases that applied v10 BEFORE revision was added
+    // would now lack `approvals.revision`. This migration adds:
+    //  - revision (default 1; every approved decision increments it)
+    //  - the NOT NULL constraint is enforced at the application
+    //    layer because SQLite ALTER ADD COLUMN does not easily
+    //    migrate existing NULL rows in older databases.
+    //
+    // Bindings locked at requestApproval() time:
+    //  - policy_version_hash (mandatory non-null for new approvals)
+    //  - payload_fingerprint (mandatory non-null for new approvals)
+    //  - requested_scope_json already exists in v1
+    //
+    // We do NOT alter v10 retroactively because migrations must be
+    // append-only; older databases rely on v15 to bring revisions in.
+    return `
+      ALTER TABLE approvals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1;
+      -- Older rows may have NULL policy_version_hash / payload_fingerprint;
+      -- we leave them NULL here and gate writes in RunService so
+      -- loadApproval can strict-compare without NULL wildcard drift.
+      UPDATE approvals SET policy_version_hash = 'legacy-no-policy-hash' WHERE policy_version_hash IS NULL;
+      UPDATE approvals SET payload_fingerprint = 'legacy-no-payload-fingerprint' WHERE payload_fingerprint IS NULL;
+    `;
+  }
+
+  private getV14Schema(): string {
+    // Sequence 0: Real Canonical Model Call evidence: agent must
+    // persist the canonical model id (from ProviderService.models)
+    // and the policy_version_hash used at callback time. Both are
+    // needed for plan 11's effect binding to remain replayable.
+    return `
+      ALTER TABLE model_calls ADD COLUMN model_internal_id TEXT;
+      ALTER TABLE model_calls ADD COLUMN policy_version_hash TEXT;
+      CREATE INDEX IF NOT EXISTS idx_model_calls_provider_model
+        ON model_calls(provider_id, model_internal_id);
+    `;
+  }
+
+  private getV13Schema(): string {
+    // Plan 02 §3.8.2 — egress_records table is required for the
+    // Approve-then-Egress tier. Add columns rule_set_id, model_call_id
+    // extension, and a redaction_records.rule_set_id column too.
+    return `
+      ALTER TABLE redaction_records ADD COLUMN rule_set_id TEXT;
+      ALTER TABLE redaction_records ADD COLUMN approval_id TEXT;
+
+      CREATE TABLE IF NOT EXISTS egress_records (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        model_call_id TEXT,
+        route_decision_id TEXT,
+        approval_id TEXT,
+        egress_mode TEXT NOT NULL CHECK(egress_mode IN ('auto_redact', 'log_and_proceed', 'approve_then_egress')),
+        payload_hash TEXT NOT NULL,
+        payload_summary TEXT,
+        redaction_rule_version TEXT,
+        payload_classification TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_egress_records_run ON egress_records(run_id);
+      CREATE INDEX IF NOT EXISTS idx_egress_records_model ON egress_records(model_call_id);
+    `;
+  }
+
+  private getV12Schema(): string {
+    // Sequence 0: Plan 03 §3.6 Approve-then-Egress requires a 5th
+    // route value. SQLite CHECK constraints are immutable, so we
+    // rebuild route_decisions with the new constraint. Run evidence
+    // is preserved: the original table is renamed, copied into the
+    // new schema, then dropped.
+    return `
+      CREATE TABLE route_decisions_new (
+        id TEXT PRIMARY KEY,
+        run_id TEXT,
+        route TEXT NOT NULL CHECK(route IN ('local', 'cloud', 'hybrid', 'redact_then_egress', 'blocked')),
+        data_classification TEXT NOT NULL,
+        high_water_sources_json TEXT,
+        reason_json TEXT,
+        local_steps_json TEXT,
+        cloud_steps_json TEXT,
+        requires_user_approval INTEGER,
+        approval_id TEXT,
+        policy_evaluation_id TEXT,
+        provider_id TEXT,
+        incident_ids_json TEXT,
+        model_id TEXT,
+        cloud_payload_hash TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      INSERT INTO route_decisions_new
+        SELECT id, run_id, route, data_classification, high_water_sources_json,
+               reason_json, local_steps_json, cloud_steps_json,
+               requires_user_approval, approval_id, policy_evaluation_id,
+               provider_id, incident_ids_json, model_id, cloud_payload_hash,
+               created_at FROM route_decisions;
+      DROP TABLE route_decisions;
+      ALTER TABLE route_decisions_new RENAME TO route_decisions;
+      CREATE INDEX IF NOT EXISTS idx_route_decisions_run ON route_decisions(run_id);
+    `;
+  }
+
+  private getV10Schema(): string {
+    // Sequence 0: ApprovalRequest scope binding + workspace ownership.
+    // Adds columns needed by RunService.requestApproval / loadApproval.
+    // The base migration (v1) did not include workspace_id, scope_hash,
+    // policy_version_hash, payload_fingerprint, or revision. We use
+    // idempotent SQL so re-running this migration on a partially
+    // upgraded DB does not throw (SQLite forbids ALTER TABLE ADD
+    // COLUMN when the column already exists).
+    // Sequence 0 v10: original approval scope binding columns
+    // for fresh databases only. Existing databases that already
+    // applied v10 before revision was added here MUST upgrade via
+    // v15 below. See plan 02 §3.4 approval row schema.
+    return `
+      ALTER TABLE approvals ADD COLUMN workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE;
+      ALTER TABLE approvals ADD COLUMN scope_hash TEXT;
+      ALTER TABLE approvals ADD COLUMN policy_version_hash TEXT;
+      ALTER TABLE approvals ADD COLUMN payload_fingerprint TEXT;
+      CREATE INDEX IF NOT EXISTS idx_approvals_workspace ON approvals(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_approvals_decision ON approvals(decision);
+    `;
+  }
+
+  private getV11Schema(): string {
+    // Sequence 0: agent_runs gains final_output_location (rename of
+    // the existing column from v1 schema) — actually kept as a JSON
+    // blob of the final answer + citations — plus error_message.
+    return `
+      -- error_message: short, sanitized error description written on failure.
+      -- MUST NOT contain prompt content, raw adapter traces, or full payloads.
+      ALTER TABLE agent_runs ADD COLUMN error_message TEXT;
+    `;
   }
 
   private getInitialSchema(): string {
@@ -195,7 +463,7 @@ export class OgraDatabase {
       CREATE TABLE IF NOT EXISTS route_decisions (
         id TEXT PRIMARY KEY,
         run_id TEXT,
-        route TEXT NOT NULL CHECK(route IN ('local', 'cloud', 'hybrid', 'blocked')),
+        route TEXT NOT NULL CHECK(route IN ('local', 'cloud', 'hybrid', 'redact_then_egress', 'blocked')),
         data_classification TEXT NOT NULL,
         high_water_sources_json TEXT,
         reason_json TEXT,
@@ -267,7 +535,6 @@ export class OgraDatabase {
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         decided_at TEXT
       );
-
       -- Model Providers
       CREATE TABLE IF NOT EXISTS model_providers (
         id TEXT PRIMARY KEY,
@@ -309,6 +576,7 @@ export class OgraDatabase {
         prompt_hash TEXT,
         request_payload_hash TEXT,
         uploaded_payload_hash TEXT,
+        http_body_hash TEXT,
         redaction_rule_version TEXT,
         response_hash TEXT,
         error_code TEXT,

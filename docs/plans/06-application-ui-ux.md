@@ -149,6 +149,8 @@ Alpha run UI MUST include:
 - model call ledger for the run.
 - output/artifact location.
 - cancel and timeout state.
+- interrupted/recovering/unknown-outcome state when applicable.
+- recovery decision summary and whether user action is required.
 - run history and detail split view.
 
 Alpha SHOULD structure the single InternalAgent run as steps/participants/trace so the surface can evolve into Agent Group Board without a full rewrite.
@@ -188,6 +190,9 @@ It MUST show:
 - model calls.
 - retrieved sources.
 - redaction status.
+- owning frame/effect status for externally visible actions.
+- recovery/repair events, revision checks, and external receipt evidence when a
+  run was interrupted.
 - audit event ids.
 
 Route Trace MUST use an ordered timeline with step detail. It must show the sequence of policy checks, retrieval, context assembly, model calls, approval/redaction decisions, and audit events, not only a flat field list.
@@ -304,7 +309,11 @@ Approval UI MUST show:
 - expiry/scope when relevant.
 - approve/deny.
 
-Confidential cloud upload MUST be blocked in Alpha instead of approved.
+Confidential cloud upload MUST default to blocked until the full
+Approve-then-Egress requirements are satisfied. The approval UI MUST show the
+sanitized preview/diff, payload fingerprint, redaction rule version, provider,
+scope, and expiry. A changed payload, rule version, policy scope, or target
+revision invalidates the approval and requires a new decision.
 Restricted cloud upload MUST be blocked.
 
 ## 13. Error and Empty States
@@ -367,6 +376,22 @@ v1.0 MUST add:
 - local agent adapter registry.
 - memory, embedding index, recipe, agent group, artifact, MCP, and A2A asset pages in Data Safety Center.
 
+The Tool/MCP surfaces MUST implement plan 11 governance rather than a generic
+connector toggle:
+
+- registry and immutable version/schema inspection;
+- workspace binding, data scope, effect/risk class, auth scope summary, and
+  actual isolation/recovery grade;
+- permission prompt bound to exact tool version, sanitized argument/target
+  summary, destination, effect class, expiry, and reconciliation capability;
+- schema-change review/reapproval, connection health, disable/revoke, unknown
+  outcome, quarantine, and incident states;
+- invocation drilldown from run/frame/effect through receipt and ingress finding.
+
+Renderer IPC may list, inspect, enable/disable, manage grants, approve, and read
+evidence. It MUST NOT expose a generic `tool.invoke` or accept renderer-supplied
+workspace, transport, server, secret, or approval identifiers for execution.
+
 Parallel and Debate modes MUST reuse the same bounded run timeline, participant, route trace, and audit evidence model.
 
 Detailed Beta/v1 UI acceptance is defined in [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
@@ -383,6 +408,9 @@ Alpha is accepted when:
 - AI Governance Center shows risk summary for the same run.
 - Citation UI shows file, snippet, classification, retrieval method, and context destination.
 - Run Workspace shows lifecycle timeline, context sources, model call ledger, cancellation state, and run detail.
+- Interrupted runs visibly distinguish recovering, unknown outcome,
+  awaiting-user-decision, resumed, and failed-closed states; the UI links the
+  recovery decision to frame/effect/audit evidence.
 - Workspace overview shows knowledge health, recent runs, risk/cloud summary, active policies, and model status.
 - Knowledge surface supports browsing, retrieval testing, chunk inspection, warnings, and reindex job review.
 - Data Safety Center supports classification changes and policy/allowlist evidence drilldown.
@@ -399,6 +427,9 @@ MUST NOT introduce:
 - vague "secure" claims without evidence.
 - hidden classifications.
 - approvals that hide payload scope.
+- a generic retry button that can replay an `unknown` effect without
+  reconciliation and typed verification.
+- UI that implies M3 Memory can prove an external outcome or authorize recovery.
 - route trace available only in logs.
 - settings-only provider risk metadata.
 - UI copy implying Ogra controls non-Ogra network activity.

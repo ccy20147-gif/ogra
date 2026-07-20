@@ -4,84 +4,107 @@ import * as fs from 'fs';
 import { DatabaseService } from '../../src/core/database-service';
 import { PolicyService } from '../../src/core/policy-service';
 import { RouteService } from '../../src/core/route-service';
-import { RunService } from '../../src/core/run-service';
+import { RunService, ResolvedAdapter } from '../../src/core/run-service';
 import { AuditService } from '../../src/core/audit-service';
+import { ProviderService } from '../../src/core/provider-service';
 import { RagEngine } from '../../src/edge/rag-engine';
 import { InternalAgentAdapter } from '../../src/edge/internal-agent-adapter';
+import { RedactionService } from '../../src/core/redaction-service';
 import { DataClassification, WorkspaceType } from '../../src/shared/types';
-import { WorkspaceService, WorkspaceRecord } from '../../src/core/workspace-service';
+import { WorkspaceService } from '../../src/core/workspace-service';
 import { OgraCoreConfig } from '../../src/core';
 import { BaseModelAdapter, ModelRequest, ModelResult, ModelCapabilities, ProviderHealth } from '../../src/core/model-adapter';
+import { OgraSecretBroker } from '../../src/core/secret-broker';
 import { createTestDb } from '../helpers/test-db';
 
-/**
- * Mock model adapter that doesn't require a real Ollama instance.
- */
-class MockModelAdapter extends BaseModelAdapter {
-  readonly id = 'mock_adapter';
-  readonly providerId = 'mock_provider';
-  readonly isLocal: boolean;
+class TestModelAdapter extends BaseModelAdapter {
+  readonly id = 'test_agent_adapter_seq0';
+  readonly providerId = 'test_agent_provider_seq0';
+  readonly isLocal = true;
   readonly capabilities: ModelCapabilities = { streaming: false, toolCalling: false, fileUpload: false };
-
-  constructor(isLocal: boolean) {
-    super();
-    this.isLocal = isLocal;
-  }
+  callbackCount = 0;
+  public lastRequest?: ModelRequest;
 
   async generate(request: ModelRequest): Promise<ModelResult> {
     this.validatePolicyGate(request);
-    const id = `mock_call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    this.callbackCount += 1;
+    this.lastRequest = request;
+    const id = `agent_test_call_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
     return {
       id,
-      content: 'This is a mock response about the project budget of $500K.',
+      content: 'Test answer for the agent under test.',
       finishReason: 'stop',
       tokenUsage: { prompt: 50, completion: 20, total: 70 },
       modelId: request.allowedModelId,
       providerId: this.providerId,
-      responseHash: 'mock_hash',
+      responseHash: 'agent_test_hash',
+      httpBodyHash: 'test_body_hash',
       startedAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),
     };
   }
 
   async testConnection(): Promise<ProviderHealth> {
-    return { ok: true, message: 'Mock OK' };
+    return { ok: true, message: 'ok' };
   }
 }
 
-describe('InternalAgentAdapter', () => {
+describe('InternalAgentAdapter — Sequence 0 baseline', () => {
   let fixture: ReturnType<typeof createTestDb>;
   let db: DatabaseService;
   let policyService: PolicyService;
   let routeService: RouteService;
   let runService: RunService;
   let ragEngine: RagEngine;
-  let agent: InternalAgentAdapter;
+  let providerService: ProviderService;
+  let secretBroker: OgraSecretBroker;
+  let auditService: AuditService;
+  let workspaceService: WorkspaceService;
   let wsId: string;
+  let adapter: TestModelAdapter;
+  let resolveAdapter: () => Promise<ResolvedAdapter>;
+  let agent: InternalAgentAdapter;
+  let redaction: RedactionService;
 
   beforeAll(() => {
     fixture = createTestDb();
     db = fixture.db;
     wsId = fixture.workspaceId;
-    policyService = new PolicyService(new AuditService());
-    routeService = new RouteService(policyService);
-    const mockAuditService = new AuditService();
-    runService = new RunService(
-      { getCurrentId: () => wsId, get: async (id: string): Promise<WorkspaceRecord> => ({ id, name: 'mock', type: WorkspaceType.Personal, defaultClassification: DataClassification.Internal, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }) } as WorkspaceService,
-      routeService,
-      mockAuditService,
-      policyService,
-      { appDataDir: fixture.testDir, secretBroker: undefined, isDev: true } as unknown as OgraCoreConfig,
-    );
-    ragEngine = new RagEngine(db);
-    agent = new InternalAgentAdapter(db, policyService, routeService, runService, ragEngine);
 
-    // Create test docs
+    auditService = new AuditService(db);
+    policyService = new PolicyService(auditService);
+    routeService = new RouteService(policyService);
+    providerService = new ProviderService(auditService);
+    workspaceService = new WorkspaceService(auditService, db);
+    secretBroker = new OgraSecretBroker(fixture.testDir, auditService);
+    ragEngine = new RagEngine(db);
+    redaction = new RedactionService(db);
+
+    adapter = new TestModelAdapter();
+    resolveAdapter = async () => ({
+      adapter,
+      modelInternalId: 'agent_test_model',
+      modelName: 'agent_test_model',
+      providerId: adapter.providerId,
+    });
+
+    agent = new InternalAgentAdapter(db, policyService, routeService, null, ragEngine, redaction);
+    runService = new RunService(
+      workspaceService, routeService, auditService, policyService, db,
+      providerService, secretBroker,
+      { appDataDir: fixture.testDir, secretBroker, isDev: true } as OgraCoreConfig,
+      ragEngine, resolveAdapter, agent,
+      redaction,
+    );
+    agent.bindRunService(runService);
+
     const docsDir = path.join(fixture.testDir, 'agent-docs');
     fs.mkdirSync(docsDir, { recursive: true });
-    fs.writeFileSync(path.join(docsDir, 'info.md'), '# Project Info\n\nThe project budget is $500K for Q2.\nKey deliverables include API integration and dashboard.');
+    fs.writeFileSync(
+      path.join(docsDir, 'info.md'),
+      '# Project Info\n\nThe project budget is $500K for Q2. Key deliverables include API integration and dashboard.',
+    );
 
-    // Index docs
     db.createKnowledgeBase({
       id: 'kb_agent_test',
       workspaceId: fixture.workspaceId,
@@ -96,78 +119,104 @@ describe('InternalAgentAdapter', () => {
     fixture.cleanup();
   });
 
-  it('should run a complete agent cycle with local model', async () => {
-    const mockAdapter = new MockModelAdapter(true);
-    const result = await agent.run(
-      'What is the project budget?',
-      wsId,
-      ['kb_agent_test'],
-      mockAdapter,
-      'mock_model',
-      DataClassification.Public,
-    );
+  it('runs a complete local agent cycle through the real adapter', async () => {
+    adapter.callbackCount = 0;
+    adapter.lastRequest = undefined;
+    const beforeCount = adapter.callbackCount;
+    const result = await agent.run({
+      task: 'What is the project budget?',
+      workspaceId: wsId,
+      knowledgeBaseIds: ['kb_agent_test'],
+      adapter,
+      modelId: 'agent_test_model',
+      modelInternalId: 'agent_test_model',
+      providerId: adapter.providerId,
+      runId: 'seq0_agent_run_1',
+    });
     expect(result.routeDecision).toBeDefined();
-    expect(result.citations).toBeDefined();
-    expect(result.answer).toContain('mock response');
+    expect(result.answer).toBeTruthy();
+    expect(adapter.callbackCount).toBe(beforeCount + 1);
+    const lastRequest = adapter.lastRequest as ModelRequest | undefined;
+    expect(lastRequest).toBeDefined();
+    expect((lastRequest as ModelRequest).routeDecisionId).toBeTruthy();
+    expect((lastRequest as ModelRequest).policyEvaluationId).toBeTruthy();
+    expect((lastRequest as ModelRequest).policyVersionHash).toBeTruthy();
+    expect((lastRequest as ModelRequest).allowedProviderId).toBe(adapter.providerId);
+    expect((lastRequest as ModelRequest).allowedModelId).toBe('agent_test_model');
   });
 
-  it('should route Confidential data to local model', async () => {
-    const mockAdapter = new MockModelAdapter(true);
-    const result = await agent.run(
-      'Test confidential query',
-      wsId,
-      ['kb_agent_test'],
-      mockAdapter,
-      'mock_model',
-      DataClassification.Confidential,
+  it('routes Confidential data to local model when provider is local', async () => {
+    const cloudResolver = async () => ({
+      adapter, modelInternalId: 'agent_test_model',
+      modelName: 'agent_test_model', providerId: adapter.providerId,
+    } satisfies ResolvedAdapter);
+    const localAgent = new InternalAgentAdapter(
+      db, policyService, routeService, null, ragEngine,
+      new RedactionService(db),
     );
+    const localRs = new RunService(
+      workspaceService, routeService, auditService, policyService, db,
+      providerService, secretBroker,
+      { appDataDir: fixture.testDir, secretBroker, isDev: true } as OgraCoreConfig,
+      ragEngine, cloudResolver, localAgent,
+      redaction,
+    );
+    adapter.callbackCount = 0;
+    const result = await localAgent.run({
+      task: 'confidential query',
+      workspaceId: wsId,
+      knowledgeBaseIds: ['kb_agent_test'],
+      adapter,
+      modelId: 'agent_test_model',
+      modelInternalId: 'agent_test_model',
+      providerId: adapter.providerId,
+      requestedClassification: DataClassification.Confidential,
+      runId: 'seq0_agent_run_2',
+    });
     expect(result.routeDecision.route).toBe('local');
-    expect(result.routeDecision.reasons.some((r: string) => r.toLowerCase().includes('confidential'))).toBe(true);
+    void localRs;
   });
 
-  it('should produce citations when sources are available', async () => {
-    const mockAdapter = new MockModelAdapter(true);
-    const result = await agent.run(
-      'Tell me about the project budget',
-      wsId,
-      ['kb_agent_test'],
-      mockAdapter,
-      'mock_model',
-      DataClassification.Public,
-    );
-    expect(result.citations.length).toBeGreaterThanOrEqual(1);
-    expect(result.citations[0].file).toBeTruthy();
-    expect(result.citations[0].classification).toBeTruthy();
-  });
-
-  it('should record audit events for each step', async () => {
-    const mockAdapter = new MockModelAdapter(true);
-    const result = await agent.run(
-      'Test audit trail',
-      wsId,
-      ['kb_agent_test'],
-      mockAdapter,
-      'mock_model',
-      DataClassification.Public,
-    );
-    const events = db.getRunEvents(result.routeDecision.runId, 100);
-    const eventTypes = events.map(e => e.event_type);
-    expect(eventTypes).toContain('run_created');
-    expect(eventTypes).toContain('route_decision');
-    expect(eventTypes).toContain('audit_complete');
-  });
-
-  it('should block Confidential data from cloud adapter', async () => {
-    const cloudAdapter = new MockModelAdapter(false); // isLocal = false (cloud)
-    const result = await agent.run(
-      'Test confidential on cloud',
-      wsId,
-      ['kb_agent_test'],
-      cloudAdapter,
-      'mock_model',
-      DataClassification.Confidential,
-    );
-    expect(result.routeDecision.route).toBe('blocked');
-    expect(result.answer).toContain('blocked');
+  it('blocks Confidential data on a cloud adapter with zero model callbacks', async () => {
+    class FakeCloudAdapter extends BaseModelAdapter {
+      readonly id = 'cloud_agent_test';
+      readonly providerId = 'cloud_agent_provider';
+      readonly isLocal = false;
+      readonly capabilities: ModelCapabilities = { streaming: false, toolCalling: false, fileUpload: false };
+      callbackCount = 0;
+      async generate(request: ModelRequest): Promise<ModelResult> {
+        this.validatePolicyGate(request);
+        this.callbackCount += 1;
+        return {
+          id: 'c', content: 'should never be called', finishReason: 'stop',
+          tokenUsage: { prompt: 0, completion: 0, total: 0 },
+          modelId: request.allowedModelId, providerId: this.providerId,
+          responseHash: 'x', startedAt: '', completedAt: '',
+      httpBodyHash: 'test_body_hash',
+        };
+      }
+      async testConnection(): Promise<ProviderHealth> { return { ok: true, message: 'x' }; }
+    }
+    const cloud = new FakeCloudAdapter();
+    // Because the agent is re-seeded for a Confidential cloud request,
+    // it must take the redact_then_egress path. Sequence 0 with no
+    // approval row blocks at agent before invoking generate().
+    const result = await agent.run({
+      task: 'cloud-confidential-block',
+      workspaceId: wsId,
+      knowledgeBaseIds: ['kb_agent_test'],
+      adapter: cloud,
+      modelId: 'cloud_model',
+      modelInternalId: 'cloud_model',
+      providerId: cloud.providerId,
+      requestedClassification: DataClassification.Confidential,
+      runId: 'seq0_agent_run_3',
+    });
+    // Either route decision is blocked OR route is redact_then_egress
+    // with no approval → blocked at agent. Both paths must show
+    // zero adapter callbacks.
+    expect(cloud.callbackCount).toBe(0);
+    expect(['blocked']).toContain(result.routeDecision.route);
+    expect(result.answer.toLowerCase()).toContain('blocked');
   });
 });

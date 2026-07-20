@@ -63,7 +63,9 @@ The required Alpha E2E script:
 The same E2E suite MUST verify:
 
 - Public-only fixture can use OpenAI-compatible adapter when policy and test configuration allow.
-- Confidential fixture is blocked from OpenAI-compatible cloud adapter.
+- Confidential fixture defaults local and may reach an OpenAI-compatible cloud
+  adapter only through the complete Approve-then-Egress path; missing or stale
+  approval remains blocked.
 - Restricted fixture cannot be sent to cloud through approval.
 - prompt-injection fixture creates warning and incident/risk entry.
 - policy blocks or allows at each required execution point: retrieval, context assembly, embedding, model invocation, tool invocation, agent delegation, local agent launch, file export, memory write, audit view, and audit export.
@@ -88,6 +90,11 @@ Alpha MUST include unit tests for:
 - path canonicalization.
 - run risk classification.
 - policy gates for embedding, export, audit view/export, memory write, tool invocation, and agent delegation.
+- frame/effect state-machine transition validation.
+- effect owner, dependency, payload-fingerprint, idempotency-key, and revision
+  invariants.
+- typed repair verifier rejection for sibling overreach, dependency reversal,
+  stale target revision, and stale authorized effect revision.
 
 ## 5. Integration Test Requirements
 
@@ -109,6 +116,20 @@ Alpha MUST include integration tests for:
 - secret broker use without exposing secret values.
 - worker job execution without inherited full environment, direct secret reads, or direct SQLite writes.
 - audit export and audit view policy checks.
+- crash before callback leaves no applied external effect and resumes safely.
+- crash after external application but before local acknowledgment produces an
+  `unknown` effect and reconciles without duplicate physical application in the
+  idempotent fixture.
+- duplicate resume attempts reuse effect identity/idempotency correctly.
+- two recovery workers compete for one lease, and an expired lease can be taken
+  over without concurrent commit.
+- authorized cross-frame repair succeeds while sibling overreach is rejected.
+- changed target revision, approval, payload fingerprint, or redaction rule is
+  rejected before callback.
+- ingress quarantine occurs before Observation commit.
+- audit indexes rebuild from authoritative rows/events and report injected
+  drift.
+- stale Memory provenance cannot authorize, repair, or mutate an open effect.
 
 ## 6. Desktop Security Checks
 
@@ -151,6 +172,10 @@ Alpha MUST include a verifier that checks:
 - participating agents, accessed files/chunks, accessed memories if any, route decision, local/cloud calls, provider/model, redaction summary when any, uploaded payload hash when any, approval, tool calls, output location, and timestamps are present for each applicable run.
 - tamper tests fail verification after event payload, sequence, or previous hash mutation.
 - concurrent event append tests preserve transaction boundaries.
+- every effect resolves to exactly one owner frame and every repair step resolves
+  to its effect, verification result, and causal events.
+- external callback attempts are reported separately from physical
+  applications; the verifier does not label the result exactly-once.
 
 The verifier MAY be a test helper in Alpha. It SHOULD become a user-facing diagnostic later.
 
@@ -234,11 +259,31 @@ Alpha can be called complete only when:
 
 - all Alpha E2E acceptance steps pass.
 - packaged/prod-like smoke test proves real local model adapter path.
-- Confidential local-only demo passes with cloud call count derived from ledger.
+- Confidential hybrid Approve-then-Egress fixture passes with cloud call count
+  derived from the ledger; a separate explicit local-only route proves the
+  correctly scoped `0 Ogra-managed cloud calls` state.
 - route decisions and audit evidence are persisted and visible.
 - Data Safety Center v0 and AI Governance Center v0 are usable.
 - OpenAI-compatible adapter is policy-gated.
 - hash-chain audit verifier passes.
+- durable recovery fault matrix passes for pre-callback crash, post-apply /
+  pre-ack crash, unknown outcome, duplicate resume, competing lease, expired
+  lease takeover, scope/revision violation, stale approval, ingress quarantine,
+  audit-index rebuild, and stale Memory provenance.
+- no `unknown` effect is silently replayed and no Observation is committed before
+  ingress acceptance.
+- a crash after transactional receipt/result-capsule persistence resumes from
+  `received`, reruns ingress with zero adapter callbacks, and fails closed on
+  missing/corrupt/mismatched result material.
+- `(effect_id, attempt_no)` admits one authoritative receipt, and competing live
+  or recovery ingress finalizers commit exactly one finding/incident,
+  Observation, terminal state, and event through receipt/revision CAS.
+- the read-only `knowledge.search` Tool Broker slice proves immutable version
+  pinning, Core-derived workspace scope, policy, owned effect, receipt, ingress,
+  and accepted Observation; MCP remains disabled.
+- versioned audit-envelope verification detects tampering with event type,
+  run/workspace ids, sequence, timestamp, policy/redaction revision, payload
+  hash, or previous hash while legacy chains remain verifiable.
 - renderer cannot access local privileged resources.
 - critical/high security findings are fixed before release.
 - unresolved medium security findings have documented risk acceptance.
@@ -255,6 +300,8 @@ Beta can be called complete only when:
 - 3-agent Pipeline is bounded, cancellable, and audited.
 - Pipeline per-step policy, route, model, tool, citation, risk, and audit evidence is visible.
 - local recipes can be saved and reused.
+- built-in and declarative local-recipe Skills cannot gain permissions beyond
+  their pinned Tool Broker versions, workspace binding, and Agent manifest.
 - redaction preview is usable and audited.
 - audit export works.
 - LocalCommandAgentAdapter read-only mode is supervised and audited.
@@ -270,7 +317,10 @@ v1.0 can be called complete only when:
 - self-building organization requires user confirmation.
 - recipe recommendation, approval/rejection, agent add, and workflow save are audited.
 - A2A bridge maps external task to internal run and returns final artifact/result.
-- MCP integrations are disabled by default and work only through manifest, permission, policy, route decision, and audit.
+- MCP integrations are disabled by default and pass the full plan 11 T4/T5
+  matrix: lifecycle/discovery effects, immutable schema review, workspace
+  binding, permission/policy/route, unknown-outcome recovery, independent
+  ingress, audit, stdio isolation tests, and HTTP/OAuth hardening.
 - at least one external local agent adapter family is evaluated and graded with declared audit level, permission limits, and visible control limitations.
 - multi-workspace policy behavior is tested.
 - Data Safety Center covers memory, embedding index, recipe, agent group, artifact, MCP, A2A, and local agent adapter assets.
@@ -302,6 +352,9 @@ MUST NOT release with:
 - audit events without hash verification.
 - direct renderer access to secrets or SQLite.
 - cloud adapter callable before policy.
+- recovery driven only by a ReAct cursor or mutable checkpoint.
+- release claims of exactly-once invocation, automatic rollback, or distributed
+  durability based on the local Alpha fixture.
 - undocumented safety limitations.
 - UI that hides blocked reasons.
 - tests that pass only by mocking the entire product path.

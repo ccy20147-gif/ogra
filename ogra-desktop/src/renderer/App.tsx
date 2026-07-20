@@ -90,15 +90,20 @@ const App: React.FC = () => {
   const [governanceData, setGovernanceData] = useState<any>({ runs: [], incidents: [], policies: [] });
   const [providers, setProviders] = useState<any[]>([]);
   const [recentRuns, setRecentRuns] = useState<any[]>([]);
-  // Approval queue surfaced in AiGovernanceCenter. Until the IPC
-  // exposes a real approval stream, the user can demo the
-  // approve/deny UI by clicking the "Seed demo approval" button
-  // in the governance tab (only visible while the queue is empty).
+  // Approval queue — Sequence 0 Plan 03 §3.6. Pending approvals are
+  // surfaced by Core via the IPC and the user decision flows back to
+  // Core through IpcChannel.ApprovalDecision. No local state mutation;
+  // the queue updates only after the IPC round-trip succeeds.
   const [pendingApprovals, setPendingApprovals] = useState<Array<{
     id: string;
     runId?: string;
     approvalType: string;
     requestedScope: Record<string, unknown>;
+    scopeHash?: string;
+    payloadFingerprint?: string;
+    policyVersionHash?: string;
+    redactionRuleVersion?: string;
+    sanitizedPreview?: string;
     reason: string;
     createdAt: string;
   }>>([]);
@@ -267,36 +272,102 @@ const App: React.FC = () => {
   };
 
   /**
-   * Approve / deny an item in the pending-approval queue. Real IPC
-   * (`approval.decision`) is not yet exposed; the local mirror is the
-   * only source of truth for now. The selected item is dropped from
-   * the queue regardless of the decision, and the StatusBar reflects
-   * the outcome so the user sees what they just did.
+   * Sequence 0 Plan 03 §3.6: approve / deny through Core, never
+   * mutate the local queue without an IPC round-trip. The runId /
+   * workspaceId pair travels with the decision so Core can refuse a
+   * renderer-payload mismatch even when the approvalId is known.
    */
-  const handleApprovalDecision = (approvalId: string, decision: 'approve' | 'deny') => {
-    setPendingApprovals(prev => prev.filter(a => a.id !== approvalId));
-    setStatus(`Approval ${decision}d`);
+  const handleApprovalDecision = async (
+    approvalId: string,
+    runId: string,
+    workspaceId: string,
+    decision: 'approve' | 'deny',
+  ) => {
+    const apiDecision = decision === 'approve' ? 'approved' : 'denied';
+    try {
+      const result = await window.ogra.approval.decision({
+        approvalId, runId, workspaceId, decision: apiDecision,
+      });
+      if (result?.success) {
+        if (decision === 'deny') {
+          setPendingApprovals(prev => prev.filter(a => a.id !== approvalId));
+          setStatus('Approval denied');
+          await refreshPendingApprovals();
+          return;
+        }
+        const run = await window.ogra.run.status(runId);
+        if (!run?.success || !run.data?.task || run.data.workspaceId !== workspaceId) {
+          const message = 'Approval recorded, but the run could not be resumed';
+          setStatus(message);
+          await refreshPendingApprovals();
+          throw new Error(message);
+        }
+        setCurrentRunId(runId);
+        setRunLoading(true);
+        setRunError(null);
+        setStatus(`Approval recorded. Resuming run ${runId}...`);
+        const resumed = await window.ogra.run.start({
+          workspaceId,
+          task: run.data.task,
+          resumeRunId: runId,
+          approvalId,
+          knowledgeBaseIds: [],
+        });
+        if (!resumed?.success || !resumed.data) {
+          throw new Error(resumed?.error?.message || 'Run resume was rejected by Core');
+        }
+        setRunResult(resumed.data.status || 'completed');
+        setStatus(`Run ${runId}: ${resumed.data.status}`);
+        setRecentRuns(prev => [...prev, resumed.data]);
+        setRunPhase(resumed.data.status === 'completed' ? 'complete' : 'error');
+        await refreshPendingApprovals();
+        return;
+      }
+      throw new Error(result?.error?.message || 'Approval decision was rejected by Core');
+    } catch (err) {
+      const message = (err as Error)?.message ?? 'Approval decision failed';
+      setStatus(`Approval ${decision} failed: ${message}`);
+      setRunError(message);
+      setRunPhase('error');
+      throw err;
+    } finally {
+      setRunLoading(false);
+    }
+    // Even on IPC failure we keep the row visible so the user can retry.
+    setStatus(`Approval ${decision} pending Core acknowledgement`);
   };
 
   /**
-   * Add a synthetic approval to the queue. Visible only when the
-   * queue is empty so the user has a way to demo the approve/deny UI
-   * before the real approval IPC is wired.
+   * Sequence 0 Plan 03 §3.6: refresh the approval queue from Core.
+   * Called whenever a run lands in a state that creates a new
+   * approval row (require_approval / redact_then_egress).
    */
-  const seedDemoApproval = () => {
-    const id = `apr_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-    setPendingApprovals(prev => [
-      ...prev,
-      {
-        id,
-        runId: `run_${id.slice(-6)}`,
-        approvalType: 'egress',
-        requestedScope: { mode: 'approve_then_egress', classification: 'Confidential' },
-        reason: 'High-water classification reached Confidential. Approve-to-egress required.',
-        createdAt: new Date().toISOString(),
-      },
-    ]);
+  const refreshPendingApprovals = async () => {
+    if (!currentWorkspace) return;
+    const r = await window.ogra.approval.list(currentWorkspace.id);
+    if (r?.success && Array.isArray(r.data)) {
+      setPendingApprovals(
+        (r.data as any[]).map((a: any) => ({
+          id: a.id,
+          runId: a.runId ?? a.run_id,
+          workspaceId: a.workspaceId ?? a.workspace_id,
+          approvalType: a.approvalType ?? a.approval_type,
+          requestedScope: a.requestedScope ?? a.requested_scope ?? {},
+          scopeHash: a.scopeHash ?? a.scope_hash,
+          payloadFingerprint: a.payloadFingerprint ?? a.payload_fingerprint,
+          policyVersionHash: a.policyVersionHash ?? a.policy_version_hash,
+          redactionRuleVersion: a.redactionRuleVersion ?? a.redaction_rule_version,
+          sanitizedPreview: a.sanitizedPreview ?? a.sanitized_preview,
+          reason: a.reason ?? `Approval for run ${a.runId ?? a.run_id}`,
+          createdAt: a.createdAt ?? a.created_at ?? new Date().toISOString(),
+        })),
+      );
+    }
   };
+
+  useEffect(() => {
+    void refreshPendingApprovals();
+  }, [currentWorkspace?.id]);
 
   const runDemo = async () => {
     if (!currentWorkspace) {
@@ -312,17 +383,33 @@ const App: React.FC = () => {
       setStatus('Starting demo run...');
       setRunResult('');
       setRunPhase('policy_precheck');
-      setCurrentRunId(null);
+      // P1 #4: pre-allocate a runId BEFORE calling start() so the
+      // cancel button has a target id during the run. The id is
+      // validated by Core; it carries no authority.
+      const idResult = await window.ogra.run.createId({
+        workspaceId: currentWorkspace.id, task,
+      });
+      const preallocatedRunId = idResult?.success ? idResult.data?.runId : null;
+      if (preallocatedRunId) {
+        setCurrentRunId(preallocatedRunId);
+      }
       const result = await window.ogra.run.start({
         workspaceId: currentWorkspace.id,
         task,
         knowledgeBaseIds: [],
+        ...(preallocatedRunId ? { preallocatedRunId } : {}),
       });
       if (result?.success && result?.data) {
         const run = result.data;
         setCurrentRunId(run.id || null);
         setStatus(`Run ${run.id}: ${run.status}`);
         setRunResult(run.status);
+
+        if (run.status === 'awaiting_approval') {
+          setRunPhase('approval');
+          await refreshPendingApprovals();
+          setActiveTab('governance');
+        }
 
         // Track in recent runs for workspace overview
         setRecentRuns(prev => [...prev, run]);
@@ -873,7 +960,6 @@ const App: React.FC = () => {
               approvalStatus={pendingApprovals.length > 0 ? 'pending' : 'not_required'}
               approvalRequests={pendingApprovals}
               onApprovalDecision={handleApprovalDecision}
-              onSeedDemoApproval={seedDemoApproval}
               policyEvaluations={[
                 {
                   runId: governanceData.runs?.[0]?.runId || 'run_1',

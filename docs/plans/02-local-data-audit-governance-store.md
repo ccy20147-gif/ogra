@@ -150,6 +150,7 @@ run_events
   payload_hash
   previous_hash
   event_hash
+  hash_envelope_version
   policy_version_hash
   redaction_rule_version
   created_at
@@ -159,7 +160,13 @@ Hash-chain requirements:
 
 - `sequence` MUST be monotonic per run.
 - `previous_hash` MUST point to the previous event hash for the same run, or a genesis value.
-- `event_hash` MUST be derived from stable event fields using SHA-256 over canonical JSON.
+- New events MUST use a versioned canonical envelope hash that covers at least
+  `id`, `run_id`, `workspace_id`, `sequence`, `event_type`, `payload_hash`,
+  `policy_version_hash`, `redaction_rule_version`, `created_at`, and
+  `previous_hash`, plus `hash_envelope_version` itself; hashing only
+  `event_payload_json + previous_hash` is not sufficient.
+- The verifier MUST select the algorithm by `hash_envelope_version`, continue to
+  verify legacy rows, and report rather than silently rewrite a legacy chain.
 - canonical JSON MUST use deterministic key ordering and stable timestamp representation.
 - genesis `previous_hash` MUST use a documented constant.
 - `(run_id, sequence)` MUST be unique.
@@ -167,6 +174,7 @@ Hash-chain requirements:
 - event updates MUST NOT mutate prior event content.
 - audit deletion/export/cleanup actions MUST add new events.
 - an audit verifier MUST be able to recompute the chain.
+- tests MUST detect tampering with any hashed envelope field, not only payload.
 
 Alpha does not need to claim compliance-grade non-repudiation. It does need local tamper-evident evidence.
 
@@ -198,17 +206,67 @@ policy_evaluations
 approvals
   id
   run_id
-  approval_type
+  effect_id
+  effect_revision
+  approval_type: egress | tool_invocation | recovery_retry | server_config |
+                 server_enable | server_discovery | schema_review |
+                 workspace_binding | other
   requested_scope_json
-  decision: approved | denied | expired
+  scope_hash
+  payload_fingerprint
+  policy_version_hash
+  decision: pending | approved | denied | expired | revoked
+  revision
+  use_limit
+  uses_consumed
   decided_by
   reason
   expires_at
   created_at
   decided_at
+
+approval_consumptions
+  id
+  approval_id
+  effect_id
+  callback_attempt_no
+  approval_revision
+  consumed_at
+  event_id
+  UNIQUE(approval_id, effect_id, callback_attempt_no)
+
+effect_approval_bindings
+  id
+  effect_id
+  callback_attempt_no
+  approval_id
+  approval_revision
+  binding_kind: initial | recovery_retry
+  created_event_id
+  UNIQUE(effect_id, callback_attempt_no)
 ```
 
 Alpha can use a single local user identity, but approval records MUST still exist to support future governance.
+Approval consumption is authoritative state. Alpha combines all policy
+obligations for one callback attempt into one exact approval decision. The
+pre-callback transaction MUST CAS the approval revision and
+`uses_consumed < use_limit`, insert the attempt-numbered consumption, atomically
+increment consumption, and transition the linked effect to `in_flight`. Two
+concurrent callbacks cannot both consume a one-use approval. Expiry/revocation
+between preparation and callback prevents invocation.
+Once an effect has been sent or becomes `unknown`, its approval consumption is
+not refunded; a later action requires recovery/reconciliation under the same
+effect and, when policy permits a new attempt, a new scoped approval and attempt
+number.
+Every recovery callback attempt appends a new binding and approval/consumption
+lineage. `run_effects.current_approval_id` is a non-authoritative convenience
+pointer; changing it MUST NOT overwrite earlier binding or consumption rows.
+
+Administrative approval types authorize only their exact configuration or
+catalog operation and MUST NOT satisfy `tool_invocation` or `recovery_retry`.
+Alpha combines callback obligations into one exact callback approval; later
+multi-actor approval can extend this without treating server-wide enablement as
+an invocation grant.
 
 ### 3.5 Models and Providers
 
@@ -391,6 +449,10 @@ redaction_records
   created_at
 ```
 
+`tool_calls` is an Alpha compatibility/read projection only. It MUST NOT become
+invocation or recovery authority. The authoritative Tool Broker model and its
+one-to-one link to `run_effects` are defined in §3.8.8 and plan 11.
+
 ### 3.8.1 Redaction Rule Sets and Versions
 
 Alpha MUST include queryable, version-stamped redaction rule sets so the audit chain and Data Safety Center can show which rules applied to a given model call:
@@ -489,7 +551,8 @@ Quarantined content MUST be persisted under a path that renderer code cannot rea
 
 ### 3.8.4 Skills Registry
 
-Alpha MUST include a registry for built-in and local-recipe skills so manifest, version pinning, and per-invocation audit are persistent:
+Beta MUST include a registry for built-in and declarative local-recipe Skills so
+manifest, version pinning, and per-invocation audit are persistent:
 
 ```text
 skills
@@ -518,12 +581,18 @@ skill_invocations
   policy_evaluation_id
   approval_id
   model_call_id
+  tool_invocation_id
+  effect_id
   created_at
 ```
 
+`skill_invocations` is a projection. A Skill invocation that calls a tool links
+to the Tool Broker invocation/effect and cannot define independent permissions
+or outcome state.
+
 ### 3.8.5 Scheduled and Continuous Agent Group Runs
 
-Alpha MUST include tables for interval and continuous Agent Group scheduling so lifecycle, bounds, and audit are persistent:
+Beta MUST include tables for interval and continuous Agent Group scheduling so lifecycle, bounds, and audit are persistent:
 
 ```text
 scheduled_runs
@@ -575,7 +644,117 @@ run_step_actions
   created_at
 ```
 
-ReAct action persistence MUST be transactional with the corresponding `run_events` row, and recovery MUST resume from the last persisted `action_no` for the in-progress step.
+ReAct action persistence MUST be transactional with the corresponding
+`run_events` row. The last accepted Observation is an input to recovery, not by
+itself permission to replay the next action. Recovery MUST first inspect the
+durable effect state described below.
+
+### 3.8.7 Durable Execution and Repair State
+
+Alpha MUST add the operational tables defined in
+[10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md):
+
+- `run_frames` for task ownership, lineage, and node/subtree revisions;
+- `run_effects` for effect identity, payload fingerprint, idempotency identity,
+  owner frame, dependencies, policy/approval links, sealed callback capsule and
+  idempotency references/hashes, receipts, and state;
+- `effect_receipts` for append-only callback-attempt and external-application
+  evidence plus sealed result capsule reference/hash/format version;
+- `repair_transactions` and `repair_steps` for typed, revision-checked repair;
+- `recovery_leases` for local lease/CAS recovery coordination.
+- `audit_edges` as a rebuildable bidirectional query projection.
+
+These tables are authoritative runtime state, not a replacement for
+`run_events`. Every frame/effect/repair transition MUST append a hash-chained
+event in the same SQLite transaction, and every event MUST carry the relevant
+frame/effect/repair causal identifiers. Query indexes MUST support both
+frame-to-effect and effect-to-owner traversal and MUST be rebuildable and
+checkable against authoritative rows and events.
+
+The store MUST enforce, with constraints or transactional service checks:
+
+- one owning frame per effect;
+- one authoritative receipt/result capsule per `(effect_id, attempt_no)` and an
+  explicit `run_effects.authoritative_receipt_id`;
+- no idempotency-key reuse across a different owner or payload fingerprint;
+- allowed effect state transitions only;
+- optimistic checks on target subtree and authorized effect revisions;
+- one active local recovery lease per run;
+- approval linkage to payload fingerprint, scope, and rule revision;
+- Observation persistence only after the corresponding ingress result is
+  accepted.
+
+External callbacks are not atomic with SQLite. A callback that may have applied
+without a locally committed receipt MUST be represented as `unknown`, never
+silently collapsed into `failed` or `pending`.
+
+Exact sanitized callback requests and raw idempotency keys needed for verified
+retry MUST live in workspace-scoped authenticated-encrypted sealed storage, not
+in ordinary SQLite rows or audit payloads. SQLite stores the reference,
+canonical hash, and format version. Capsules exclude auth tokens and bind
+owner/effect, adapter/version, payload fingerprint, and target scope as
+authenticated data. They remain available while an effect is non-terminal or
+`unknown`; deletion is policy-gated and audited. Missing, corrupt, expired,
+wrong-workspace, or mismatched material blocks replay and creates an incident.
+
+Exact returned values needed to resume ingress review use the same
+workspace-scoped authenticated-encrypted sealed-storage rules. Receipt insertion,
+result capsule reference/hash/version, and `in_flight -> received` transition
+occur in one transaction before completion is exposed to the orchestrator.
+Recovery from `received` reruns ingress from that capsule with no callback. A
+sent attempt without complete trusted received evidence is `unknown`. Result
+capsules remain while the effect is `received`, non-terminal, or `unknown` and
+are deleted only by an audited policy-gated retention action.
+
+For filesystem-backed capsules, "one transaction" above refers only to the
+SQLite receipt/ref/state/event transaction after the blob is durable. The
+required write-ahead order is: AEAD-seal bounded bytes to a workspace temporary
+file in the same filesystem/durability domain, fsync the completed file,
+atomically no-replace rename to an immutable content-addressed path, fsync the
+destination directory (and source directory if distinct), reopen/verify
+authenticated data and hash, then commit the SQLite reference and state. Only after DB commit may callback begin or
+result completion be exposed. A pre-DB crash can leave only an unreferenced
+orphan, cleaned after a grace period by an audited policy-gated collector; a DB
+row MUST NOT reference a missing/non-durable capsule. A dedicated encrypted-BLOB
+table MAY instead commit capsule bytes/ref/state/event in one SQLite transaction.
+If atomic no-replace rename or directory durability is unavailable, filesystem
+capsules fail closed and the same-transaction BLOB backend is required.
+
+Ingress finalization from `received` MUST CAS effect state, effect revision, and
+authoritative receipt id. In one winning transaction it persists the ingress
+finding/incident, accepted Observation when any, terminal effect state, and
+event. A losing concurrent finalizer commits none of these and reloads. Recovery
+finalization additionally requires the run recovery lease.
+
+### 3.8.8 Tool Broker and MCP Registry
+
+The store MUST implement the physical model from
+[11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md)
+in its delivery phase:
+
+- `tool_descriptors` for stable logical identities;
+- `tool_versions` for immutable descriptor/schema/effect/permission/recovery
+  payloads and separately audited lifecycle state;
+- `workspace_tool_bindings` with immutable revision/hash snapshots;
+- `tool_invocations`, uniquely linked to one authoritative `run_effects` row;
+- `mcp_servers` plus immutable `mcp_server_versions` for executable/endpoint
+  configuration history without raw secrets;
+- `mcp_connections` and `mcp_catalog_snapshots` for operational session evidence;
+- `tool_schema_reviews` for drift decisions;
+- `tool_auth_bindings` for secret reference, audience, scope, and generation
+  metadata only.
+
+Every invocation, including read-only invocation, MUST own a durable effect.
+`tool_invocations`, `tool_calls`, `skill_invocations`, traces, and metrics are
+query projections and MUST NOT define a second outcome state machine. Binding,
+server, auth, schema, and descriptor versions pinned by an effect remain
+queryable after update, disable, or revocation.
+
+Descriptor payloads, schemas, server config snapshots, raw argument/output
+content, OAuth tokens, secrets, and raw idempotency keys MUST NOT be copied into
+hash-chained audit events. Store canonical hashes, bounded sanitized summaries,
+and policy-gated artifact references. Secret values remain in the OS secret
+store.
 
 ### 3.9 Policy Scopes and Allowlists
 
@@ -770,6 +949,12 @@ Alpha is accepted when:
 - Data Safety Center can list data assets, recent document access, context inclusion, associated policies, allowlists, and cloud-call status.
 - AI Governance Center can list risk summaries, incidents, approvals, policy details, and exportable run evidence.
 - Deleting or exporting audit data appends an audit event.
+- Frame/effect ownership, revisions, dependencies, approvals, receipts, repair
+  lineage, and lease state are queryable and linked to `run_events`.
+- An `unknown` effect survives restart and cannot be replayed until outcome
+  reconciliation or an explicitly verified recovery decision succeeds.
+- Audit indexes can be rebuilt and drift is detected by the consistency
+  verifier.
 - The Alpha fixture demo path creates all rows needed for route trace, citations, cloud-call ledger, Data Safety summary, and Governance summary.
 
 ## 8. Anti-Patterns
@@ -782,4 +967,8 @@ MUST NOT introduce:
 - default `Public` classification when classification is unknown.
 - raw prompt/payload persistence by default.
 - raw API key storage in SQLite.
+- a mutable JSON checkpoint as the only recovery record.
+- an Observation cursor treated as proof that an external effect did or did not
+  occur.
+- runtime or approval authority derived from M3 Memory.
 - schema names that imply enterprise compliance certification in Alpha.

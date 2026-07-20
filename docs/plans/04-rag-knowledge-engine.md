@@ -273,7 +273,10 @@ Alpha is accepted when:
 - A user can import a folder, mark it Confidential, and manually index it.
 - Unsupported files are skipped with visible reasons.
 - FTS5 retrieval returns source-linked chunks.
-- Retrieved Confidential chunks force local-only route.
+- Retrieved Confidential chunks raise the run high-water mark to Confidential.
+  Retrieval itself remains local; any later cloud reasoning stage requires the
+  complete Approve-then-Egress path with sanitized payload-bound approval,
+  otherwise the run remains local or blocked.
 - RAG answer UI shows citations with classification and cloud-context status.
 - `run_context_sources` proves retrieved/selected/local/cloud/blocked state for every cited source.
 - Prompt injection fixture content creates warnings and run risk entries.

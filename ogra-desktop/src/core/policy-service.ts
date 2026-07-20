@@ -242,18 +242,35 @@ export class PolicyService {
       const confidentialPolicy = this.policies.get('confidential-local-only');
       if (confidentialPolicy) {
         matchedRules.push({ name: 'confidential-local-only', reason: 'Confidential data detected' });
-        reasons.push('Confidential data: local-only by default in Alpha');
+        reasons.push('Confidential data: default route depends on requested compute + approval');
+        if (input.providerIsLocal) {
+          decision = 'allow';
+          route = 'local';
+          reasons.push('Confidential data with local provider: allowing local compute');
+          return { matchedRules, decision, reasons, requiredApprovals, route };
+        }
         if (input.requestedCompute === 'cloud' || input.requiresCloud) {
-          // If provider is local, allow local routing instead of blocking
-          if (input.providerIsLocal) {
+          // Plan 03 §3.6: Confidential cloud → approve-then-egress tier.
+          // Redaction engine + scope-bound user approval must both succeed
+          // before the model adapter is invoked. Sequence 0 routes this
+          // to `redact_then_egress` (the agent performs redactor +
+          // approval-verify before calling the model); missing approval
+          // → blocked with `require_approval` decision + re-sanitize
+          // loop semantics.
+          if (input.hasUserApproval) {
             decision = 'allow';
-            route = 'local';
-            reasons.push('Confidential data with local provider: allowing local compute');
-            return { matchedRules, decision, reasons, requiredApprovals, route };
+            route = 'redact_then_egress';
+            reasons.push(
+              'Confidential data cloud upload: user approval recorded; redaction engine + scope-bound approval will be applied before egress',
+            );
+          } else {
+            decision = 'require_approval';
+            route = 'blocked';
+            requiredApprovals.push('allow_confidential_redacted_cloud');
+            reasons.push(
+              'Confidential data cloud request requires user approval of the redacted preview (Approve-then-Egress tier)',
+            );
           }
-          decision = 'blocked';
-          route = 'blocked';
-          reasons.push('Cloud upload blocked for Confidential data in Alpha');
           return { matchedRules, decision, reasons, requiredApprovals, route };
         }
         decision = 'local_only';

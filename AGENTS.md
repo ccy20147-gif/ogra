@@ -37,8 +37,8 @@ When an agent starts work here, follow this initialization sequence before makin
 ## Git Notes
 
 - This directory has been initialized as a git repository.
-- Current branch at initialization: `master`.
-- At the time this guide was written, there was no initial commit yet.
+- Current branch: `main`, tracking `origin/main`.
+- The repository has commit history; do not rely on the original initialization state described by archived documents.
 - Do not assume a clean worktree. Always inspect `git status --short --branch` before edits.
 - Do not rename branches, stage files, commit, or push unless the user explicitly asks.
 - If the repository branch is later renamed, update both this file and [README.md](README.md).

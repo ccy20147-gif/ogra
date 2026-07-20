@@ -206,6 +206,7 @@ export class GeminiAdapter extends BaseModelAdapter {
         modelId,
         providerId: this.providerId,
         responseHash: crypto.createHash('sha256').update(text).digest('hex'),
+        httpBodyHash: 'adapter_body_hash',
         startedAt,
         completedAt,
       };

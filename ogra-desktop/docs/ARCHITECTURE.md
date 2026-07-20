@@ -2,6 +2,15 @@
 
 > Version: 0.1.0-alpha | Date: 2026-07-03
 
+> This document describes the current implementation snapshot. The active
+> target architecture and implementation order are defined by
+> [the development requirements index](../../docs/plans/00-development-requirements-index.md)
+> and [the durable execution runtime plan](../../docs/plans/10-shd-inspired-durable-execution-runtime.md).
+> Tool/Skill/MCP target boundaries are defined by
+> [the Tool Broker plan](../../docs/plans/11-tool-broker-mcp-integration-runtime.md).
+> In particular, the current Confidential cloud block remains in place until
+> the complete Approve-then-Egress and durable effect protocol is implemented.
+
 ## Process Architecture
 
 ```
@@ -47,8 +56,13 @@ SQLite (Local Store)
 | IPC channel access | `ALLOWED_IPC_CHANNELS` allowlist + `validateIpcChannel()` |
 | API keys | `OgraSecretBroker` — AES-256-CBC encrypted file, masked in UI |
 | File paths | `PathValidator` — canonical path, symlink escape, traversal detection |
-| Cloud calls | Policy evaluation before any adapter call; Confidential/Restricted blocked in Alpha |
+| Cloud calls | Current snapshot: policy evaluation before any adapter call; Confidential/Restricted blocked |
 | Worker isolation | Workers receive scoped job input only, no inherited env, no direct SQLite |
+
+The secret-broker row describes the current implementation, not the remote MCP
+target. Before MCP OAuth, secrets must migrate to an OS-backed store with
+audience/scope/generation binding, authenticated protection where portable
+storage is unavoidable, and explicit migration/corruption reporting.
 
 ## Data Classification
 
@@ -56,7 +70,7 @@ SQLite (Local Store)
 |-------|--------------|----------------|
 | Public | Cloud allowed | May route to local or cloud if policy allows |
 | Internal | Local default | Cloud requires redaction + approval |
-| Confidential | Local-only | MUST route local or blocked; cloud upload blocked |
+| Confidential | Local-only | Current snapshot blocks cloud; target Alpha permits only complete Approve-then-Egress |
 | Restricted | Strict local allowlist | Approved local models only; approval cannot override |
 
 ## Run Lifecycle
@@ -78,6 +92,11 @@ created
 
 Each transition emits an append-only run_event with SHA-256 hash-chain.
 
+The target durable runtime adds persistent task frames, owned effects, explicit
+`unknown` outcomes, revisions, typed repair verification, and a local recovery
+lease. These are planned capabilities, not claims about the current code. See
+[plan 10](../../docs/plans/10-shd-inspired-durable-execution-runtime.md).
+
 ## Key Non-Goals (Alpha)
 
 - No SaaS multi-tenancy
@@ -90,7 +109,10 @@ Each transition emits an append-only run_event with SHA-256 hash-chain.
 
 ## Data Egress Model
 
-Ogra controls: model payloads, embedding requests, Ogra-managed exports, tool calls through adapters.
+Ogra currently controls model payloads, embedding requests, and Ogra-managed
+exports. Tool control is a target: the Capability Gateway will route built-in,
+Skill-derived, and MCP tools through immutable versions, policy, owned effects,
+receipts, independent ingress review, and audit. It is not implemented yet.
 
 Ogra does NOT control: copy/paste, screenshots, OS-level network, provider-side retention after approved calls, third-party tools outside Ogra, clipboard, browser tools, MCP/A2A (not yet implemented), local agent network requests.
 

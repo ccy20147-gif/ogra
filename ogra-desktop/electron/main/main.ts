@@ -283,6 +283,21 @@ function registerIpcHandlers(): void {
     { argCount: 1 },
   );
 
+  // P1 #4: pre-allocate a runId so the renderer can wire a cancel
+  // button BEFORE startRun() resolves.
+  registerHandler(
+    IpcChannel.RunCreateId,
+    async (_event, req: any) => {
+      const wsId = typeof req === 'string' ? req : req?.workspaceId;
+      const task = typeof req?.task === 'string' ? req.task : '';
+      if (typeof wsId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'workspaceId is required');
+      }
+      return { runId: ograCore!.runService.createRunId(wsId, task) };
+    },
+    { argCount: 1 },
+  );
+
   // Route Decision
   registerHandler(
     IpcChannel.RouteDecisionFetch,
@@ -335,15 +350,32 @@ function registerIpcHandlers(): void {
   registerHandler(
     IpcChannel.ApprovalRequest,
     async (_event, req: any) => {
-      if (!req || !req.runId) throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval request must include runId');
-      const approvalId = `apr_${Date.now()}`;
-      ograCore!.auditService.appendEvent({
-        runId: req.runId,
-        workspaceId: req.workspaceId || 'unknown',
-        eventType: 'approval_requested',
-        eventPayload: { approvalId, reason: req.reason } as Record<string, unknown>,
-      });
-      return { id: approvalId, status: 'pending' };
+      // Sequence 0 Plan 03 §3.6: For a Confidential+cloud run, the
+      // approval row is created automatically by RunService.startRun
+      // (which parks the run at awaiting_approval and returns the
+      // pending approval id). The renderer therefore never issues
+      // a free-form approval request; the canonical row is owned by
+      // Core. This channel only allows the renderer to attach
+      // optional `reason` text to an existing pending row.
+      if (!req || !req.runId || typeof req.runId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+          'ApprovalRequest requires runId; the row is owned by Core');
+      }
+      const rows = await ograCore!.runService.listApprovalsByRun(req.runId);
+      const pending = rows.find((a: any) => a.decision === 'pending');
+      if (!pending) {
+        throw new OgraError(OgraErrorCode.NOT_FOUND,
+          `No pending approval for run ${req.runId}`);
+      }
+      if (typeof req.reason === 'string') {
+        ograCore!.runService.annotateApprovalReason(pending.id, req.reason);
+      }
+      return {
+        id: pending.id,
+        status: pending.decision,
+        scopeHash: pending.scopeHash,
+        runId: pending.runId,
+      };
     },
     { argCount: 1 },
   );
@@ -358,13 +390,31 @@ function registerIpcHandlers(): void {
       if (!req.workspaceId || typeof req.workspaceId !== 'string') {
         throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval decision must include workspaceId');
       }
-      ograCore!.auditService.appendEvent({
+      if (req.decision !== 'approved' && req.decision !== 'denied') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'Approval decision must be approved or denied');
+      }
+      return ograCore!.runService.submitApprovalDecision({
+        approvalId: req.approvalId,
         runId: req.runId,
         workspaceId: req.workspaceId,
-        eventType: 'approval_decision',
-        eventPayload: { approvalId: req.approvalId, decision: req.decision } as Record<string, unknown>,
+        decision: req.decision,
+        decidedBy: typeof req.decidedBy === 'string' ? req.decidedBy : undefined,
+        reason: typeof req.reason === 'string' ? req.reason : undefined,
       });
-      return { status: 'recorded' };
+    },
+    { argCount: 1 },
+  );
+
+  // Sequence 0: list pending + decided approvals for a workspace.
+  registerHandler(
+    IpcChannel.ApprovalList,
+    async (_event, req: any) => {
+      const wsId = typeof req === 'string' ? req : req?.workspaceId;
+      if (typeof wsId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'workspaceId is required');
+      }
+      const list = await ograCore!.runService.listApprovals(wsId);
+      return list;
     },
     { argCount: 1 },
   );

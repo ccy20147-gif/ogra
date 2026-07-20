@@ -33,6 +33,7 @@ class MockStepModelAdapter extends BaseModelAdapter {
       modelId: request.allowedModelId,
       providerId: this.providerId,
       responseHash: 'mock_pipeline_hash',
+        httpBodyHash: 'adapter_body_hash',
       startedAt: new Date().toISOString(),
       completedAt: new Date().toISOString(),
     };

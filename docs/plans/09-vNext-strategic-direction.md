@@ -298,8 +298,9 @@ Every action passes through the middleware chain (see 5.3).
 
 #### 5.2.3 Strong Persistence
 
-Every agent state transition is durably persisted. The agent can survive a crash,
-restart, or user interruption and resume exactly where it left off:
+Every agent state transition is durably persisted. A crash, restart, or user
+interruption can be recovered without using the ReAct cursor as proof of an
+external outcome:
 
 ```
 Persisted per step:
@@ -317,19 +318,19 @@ Persisted per run:
   - elapsed time / remaining
 ```
 
-Persistence uses the existing `agent_runs` + `run_steps` + `run_events` tables,
-extended with `run_step_actions` for ReAct iteration granularity.
+Plan/ReAct progress uses `agent_runs` + `run_steps` + `run_step_actions` +
+`run_events`. Externally visible effects and repair authority additionally use
+the frame/effect/receipt/repair/lease records defined in plan 10.
 
 #### 5.2.4 Recovery Semantics
 
-When a run resumes after interruption:
-
-1. Load persisted state → find last in-progress step
-2. If step is `awaiting_approval` → re-prompt user
-3. If step is `executing` with partial ReAct state → resume from last Observation
-4. If step is `failed` with retries remaining → retry with backoff
-5. If step is `completed` → advance to next step
-6. Re-run policy evaluation on restored context (high-water mark may have changed)
+When a run resumes after interruption, it MUST first acquire a local recovery
+lease, load frame/effect evidence, re-run policy and high-water checks, reconcile
+unknown external outcomes, and verify ownership, dependencies, revisions,
+approval scope, and payload fingerprint. Only then may it resume from the last
+accepted Observation, retry, compensate, replan, or escalate. The operational
+contract and milestone sequence are defined in
+[10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md).
 
 ### 5.3 Integrated Middleware Chain
 
@@ -655,18 +656,20 @@ vNext must extend AI Governance Center to include:
 | Feature | Earliest Phase | Dependencies |
 |---|---|---|---|
 | Local-first semantic update (docs + messaging) | Beta | None |
-| Three-tier egress policy | Beta | Policy engine extension, redaction engine |
-| Rejection → re-sanitize loop | Beta | Approve-then-Egress mode, redaction engine |
-| Ingress Review Agent (basic) | Beta | Independent agent runtime, semantic scanner |
-| Local Agent PlanExecute + ReAct engine | Beta | Extended run_step_actions schema, middleware chain |
-| Integrated sanitize/policy/route/audit middleware | Beta | ReAct engine, redaction engine, policy extension |
-| Skills Market (built-in + local recipe) | v1.0 | Skill registry, manifest validation, sandboxed execution |
+| Three-tier egress policy | Alpha | Policy engine extension, redaction engine |
+| Rejection -> re-sanitize loop | Alpha | Approve-then-Egress mode, redaction engine |
+| Ingress Review Agent (basic) | Alpha | Independent process boundary, regex scanner |
+| Local Agent PlanExecute + ReAct engine | Alpha | Extended run_step_actions schema, middleware chain |
+| Integrated sanitize/policy/route/audit middleware | Alpha | ReAct engine, redaction engine, policy extension |
+| Tool Broker contract + read-only built-in slice | Alpha | Durable effects, real approval, independent ingress |
+| Skills Market (built-in + local recipe) | Beta | Tool Broker, Skill registry, manifest validation |
 | Skills Market (marketplace) | v1.0 | Content scanning, trust verification, user approval gate |
-| Ingress Review Agent (full three-tier) | v1.0 | Ingress policy integration |
-| Agent Group interval scheduling | v1.0 | PipelineOrchestrator extension |
-| Agent Group continuous running | v1.0 | PipelineOrchestrator extension, state persistence |
+| Ingress Review Agent (full three-tier) | Alpha | Ingress policy integration |
+| Agent Group interval scheduling | Beta | PipelineOrchestrator extension |
+| Agent Group continuous running | Beta | PipelineOrchestrator extension, state persistence |
 | Self-building Agent Groups | v1.0 | Capability taxonomy, Coordinator, dynamic assembly |
 | Full ingress/egress policy matrix | v1.0 | All egress + ingress components |
+| MCP tools-only integration | v1.0 | Tool Broker T4/T5, hardened secrets/transports |
 
 ---
 
@@ -687,6 +690,17 @@ This document supplements, not replaces, the existing plan documents:
 - [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md):
   This document extends the Beta/v1 feature set with scheduling, continuous running,
   and self-building agent groups.
+
+- [10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md):
+  This document operationalizes strong persistence and recovery with owned
+  effects, explicit unknown outcomes, revisions, typed repair verification,
+  recovery leases, audit packets, and a strict runtime-versus-Memory authority
+  boundary.
+
+- [11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md):
+  This document turns tool, Skill, and MCP intent into one immutable descriptor,
+  policy, effect, receipt, ingress, recovery, and governance contract while A2A
+  remains in the AgentAdapter delegation lifecycle.
 
 When these extended features enter active implementation, the relevant sections
 in those plan documents should be updated to reference this document as the

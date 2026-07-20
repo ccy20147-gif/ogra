@@ -114,14 +114,17 @@ describe('Alpha E2E Smoke Test (real DB)', () => {
 
   // ─── 2. Classify + Policy (block Confidential from cloud) ────────────
 
-  it('2. Policy should block Confidential data from cloud', async () => {
+  it('2. Policy should require approval for Confidential data from cloud (default)', async () => {
     const result = await policyService.evaluate({
       workspaceId: fixture.workspaceId,
       dataClassification: DataClassification.Confidential,
       requestedCompute: 'cloud',
       requiresCloud: true,
     });
-    expect(result.decision).toBe('blocked');
+    // Sequence 0 (Plan 03 §3.6): Confidential + cloud without an
+    // approved row → require_approval. The redact_then_egress tier
+    // takes over when an approved approval row exists.
+    expect(result.decision).toBe('require_approval');
     expect(result.route).toBe('blocked');
     expect(result.reasons.some(r => r.includes('Confidential'))).toBe(true);
 
@@ -295,13 +298,17 @@ describe('Alpha E2E Smoke Test (real DB)', () => {
 
   // ─── 7. Confidential + Restricted never go to cloud ─────────────────
 
-  it('7. Confidential + Restricted should never go to cloud', async () => {
+  it('7. Confidential requires approval + Restricted stays blocked; neither goes to cloud implicitly', async () => {
+    // Sequence 0: Confidential + cloud without approval is held at
+    // require_approval (not silently auto-blocked). The
+    // redact_then_egress tier takes over with an approved row.
     const confidentialResult = await policyService.evaluate({
       workspaceId: fixture.workspaceId,
       dataClassification: DataClassification.Confidential,
       requestedCompute: 'cloud',
     });
-    expect(confidentialResult.decision).toBe('blocked');
+    expect(confidentialResult.decision).toBe('require_approval');
+    expect(confidentialResult.route).toBe('blocked');
 
     const restrictedResult = await policyService.evaluate({
       workspaceId: fixture.workspaceId,
@@ -310,14 +317,14 @@ describe('Alpha E2E Smoke Test (real DB)', () => {
     });
     expect(restrictedResult.decision).toBe('blocked');
 
-    // Log to audit
+    // Log to audit for Restricted (which is the blocked branch)
     await auditService.appendEvent({
       runId: fixture.runId,
       workspaceId: fixture.workspaceId,
       eventType: 'run_blocked',
       eventPayload: {
-        reason: 'Confidential/Restricted data blocked from cloud',
-        classifications: ['Confidential', 'Restricted'],
+        reason: 'Restricted data blocked from cloud',
+        classifications: ['Restricted'],
       },
     });
   });

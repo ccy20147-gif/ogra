@@ -32,7 +32,8 @@ interface ModelAdapter {
   isLocal: boolean;
   capabilities: {
     streaming: boolean;
-    toolCalling: boolean;
+    providerNativeToolCalling: boolean;
+    ograToolBrokerWired: boolean;
     fileUpload: boolean;
   };
   generate(request: ModelRequest): Promise<ModelResult>;
@@ -94,9 +95,18 @@ Requirements:
 - response hash.
 - error/status recording.
 
-OpenAI-compatible cloud calls MUST be blocked for Confidential and Restricted data in Alpha without exception.
+OpenAI-compatible cloud calls for Confidential data MUST use the
+Approve-then-Egress path: deterministic sanitization, current payload preview,
+payload/rule-bound approval, and policy revalidation immediately before the
+callback. Restricted data MUST be blocked from cloud use without exception in
+Alpha.
 
 Alpha MUST default OpenAI-compatible tool calling and file upload to disabled. Streaming MUST NOT write complete prompts, payloads, or sensitive chunks to logs.
+
+Provider-native protocol support MUST be reported separately from Ogra runtime
+wiring. An adapter that can parse a provider's tool-call format but does not yet
+route it through plan 11 MUST report `ograToolBrokerWired = false` and MUST NOT
+execute or silently discard the request as if tool execution succeeded.
 
 ## 4. Model Selection
 
@@ -116,7 +126,8 @@ Behavior:
 
 - Public data MAY use cloud model if policy allows.
 - Internal data defaults local; cloud requires redaction/approval when private context is included.
-- Confidential data uses local model or blocks.
+- Confidential data defaults local; cloud use is allowed only through the
+  Approve-then-Egress path with a sanitized, payload-bound approval.
 - Restricted data uses allowlisted local model or blocks.
 
 If no acceptable model is available, the run MUST become blocked with a user-visible reason.
@@ -196,9 +207,19 @@ The action space includes:
 
 Every action passes through the middleware chain in §5.1.
 
+Callable tools, including capabilities selected by a Skill or proposed by a
+provider-native tool call, MUST execute through
+[11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md).
+The Agent supplies only tool id and arguments; Ogra Core supplies workspace,
+binding, transport, secret, policy, approval, and effect context.
+
 ### 5.4 Strong Persistence and Recovery
 
-Every agent state transition is durably persisted in `run_step_actions` and `run_events`. The agent can survive a crash, restart, or user interruption and resume exactly where it left off. Persisted per step:
+Every agent state transition is durably persisted in `run_step_actions` and
+`run_events`, while frame/effect/repair state is persisted through the contract
+in [10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md).
+The runtime can survive a crash, restart, or user interruption without treating
+the ReAct cursor as proof of an external outcome. Persisted per step:
 
 - step status: pending | planning | executing | awaiting_approval | completed | failed.
 - current ReAct iteration: { thought, action, observation }.
@@ -216,12 +237,24 @@ Persisted per run:
 
 Recovery semantics on resume:
 
-1. Load persisted state, find last in-progress step.
-2. If step is `awaiting_approval`, re-prompt user.
-3. If step is `executing` with partial ReAct state, resume from last Observation.
-4. If step is `failed` with retries remaining, retry with backoff.
-5. If step is `completed`, advance to next step.
-6. Re-run policy evaluation on restored context (high-water mark may have changed).
+1. Acquire the run's local recovery lease and load the recovery capsule.
+2. Re-run policy and high-water classification checks against current state.
+3. Reconcile every `unknown` effect using external request/receipt evidence,
+   adapter outcome query, or the stable idempotency contract.
+4. Verify effect ownership, dependencies, allowed repair action, target subtree
+   revision, authorized effect revisions, approval scope, payload fingerprint,
+   and rule version.
+5. If an approval-bound payload or governing revision changed, return to
+   `awaiting_approval`; do not reuse the old approval.
+6. Only after reconciliation and typed verification, resume from the last
+   accepted Observation, retry, compensate, replan, or escalate.
+7. Append recovery events and release or renew the lease transactionally.
+
+An adapter MUST declare whether it supports idempotency keys, outcome query,
+cancellation, and compensation. If an external outcome is unknown and the
+adapter cannot reconcile it safely, the runtime MUST fail closed or request a
+user decision. Ogra does not claim exactly-once invocation or automatic
+rollback.
 
 ### 5.5 Default Permissions
 
@@ -276,11 +309,13 @@ Runs MUST support:
 
 ## 7. Agent Group Requirements
 
-Agent Group is the Alpha main work surface. This section defines the orchestration layer; detailed data/UI/release requirements are in [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
+Agent Group is a Beta work surface. This section defines the orchestration layer;
+detailed data/UI/release requirements are in [08 Memory, Agent Group, Recipes,
+and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
 
-### 7.1 Modes (Alpha)
+### 7.1 Modes (Beta)
 
-Alpha MUST support all three Agent Group modes:
+Beta MUST support all three Agent Group modes:
 
 - **Pipeline** — `Research -> Draft -> Review`. Each step is policy-checked, route-checked, and audited. Per-step permissions apply. Bounded by `max_steps`, `max_tokens`, `max_duration`.
 - **Parallel** — multiple agents run concurrently and a deterministic Merge step combines their outputs. Each parallel branch is its own bounded run with policy and audit. The Merge step is itself an agent with the same middleware chain.
@@ -295,9 +330,9 @@ All three modes MUST preserve:
 - re-sanitize loop on the Approve-then-Egress tier.
 - ingress review on every external result.
 
-### 7.2 Scheduling (Alpha)
+### 7.2 Scheduling (Beta)
 
-Alpha MUST support two scheduling modes for Agent Groups:
+Beta MUST support two scheduling modes for Agent Groups:
 
 - **Interval** — cron expression or interval string. The Agent Group runs on the schedule. Each iteration is a separate `agent_runs` row; per-iteration bounds apply.
 - **Continuous** — event-driven (file change, new data, API webhook) or loop. The Agent Group runs as a long-lived process with `cooldown_between_iterations_ms` and lifetime-level bounds.
@@ -306,7 +341,7 @@ Schedule config persists in `scheduled_runs` (see 02 §3.8.5). Each iteration cr
 
 Bounds:
 
-- per-iteration bounds: `max_duration_ms`, `max_tokens`, `cancel` — remain as the Alpha one-shot bounds.
+- per-iteration bounds: `max_duration_ms`, `max_tokens`, `cancel` — reuse the Alpha one-shot bounds.
 - lifetime-level bounds: `max_iterations`, `max_total_duration_ms`, `max_total_tokens` — new for scheduled/continuous runs.
 - `cancel` for scheduled/continuous stops after the current iteration. `pause` pauses between iterations; mid-iteration pause is per-iteration cancel.
 
@@ -314,7 +349,7 @@ Bounds:
 
 Self-building Agent Group recruitment is a product decision that is explicitly deferred from Alpha. The capability taxonomy, Coordinator agent, dynamic group assembly, and confirmation UI are NOT implemented in Alpha.
 
-Alpha MUST reserve the data structures (a `capability_taxonomy` table or JSON registry, and a `self_build_recommendations` table) as migration-compatible placeholders so a future phase can adopt them without schema break. The placeholder does NOT trigger any auto-recruitment in Alpha.
+Beta SHOULD reserve the data structures (a `capability_taxonomy` table or JSON registry, and a `self_build_recommendations` table) as migration-compatible placeholders so a future phase can adopt them without schema break. The placeholder does NOT trigger any auto-recruitment.
 
 Hard constraints preserved from the handbook apply if self-building is later enabled: no auto-download of unknown plugins, no auto-pulling of GitHub repos for execution, no auto-enabling of shell permissions, no auto-access of high-sensitivity data, no cross-workspace recruitment without user confirmation, and every recommendation and decision must be audited.
 
@@ -378,7 +413,7 @@ Skill {
 }
 ```
 
-### 9.2 Alpha Skill Sources
+### 9.2 Beta Skill Sources
 
 | Source | Description | Trust Model |
 |---|---|---|
@@ -400,9 +435,10 @@ Agent identifies needed capability
      -> Is skill's trustLevel acceptable per workspace policy?
   -> If approved: load skill, inject into agent's action space
   -> Agent invokes skill as an action: use_skill(skillId, params)
-  -> Skill execution goes through the standard middleware chain (§5.1)
+  -> Skill resolves only pinned Tool Broker capabilities permitted by its manifest
+  -> Each capability goes through plan 11 policy/approval/effect/receipt/ingress
   -> Result returned to agent's Observation
-  -> skill_invocations row written with input hash, output hash, policy evaluation id
+  -> skill_invocations links to tool_invocation/effect evidence
 ```
 
 ### 9.4 Skill Persistence and Version Pinning
@@ -410,6 +446,9 @@ Agent identifies needed capability
 - The active skill registry is persisted in `skills` (see 02 §3.8.4). Each skill has a content hash and a version.
 - Once a run is started, the skill version used is pinned for the duration of the run. Version upgrades do not retroactively change an in-flight run.
 - Updating a skill version creates a new `skills` row with `version = new_version` and `parent_version = old_version`. The previous version remains queryable.
+- A Skill is not a permission container. It can only compose the immutable tool
+  versions allowed by its manifest, workspace binding, Agent grant, and current policy.
+- Beta local recipes are declarative and MUST NOT execute arbitrary package code.
 
 ## 10. A2A and MCP Strategy
 
@@ -423,11 +462,15 @@ v1.0 MUST add:
 - minimal A2A task bridge.
 - safe MCP tool allowlist.
 
-All A2A/MCP delegation MUST go through policy, permission, route decision, and audit logging.
+MCP tool calls use the Tool Broker. A2A remains an AgentAdapter/delegation path;
+both use policy, permission, route decision, owned effects, receipts, ingress
+review, recovery, and audit logging.
 
-The minimal A2A/MCP acceptance contract is defined in [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
+The minimal A2A acceptance contract is defined in [08 Memory, Agent Group,
+Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md).
+The MCP contract is defined in [11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md).
 
-## 10. Artifacts and Outputs
+## 11. Artifacts and Outputs
 
 Every agent/model run MUST produce:
 
@@ -451,7 +494,7 @@ Artifacts MUST have:
 - classification.
 - source event ids.
 
-## 11. Acceptance Criteria
+## 12. Acceptance Criteria
 
 Alpha is accepted when:
 
@@ -463,17 +506,21 @@ Alpha is accepted when:
 - Restricted cloud calls are blocked without exception in Alpha.
 - Model adapters reject calls missing policy gate evidence.
 - Run lifecycle events are complete and ordered, including plan, redaction_engine_invoked, ingress_review, egress_record_recorded.
-- Cancellation writes an audit event and stops pending work; for scheduled/continuous runs, cancel stops after the current iteration.
+- Cancellation writes an audit event and stops pending Alpha work.
 - Model call ledger drives `0 Ogra-managed cloud calls` and shows the egress mode alongside.
 - Agent manifest restrictions are enforced in tests.
-- Agent Group runs in Pipeline, Parallel, and Debate modes with bounded runs and per-step policy/audit.
-- Interval and continuous Agent Group scheduling is part of Alpha with per-iteration and lifetime-level bounds.
-- Skills Market ships built-in and local-recipe skills; every invocation is audited in `skill_invocations`.
+- The `knowledge.search` Tool Broker slice records a pinned version, scoped
+  policy, owned effect, receipt, ingress finding, and accepted Observation.
 - The Ingress Review Agent runs in a separate process boundary and produces structured findings persisted in `ingress_review_findings`; suspicious or malicious findings land in `quarantine_contents` with an incident.
 - The re-sanitize loop terminates only on `approved` or `aborted`, and every iteration is audited in `rejection_resanitize_iterations`.
+- Every externally visible action has an owning frame and durable effect record;
+  crash recovery uses a lease, recovery capsule, reconciliation, and typed
+  revision checks before any callback is retried.
+- Unknown outcomes, stale approvals, changed payloads, sibling-frame repair
+  overreach, and dependency reversal are rejected or escalated before execution.
 - UI can fetch answer, citations, route trace, risk summary, ingress findings, and audit evidence for a run.
 
-## 12. Anti-Patterns
+## 13. Anti-Patterns
 
 MUST NOT introduce:
 
@@ -488,3 +535,10 @@ MUST NOT introduce:
 - A2A/MCP execution before policy and audit foundations are complete.
 - skills loaded into an agent without manifest evaluation and audit.
 - ingress review skipped or co-located with the InternalAgentAdapter that produced the original request.
+- resuming from a ReAct Observation without reconciling the next effect state.
+- reusing an approval after payload fingerprint, redaction rule, policy scope,
+  or target revision changes.
+- automatic retry or compensation when the adapter has no verified recovery
+  contract.
+- M3 Memory used as evidence that an effect succeeded or as authority to repair
+  a frame.

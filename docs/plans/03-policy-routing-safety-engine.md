@@ -299,6 +299,23 @@ Alpha InternalAgentAdapter MUST default to:
 - read only approved workspace RAG chunks.
 - write only run events and optional episodic run summary.
 
+Tool authorization follows
+[11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md).
+An Agent may request only `{toolId, arguments}`; policy context derives the
+workspace, Agent/frame, immutable tool version, binding revision, server config,
+auth generation, destination, data scope, and effect class from Core-owned
+state. A missing/empty manifest or missing binding MUST deny a requested tool;
+it is not an implicit allowlist.
+
+Tool approval MUST bind the canonical sanitized argument hash, target/data
+scope, descriptor/schema hashes, tool and binding versions, effect revision,
+policy/redaction revisions, server config revision, and auth audience/scopes.
+Any change invalidates the approval. MCP server annotations and tool descriptions
+are untrusted inputs and cannot lower Ogra's locally assigned risk/effect class.
+Server config/enable/discovery, schema review, and workspace-binding approvals
+authorize only those administrative operations. They cannot satisfy a concrete
+`tool_invocation` or `recovery_retry` callback approval or consumption record.
+
 ## 11. Run Risk Classification
 
 Every run MUST produce:

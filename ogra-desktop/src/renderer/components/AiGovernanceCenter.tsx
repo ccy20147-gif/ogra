@@ -25,6 +25,34 @@ interface RegisteredModel {
   registeredAt?: string;
 }
 
+export type ApprovalDecisionHandler = (
+  approvalId: string,
+  runId: string,
+  workspaceId: string,
+  decision: 'approve' | 'deny',
+) => Promise<void>;
+
+/**
+ * Keep the async IPC/result boundary testable without giving the component
+ * a local, optimistic "done" path. A rejected Core decision or failed
+ * same-run resume is deliberately surfaced as retryable.
+ */
+export async function invokeApprovalDecision(
+  handler: ApprovalDecisionHandler | undefined,
+  approvalId: string,
+  runId: string,
+  workspaceId: string,
+  decision: 'approve' | 'deny',
+): Promise<{ ok: true } | { ok: false; message: string }> {
+  if (!handler) return { ok: false, message: 'Approval control is unavailable' };
+  try {
+    await handler(approvalId, runId, workspaceId, decision);
+    return { ok: true };
+  } catch (error) {
+    return { ok: false, message: (error as Error)?.message || 'Approval could not be completed' };
+  }
+}
+
 interface GovernanceProps {
   runs: Array<{
     runId: string;
@@ -59,21 +87,19 @@ interface GovernanceProps {
   approvalRequests?: Array<{
     id: string;
     runId?: string;
+    workspaceId?: string;
     approvalType: string;
     requestedScope?: Record<string, unknown>;
+    scopeHash?: string;
+    payloadFingerprint?: string;
+    policyVersionHash?: string;
+    redactionRuleVersion?: string;
+    sanitizedPreview?: string;
     reason?: string;
     createdAt?: string;
   }>;
-  /**
-   * Optional callback invoked when the user clicks Approve / Deny on an
-   * approval row. The renderer-side bridge for `approval.decision` is not
-   * currently exposed in preload; until it is, this is a UI-only callback.
-   */
-  onApprovalDecision?: (approvalId: string, decision: 'approve' | 'deny') => void;
-  /** Optional seed for the approval queue. Shown as a dashed-border
-   *  button when the queue is empty; hidden once a real request is
-   *  present. */
-  onSeedDemoApproval?: () => void;
+  /** Core-backed approval decision and, for approval, same-run resume. */
+  onApprovalDecision?: ApprovalDecisionHandler;
   /** Policy evaluation results for each run */
   policyEvaluations?: PolicyEvaluation[];
   /** Registered models in the workspace */
@@ -150,7 +176,7 @@ const badgeStyle: React.CSSProperties = {
 
 export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
   runs, incidents, policies, requiredApprovals, approvalStatus,
-  approvalRequests = [], onApprovalDecision, onSeedDemoApproval,
+  approvalRequests = [], onApprovalDecision,
   policyEvaluations = [], registeredModels = [], riskDetails = [],
   onExportAudit,
   loading = false,
@@ -158,7 +184,8 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
   const [expandedRunIds, setExpandedRunIds] = useState<Record<string, boolean>>({});
   const [expandedRiskRunIds, setExpandedRiskRunIds] = useState<Record<string, boolean>>({});
   const [exporting, setExporting] = useState<string | null>(null);
-  const [decisionState, setDecisionState] = useState<Record<string, 'approve' | 'deny' | 'pending' | 'done'>>({});
+  const [decisionState, setDecisionState] = useState<Record<string, 'pending' | 'done'>>({});
+  const [decisionErrors, setDecisionErrors] = useState<Record<string, string>>({});
 
   const toggleRunExpand = (runId: string) => {
     setExpandedRunIds(prev => ({ ...prev, [runId]: !prev[runId] }));
@@ -168,15 +195,30 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
     setExpandedRiskRunIds(prev => ({ ...prev, [runId]: !prev[runId] }));
   };
 
-  const handleApprovalDecision = (approvalId: string, decision: 'approve' | 'deny') => {
+  const handleApprovalDecision = async (
+    approvalId: string, runId: string, workspaceId: string, decision: 'approve' | 'deny',
+  ) => {
     setDecisionState(prev => ({ ...prev, [approvalId]: 'pending' }));
-    try {
-      onApprovalDecision?.(approvalId, decision);
-      // Mark decision completed immediately for UX responsiveness.
+    setDecisionErrors(prev => {
+      const next = { ...prev };
+      delete next[approvalId];
+      return next;
+    });
+    const result = await invokeApprovalDecision(
+      onApprovalDecision, approvalId, runId, workspaceId, decision,
+    );
+    if (result.ok) {
       setDecisionState(prev => ({ ...prev, [approvalId]: 'done' }));
-    } catch {
-      setDecisionState(prev => ({ ...prev, [approvalId]: decision }));
+      return;
     }
+    // Do not keep an optimistic done state. The row stays actionable and
+    // the next click can retry an idempotent Core decision/resume.
+    setDecisionState(prev => {
+      const next = { ...prev };
+      delete next[approvalId];
+      return next;
+    });
+    setDecisionErrors(prev => ({ ...prev, [approvalId]: result.message }));
   };
 
   const handleExport = async (format: 'json' | 'csv' | 'pdf') => {
@@ -481,31 +523,10 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
             </>
           )}
 
-          {/* Demo-seed button. The real `approval.decision` IPC is not
-              yet exposed; until then the only way to populate the
-              queue is this button, which adds a synthetic Confidential
-              egress request so the user can exercise the Approve / Deny
-              flow. Hidden once the queue already has items, since the
-              goal is to clear the queue — not to spam it. */}
-          {approvalRequests.length === 0 && onSeedDemoApproval && (
-            <button
-              type="button"
-              onClick={onSeedDemoApproval}
-              title="Adds a synthetic Confidential egress approval so you can try the Approve / Deny flow. Real approval IPC will replace this."
-              style={{
-                marginTop: '4px',
-                padding: '6px 12px',
-                fontSize: '11px',
-                color: '#58a6ff',
-                background: 'transparent',
-                border: '1px dashed #30363d',
-                borderRadius: '4px',
-                cursor: 'pointer',
-              }}
-            >
-              + Seed demo approval (Confidential egress)
-            </button>
-          )}
+          {/* Plan 03 §3.6 / Plan 02 §3.4 — approval rows come from Core
+              via IPC. The renderer never invents them locally; the
+              Approve / Deny buttons below call approval.decision on
+              IpcChannel with the canonical row identity. */}
 
           {/* Individual approval requests with Approve / Deny buttons (spec §10 & §12). */}
           {approvalRequests.length > 0 && (
@@ -554,6 +575,24 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
                         </pre>
                       </details>
                     )}
+                    {req.sanitizedPreview && (
+                      <details style={{ marginBottom: '6px' }}>
+                        <summary style={{ fontSize: '11px', color: '#3fb950', cursor: 'pointer' }}>
+                          Sanitized egress preview
+                        </summary>
+                        <pre style={{
+                          margin: '4px 0 0', padding: '6px 8px', background: '#161b22',
+                          borderRadius: '4px', fontSize: '11px', color: '#c9d1d9',
+                          overflow: 'auto', overflowWrap: 'anywhere', whiteSpace: 'pre-wrap',
+                          maxHeight: '180px', maxWidth: '100%',
+                        }}>
+                          {req.sanitizedPreview}
+                        </pre>
+                        <div style={{ fontSize: '10px', color: '#8b949e', marginTop: '4px', overflowWrap: 'anywhere' }}>
+                          Payload: {req.payloadFingerprint} | Rule: {req.redactionRuleVersion}
+                        </div>
+                      </details>
+                    )}
                     {req.createdAt && (
                       <div style={{ fontSize: '10px', color: '#484f58', marginBottom: '6px' }}>
                         Created: {req.createdAt}
@@ -561,13 +600,15 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
                     )}
                     {state === 'done' ? (
                       <div style={{ fontSize: '12px', color: '#3fb950' }}>
-                        Decision recorded (audit event pending preload bridge).
+                        Decision and run state confirmed.
                       </div>
                     ) : (
                       <div style={{ display: 'flex', gap: '8px' }}>
                         <button
                           type="button"
-                          onClick={() => handleApprovalDecision(req.id, 'approve')}
+                          onClick={() => handleApprovalDecision(
+                            req.id, req.runId ?? '', req.workspaceId ?? '', 'approve',
+                          )}
                           disabled={state === 'pending'}
                           aria-label={`Approve ${req.approvalType}`}
                           style={{
@@ -586,7 +627,9 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
                         </button>
                         <button
                           type="button"
-                          onClick={() => handleApprovalDecision(req.id, 'deny')}
+                          onClick={() => handleApprovalDecision(
+                            req.id, req.runId ?? '', req.workspaceId ?? '', 'deny',
+                          )}
                           disabled={state === 'pending'}
                           aria-label={`Deny ${req.approvalType}`}
                           style={{
@@ -603,6 +646,11 @@ export const AiGovernanceCenter: React.FC<GovernanceProps> = ({
                         >
                           {state === 'pending' ? '...' : 'Deny'}
                         </button>
+                      </div>
+                    )}
+                    {decisionErrors[req.id] && (
+                      <div role="alert" style={{ marginTop: '6px', fontSize: '11px', color: '#f85149' }}>
+                        {decisionErrors[req.id]}
                       </div>
                     )}
                   </div>

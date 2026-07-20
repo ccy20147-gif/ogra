@@ -75,6 +75,19 @@ contextBridge.exposeInMainWorld('ogra', {
     start: (req: unknown) => ipcRenderer.invoke(IpcChannel.RunStart, req),
     status: (runId: string) => ipcRenderer.invoke(IpcChannel.RunStatus, runId),
     cancel: (runId: string) => ipcRenderer.invoke(IpcChannel.RunCancel, runId),
+    createId: (req: { workspaceId: string; task: string }) => ipcRenderer.invoke(IpcChannel.RunCreateId, req),
+  },
+  // Approval API (Sequence 0 Plan 03 §3.6)
+  approval: {
+    request: (req: { runId: string; workspaceId: string; approvalType: string;
+                       requestedScope: Record<string, unknown>; reason?: string }) =>
+      ipcRenderer.invoke(IpcChannel.ApprovalRequest, req),
+    decision: (req: { approvalId: string; runId: string; workspaceId: string;
+                        decision: 'approved' | 'denied'; decidedBy?: string;
+                        reason?: string }) =>
+      ipcRenderer.invoke(IpcChannel.ApprovalDecision, req),
+    list: (workspaceId: string) =>
+      ipcRenderer.invoke(IpcChannel.ApprovalList, { workspaceId }),
   },
   // Route decision
   route: {
@@ -140,6 +153,15 @@ export interface OgraAPI {
     start: (req: unknown) => Promise<IpcResult>;
     status: (runId: string) => Promise<IpcResult>;
     cancel: (runId: string) => Promise<IpcResult>;
+  };
+  approval: {
+    request: (req: { runId: string; workspaceId: string; approvalType: string;
+                       requestedScope: Record<string, unknown>; reason?: string }) =>
+      Promise<IpcResult>;
+    decision: (req: { approvalId: string; runId: string; workspaceId: string;
+                        decision: 'approved' | 'denied'; decidedBy?: string;
+                        reason?: string }) => Promise<IpcResult>;
+    list: (workspaceId: string) => Promise<IpcResult>;
   };
   route: {
     fetch: (runId: string) => Promise<IpcResult>;

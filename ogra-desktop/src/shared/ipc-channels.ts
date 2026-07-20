@@ -22,8 +22,13 @@ export enum IpcChannel {
   RunStart = 'run:start',
   RunStatus = 'run:status',
   RunCancel = 'run:cancel',
+  RunCreateId = 'run:create-id',
   RunResult = 'run:result',
   RunHistory = 'run:history',
+  // Approvals — Sequence 0 Plan 03 §3.6 / plan 02 §3.4
+  ApprovalRequest = 'approval:request',
+  ApprovalList = 'approval:list',
+  ApprovalDecision = 'approval:decision',
 
   // Route Decision
   RouteDecisionFetch = 'route-decision:fetch',
@@ -58,10 +63,6 @@ export enum IpcChannel {
   // Permissions
   PermissionRequest = 'permission:request',
   PermissionDecision = 'permission:decision',
-
-  // Approvals
-  ApprovalRequest = 'approval:request',
-  ApprovalDecision = 'approval:decision',
 
   // Policy
   PolicyDryRun = 'policy:dry-run',
@@ -142,6 +143,31 @@ export interface RunStartRequest {
   knowledgeBaseIds?: string[];
   requestedModel?: string;
   requestedProvider?: string;
+  /**
+   * Sequence 0 — Plan 02 §3.4 / Plan 03 §3.6:
+   * approve-then-egress carries the approval id that was bound to
+   * the SAME run_id by a prior ApprovalRequest. Core rejects any
+   * approval_id that is not bound (runId, scope, payload, policy,
+   * expiry) to the run that this RunStart will execute.
+   */
+  approvalId?: string;
+  /**
+   * Sequence 0 — for an approval-required run, the renderer MUST
+   * start the run TWICE: first without approvalId (Core parks
+   * it at awaiting_approval), then a second time with the same
+   * runId + approvalId to actually drive the model. Direct
+   * forging of approvalId on a fresh runId is rejected because
+   * no canonical approval row matches.
+   */
+  resumeRunId?: string;
+  // P0 #1: payloadFingerprint is no longer caller-supplied. It is
+  // always computed from the redacted egress preview hash inside
+  // RunService. The renderer cannot influence the approval binding.
+  /**
+   * P1 #4: pre-allocated runId from `run:create-id` IPC. Lets the
+   * renderer wire a cancel button BEFORE startRun resolves.
+   */
+  preallocatedRunId?: string;
 }
 
 export interface RouteDecisionResponse {

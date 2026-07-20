@@ -37,6 +37,26 @@ export interface OgraAPI {
     start: (req: unknown) => Promise<IpcResult>;
     status: (runId: string) => Promise<IpcResult>;
     cancel: (runId: string) => Promise<IpcResult>;
+    createId: (req: { workspaceId: string; task: string }) => Promise<IpcResult>;
+  };
+  /** Sequence 0 Plan 03 §3.6 — approve-then-egress tier. */
+  approval: {
+    request: (req: {
+      runId: string;
+      workspaceId: string;
+      approvalType: string;
+      requestedScope: Record<string, unknown>;
+      reason?: string;
+    }) => Promise<IpcResult>;
+    decision: (req: {
+      approvalId: string;
+      runId: string;
+      workspaceId: string;
+      decision: 'approved' | 'denied';
+      decidedBy?: string;
+      reason?: string;
+    }) => Promise<IpcResult>;
+    list: (workspaceId: string) => Promise<IpcResult>;
   };
   route: {
     fetch: (runId: string) => Promise<IpcResult>;

@@ -524,14 +524,17 @@ export class DatabaseService {
     adapterKind: string;
     providerId: string;
     modelId: string;
+    modelInternalId?: string;
     routeDecisionId?: string;
     isCloud: boolean;
     promptHash?: string;
     requestPayloadHash?: string;
     uploadedPayloadHash?: string;
+    httpBodyHash?: string;
     responseHash?: string;
     redactionRuleVersion?: string;
     approvalId?: string;
+    policyVersionHash?: string;
     tokenUsage?: { prompt: number; completion: number; total: number };
     errorCode?: string;
     startedAt: string;
@@ -539,15 +542,18 @@ export class DatabaseService {
   }): void {
     this.db.getDB().prepare(`
       INSERT INTO model_calls (id, run_id, status, adapter_kind, provider_id, model_id,
-        route_decision_id, is_cloud, prompt_hash, request_payload_hash, uploaded_payload_hash,
-        response_hash, redaction_rule_version, approval_id,
-        token_usage_json, error_code, started_at, completed_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        model_internal_id, route_decision_id, is_cloud, prompt_hash, request_payload_hash,
+        uploaded_payload_hash, http_body_hash, response_hash, redaction_rule_version, approval_id,
+        policy_version_hash, token_usage_json, error_code, started_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       call.id, call.runId, call.status, call.adapterKind, call.providerId, call.modelId,
+      call.modelInternalId ?? null,
       call.routeDecisionId || null, call.isCloud ? 1 : 0,
       call.promptHash || null, call.requestPayloadHash || null, call.uploadedPayloadHash || null,
+      call.httpBodyHash || null,
       call.responseHash || null, call.redactionRuleVersion || null, call.approvalId || null,
+      call.policyVersionHash || null,
       call.tokenUsage ? JSON.stringify(call.tokenUsage) : null,
       call.errorCode || null, call.startedAt, call.completedAt || null,
     );

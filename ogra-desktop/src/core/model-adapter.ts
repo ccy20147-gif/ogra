@@ -22,6 +22,7 @@ export interface ModelRequest {
   policyVersionHash: string;
   allowedProviderId: string;
   allowedModelId: string;
+  modelInternalId?: string;
   promptParts: Array<{
     role: 'system' | 'developer' | 'user' | 'assistant' | 'context';
     content: string;
@@ -29,8 +30,19 @@ export interface ModelRequest {
   }>;
   contextSourceIds: string[];
   approvalId?: string;
+  /**
+   * Scope hash bound to the approval row at the time it was granted.
+   * Adapters that perform their own scoping can check this against
+   * the approval row before sending.
+   */
+  approvalScopeHash?: string;
   payloadHash: string;
   routeDecisionSnapshot: Record<string, unknown>;
+  /**
+   * AbortSignal the adapter MUST honor to honor cancellation.
+   * Adapters that ignore this signal fail closed.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ModelResult {
@@ -45,8 +57,19 @@ export interface ModelResult {
   modelId: string;
   providerId: string;
   responseHash: string;
+  /**
+   * P0: sha256 of the exact JSON body sent to the provider's HTTP
+   * endpoint. This is the hash of the ACTUAL bytes that left the
+   * machine — not the egress payload hash (which covers the
+   * pre-serialization redacted preview). Both hashes are persisted
+   * so the audit chain can verify that the redacted preview and
+   * the HTTP body are consistent.
+   */
+  httpBodyHash: string;
   startedAt: string;
   completedAt: string;
+  /** Which redaction rule set was applied at egress, if any. */
+  redactionRuleVersion?: string;
 }
 
 export interface ModelEvent {

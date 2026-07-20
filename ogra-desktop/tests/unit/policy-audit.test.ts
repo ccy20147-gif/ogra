@@ -8,7 +8,7 @@ describe('Policy Engine', () => {
   const auditService = new AuditService();
   const policyService = new PolicyService(auditService);
 
-  it('should block Confidential data from cloud', async () => {
+  it('should require approval for Confidential data cloud egress (default)', async () => {
     const input: PolicyEvaluationInput = {
       workspaceId: 'ws_test',
       dataClassification: DataClassification.Confidential,
@@ -16,9 +16,36 @@ describe('Policy Engine', () => {
       requiresCloud: true,
     };
     const result = await policyService.evaluate(input);
-    expect(result.decision).toBe('blocked');
+    // Sequence 0 (Plan 03 §3.6): Confidential + cloud no-approval
+    // is require_approval (route=blocked), not decision=blocked.
+    // The redact_then_egress tier takes over when an approved row
+    // exists; without it, the run is held at require_approval.
+    expect(result.decision).toBe('require_approval');
     expect(result.route).toBe('blocked');
-    expect(result.reasons.some(r => r.toLowerCase().includes('confidential'))).toBe(true);
+    expect(result.requiredApprovals).toContain('allow_confidential_redacted_cloud');
+  });
+
+  it('Confidential + cloud + approved approval → redact_then_egress', async () => {
+    const result = await policyService.evaluate({
+      workspaceId: 'ws_test',
+      dataClassification: DataClassification.Confidential,
+      requestedCompute: 'cloud',
+      requiresCloud: true,
+      hasUserApproval: true,
+      providerIsLocal: false,
+    });
+    expect(result.decision).toBe('allow');
+    expect(result.route).toBe('redact_then_egress');
+  });
+
+  it('blocks Restricted data from cloud', async () => {
+    const input: PolicyEvaluationInput = {
+      workspaceId: 'ws_test',
+      dataClassification: DataClassification.Restricted,
+      requestedCompute: 'cloud',
+    };
+    const result = await policyService.evaluate(input);
+    expect(result.decision).toBe('blocked');
   });
 
   it('should route Confidential data local only', async () => {
@@ -78,7 +105,7 @@ describe('Policy Engine', () => {
     expect(result.reasons.some(r => r.toLowerCase().includes('default'))).toBe(true);
   });
 
-  it('should implement deny-first priority', async () => {
+  it('should implement require_approval priority for Confidential', async () => {
     const input: PolicyEvaluationInput = {
       workspaceId: 'ws_test',
       dataClassification: DataClassification.Confidential,
@@ -86,7 +113,8 @@ describe('Policy Engine', () => {
       providerId: 'any_provider',
     };
     const result = await policyService.evaluate(input);
-    expect(result.decision).toBe('blocked');
+    // Sequence 0 (Plan 03 §3.6): no approved approval → require_approval.
+    expect(result.decision).toBe('require_approval');
   });
 });
 

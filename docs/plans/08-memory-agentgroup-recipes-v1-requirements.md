@@ -159,6 +159,22 @@ All objects that can influence a run MUST link back to run events, policy evalua
 
 Beta MUST implement M3 Memory Center.
 
+M3 is a derived knowledge layer, not the durable execution journal. Ogra uses
+the following authority hierarchy, aligned with
+[10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md):
+
+```text
+L0 Runtime State   frames, effects, revisions, approvals, receipts
+L1 Audit Evidence  hash-chain events and repair lineage
+L2 Episodic        source-linked run/frame outcome summaries
+L3 Semantic        user-confirmed facts derived from accepted evidence
+L4 Procedural      user-confirmed reusable tool/route/repair patterns
+```
+
+Only L0/L1 are authoritative for effect outcome, recovery, approval, and repair.
+L2-L4 may inform a future plan but cannot mutate an open repair transaction or
+authorize a callback.
+
 ### 3.1 Memory Types
 
 The memory store MUST support:
@@ -174,6 +190,12 @@ episodic_memories
   source_file_ids_json
   source_route_decision_id
   source_event_ids_json
+  source_frame_ids_json
+  source_effect_ids_json
+  source_revision_json
+  source_evidence_hash
+  verification_status: current | stale | unverifiable
+  verified_at
   confidence
   scope
   created_at
@@ -188,6 +210,13 @@ semantic_memories
   source_run_id
   source_file_ids_json
   source_route_decision_id
+  source_event_ids_json
+  source_frame_ids_json
+  source_effect_ids_json
+  source_revision_json
+  source_evidence_hash
+  verification_status: current | stale | unverifiable
+  verified_at
   confidence
   user_confirmed
   scope
@@ -204,6 +233,13 @@ procedural_memories
   route_policy_id
   failure_notes
   source_run_id
+  source_frame_ids_json
+  source_effect_ids_json
+  source_event_ids_json
+  source_revision_json
+  source_evidence_hash
+  verification_status: current | stale | unverifiable
+  verified_at
   user_confirmed
   scope
   created_at
@@ -233,6 +269,14 @@ Beta MUST:
 - enforce memory read/write policy before injection into any run.
 - include memory access in run risk classification.
 - include memory assets in Data Safety Center.
+- derive automatic episodic summaries only from terminal frames and accepted
+  audit evidence.
+- retain source frame/effect/event identifiers, source revision/hash, and
+  verification status for every memory type.
+- mark a memory stale or unverifiable when its source evidence no longer matches;
+  never silently refresh provenance.
+- revalidate current policy, approval, scope, payload, and runtime revision
+  immediately before any memory-informed side effect.
 
 MUST NOT:
 
@@ -240,6 +284,8 @@ MUST NOT:
 - inject all memories into all agents by default.
 - create source-less memory.
 - make memory undeletable.
+- use Memory as proof of an external outcome, reuse a historical approval from
+  Memory, authorize a cross-frame effect, or change an open recovery decision.
 
 ## 4. Agent Group Requirements
 
@@ -377,19 +423,20 @@ Streaming, complex auth delegation, and complex artifact negotiation MAY be phas
 
 ### 7.2 MCP Tool Access
 
-v1.0 MCP support MUST include:
+v1.0 MCP support MUST implement the tools-only T4/T5 contract in
+[11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md):
 
-- tool registry.
-- tool manifest.
-- permission prompt.
-- workspace scope.
-- data classification compatibility.
-- policy check before invocation.
-- input/output hashing.
-- audit event.
-- incident on denial or suspicious output.
+- immutable descriptor/schema versions and explicit workspace bindings;
+- local stdio before remote Streamable HTTP/OAuth;
+- policy and scoped approval before server lifecycle/discovery and invocation;
+- one authoritative owned effect and receipt lineage per invocation;
+- independent catalog/result ingress review and quarantine before Observation;
+- schema/list-change invalidation, unknown-outcome fail-closed recovery, and
+  visible isolation/recovery grades.
 
 MCP tools MUST be disabled by default for sensitive workspaces until explicitly allowed.
+Resources, prompts, roots, sampling, and elicitation remain disabled until each
+has a separate policy, approval, data-flow, audit, UI, and release contract.
 
 ## 8. Data Safety and Governance Expansion
 
@@ -419,15 +466,13 @@ Beta/v1 MUST extend AI Governance Center to include:
 Beta UI MUST include:
 
 - M3 Memory Center.
-- Pipeline Agent Group Board.
+- Pipeline, Parallel, and Debate Agent Group Board modes.
 - recipe save/reuse flow.
 - LocalCommandAgentAdapter read-only permission flow.
 - audit export flow.
 
 v1.0 UI MUST include:
 
-- Parallel Agent Group Board.
-- Debate Agent Group Board.
 - self-building recommendation panel.
 - recipe library.
 - A2A/MCP permission surfaces.
@@ -451,11 +496,17 @@ Every Agent Group board MUST expose:
 Beta can be called complete only when:
 
 - M3 episodic memory is automatically written and source-linked.
+- every memory exposes source frame/effect/event lineage, revision/hash, and
+  current/stale/unverifiable status.
+- stale or edited Memory cannot authorize an effect or change an open recovery
+  transaction.
 - semantic/procedural memory requires explicit confirmation.
 - memory edit/delete/tombstone flows work.
 - memory read/write policy is enforced and audited.
 - Data Safety Center lists memory and embedding index assets.
 - 3-agent Pipeline is bounded, cancellable, auditable, and policy-aware.
+- Parallel and Debate are bounded, cancellable, auditable, and policy-aware,
+  with deterministic Merge and Judge steps.
 - Pipeline per-step route/model/tool evidence is visible.
 - recipes can be saved and reused locally.
 - redaction preview is usable and audited.
@@ -467,12 +518,13 @@ Beta can be called complete only when:
 v1.0 can be called complete only when:
 
 - Agent Group is the main work surface.
-- Pipeline, Parallel, and Debate modes are implemented.
+- Pipeline, Parallel, and Debate modes remain the main work surface.
 - all Agent Group modes are bounded, cancellable, auditable, and policy-aware.
 - user-confirmed self-building organization works end to end.
 - recipe recommendation, approval/rejection, and workflow save are audited.
 - A2A-compatible bridge maps external tasks into internal runs and returns final artifacts/results.
-- MCP tool access is disabled by default and works through manifest, permission, policy, and audit.
+- MCP tool access is disabled by default and passes plan 11 T4/T5 security,
+  recovery, ingress, governance, and audit gates.
 - at least one external local agent adapter family is evaluated and graded, with its control limitations visible.
 - Data Safety Center covers workspace, knowledge base, folder, file, memory, embedding index, recipe, agent group, artifact, MCP, A2A, and local agent adapter assets.
 - AI Governance Center covers Agent Group runs, per-step risk, memory approvals, self-building approvals, local agent incidents, MCP/A2A incidents, and adapter audit levels.

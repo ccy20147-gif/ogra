@@ -4,6 +4,8 @@
 > **日期**：2026-07-02
 > **基于**：[Ogra / Ogra Edge 产品手册 v0.1](../../ogra-product-handbook.md)
 > **阶段**：Alpha 核心闭环验证
+> **状态**：历史 PRD，已被当前产品手册与 `docs/plans/00` 的
+> Hybrid-Default Alpha 合同取代；本文件只保留原始需求背景，不作为实施或验收依据。
 
 ## 1. 目标与定位
 

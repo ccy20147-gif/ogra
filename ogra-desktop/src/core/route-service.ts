@@ -85,6 +85,13 @@ export class RouteService {
         } else if (policyResult.route === 'hybrid') {
           route = RouteDecisionType.Hybrid;
           assignedAdapter = 'internal'; // internal adapter orchestrates hybrid
+        } else if (policyResult.route === RouteDecisionType.Redact_Then_Egress) {
+          // Plan 03 §3.6 — Approve-then-Egress tier. The internal
+          // adapter still owns the call (it runs redact_then_egress),
+          // but route is recorded as 'redact_then_egress' for the
+          // audit chain and for the agent's redaction gate.
+          route = RouteDecisionType.Redact_Then_Egress;
+          assignedAdapter = 'internal';
         } else {
           route = RouteDecisionType.Local;
           assignedAdapter = 'internal';
