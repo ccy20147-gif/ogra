@@ -70,6 +70,7 @@ import {
   PlannedEffectRequest,
   ReceiptAppendRequest,
   RecoveryLease,
+  RepairCommitAuthority,
   RepairCreateRequest,
   RepairStatus,
   RepairTransaction,
@@ -77,6 +78,8 @@ import {
   RunFrame,
 } from './durable-runtime-types';
 import { OgraDatabase } from './database';
+import type { EncryptedCapsuleStore, OpenCapsule } from './capsule-store';
+import type { RecoveryConditionChecker } from './recovery-service';
 
 /** Generic sqlite3-style row returned by db.getDB().prepare(...).get()/.all(). */
 type SqliteRow = Record<string, unknown>;
@@ -104,6 +107,15 @@ export interface StateTransitionEventMeta {
 }
 
 export class DurableRuntimeService {
+  /**
+   * The protocol attaches the workspace-keyed capsule verifier at startup.
+   * It deliberately lives behind a narrow setter to keep the M0 runtime
+   * usable by legacy projection tests, while M1 content-addressed capsule
+   * evidence is never accepted without an AEAD verification capability.
+   */
+  private capsuleStore: EncryptedCapsuleStore | null = null;
+  private repairConditionChecker: RecoveryConditionChecker | null = null;
+
   constructor(
     private readonly db: OgraDatabase,
     /** Caller supplies policy version hash so the runtime never
@@ -117,6 +129,24 @@ export class DurableRuntimeService {
   /** Convenience accessor for tests / future wiring. */
   getDatabase(): OgraDatabase {
     return this.db;
+  }
+
+  /** Current redaction authority for protocol evidence. OgraCore supplies
+   * this from RedactionService; the constructor default remains solely for
+   * legacy M0 fixtures that do not construct a Core. */
+  getCurrentRedactionRuleVersion(): string {
+    return this.getRedactionRuleVersion();
+  }
+
+  attachCapsuleStore(capsuleStore: EncryptedCapsuleStore): void {
+    this.capsuleStore = capsuleStore;
+  }
+
+  /** Production installs the same current policy/route gate used by recovery.
+   * The legacy synchronous repair API then fails closed for M1 effects rather
+   * than silently skipping an async policy evaluation. */
+  attachRepairConditionChecker(checker: RecoveryConditionChecker): void {
+    this.repairConditionChecker = checker;
   }
 
   /* ============================================================
@@ -431,6 +461,14 @@ export class DurableRuntimeService {
       throw new OgraError(OgraErrorCode.EFFECT_INVALID_TRANSITION,
         `effect ${req.effectId}: ${current.state} -> ${req.nextState} is not allowed`);
     }
+    // Callback intent is security-sensitive protocol work: it binds a sealed
+    // capsule, approval consumption, audit event and state CAS atomically.
+    // Generic runtime transitions must never manufacture an invocation.
+    if (req.nextState === 'in_flight'
+        && (current.state === 'planned' || current.state === 'unknown')) {
+      throw new OgraError(OgraErrorCode.EFFECT_INVALID_TRANSITION,
+        `${current.state} -> in_flight is reserved for EffectProtocolService`);
+    }
     // unknown -> in_flight gate.
     if (current.state === 'unknown' && req.nextState === 'in_flight') {
       if (!req.leaseHolder || req.nextAttemptNo === null) {
@@ -634,6 +672,44 @@ export class DurableRuntimeService {
    * ============================================================ */
 
   createRepair(req: RepairCreateRequest): RepairTransaction {
+    if (this.repairConditionChecker && this.hasM1RepairEvidence(req)) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        'M1 repair requires createRepairWithCurrentConditions()');
+    }
+    return this.createRepairInternal(req);
+  }
+
+  async createRepairWithCurrentConditions(req: RepairCreateRequest): Promise<RepairTransaction> {
+    if (!this.repairConditionChecker) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        'M1 repair current policy/route verifier is not configured');
+    }
+    for (const step of req.proposedPlan) {
+      const effect = this.readEffect(step.effectId);
+      const result = await this.repairConditionChecker.check({
+        effect,
+        approvalId: effect.currentApprovalId,
+        policyVersionHash: effect.policyVersionHash,
+        routeDecisionId: effect.routeDecisionId,
+        payloadFingerprint: effect.payloadFingerprint,
+        scopeHash: effect.scopeHash,
+      });
+      if (!result.ok) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} current policy/route check failed: ${result.reason ?? 'unknown'}`);
+      }
+    }
+    return this.createRepairInternal(req);
+  }
+
+  private hasM1RepairEvidence(req: RepairCreateRequest): boolean {
+    return req.proposedPlan.some(step => {
+      const effect = this.readEffect(step.effectId);
+      return !!(effect.routeDecisionId || effect.policyVersionHash || effect.capsuleFingerprint);
+    });
+  }
+
+  private createRepairInternal(req: RepairCreateRequest): RepairTransaction {
     const target = this.readFrame(req.targetFrameId);
     if (target.runId !== req.runId) {
       throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
@@ -665,14 +741,30 @@ export class DurableRuntimeService {
             target_subtree_revision, authorized_effect_revisions_json,
             proposed_plan_json, verification_result_json, status, created_event_id,
             created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, '{}', 'open', ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
         `).run(
           id, req.runId, req.targetFrameId,
           req.expectedSubtreeRevision,
           JSON.stringify(req.authorizedEffectRevisions),
-          JSON.stringify(req.proposedPlan), eventId,
+          JSON.stringify(req.proposedPlan),
+          JSON.stringify({ crossFrameApprovalIds: req.crossFrameApprovalIds ?? {} }),
+          eventId,
           now, now,
         );
+        for (const step of req.proposedPlan) {
+          const approvalId = req.crossFrameApprovalIds?.[step.effectId];
+          if (!approvalId) continue;
+          this.db.getDB().prepare(`
+            INSERT INTO repair_cross_frame_authorizations (id, repair_transaction_id,
+              run_id, target_frame_id, effect_id, effect_revision, approval_id,
+              created_event_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          `).run(
+            `rcfa_${crypto.randomBytes(6).toString('hex')}`, id, req.runId,
+            req.targetFrameId, step.effectId, step.expectedEffectRevision,
+            approvalId, eventId,
+          );
+        }
         for (let i = 0; i < req.proposedPlan.length; i++) {
           this.db.getDB().prepare(`
             INSERT INTO repair_steps (id, repair_transaction_id,
@@ -718,18 +810,36 @@ export class DurableRuntimeService {
       }
       seen.add(step.effectId);
       const effect = this.readEffect(step.effectId);
-      // (c) sibling overreach: effect must belong to target subtree
-      // OR have explicit authorization via authorizedFrameIds.
+      if (effect.runId !== req.runId) {
+        throw new OgraError(OgraErrorCode.EFFECT_OWNER_MISMATCH,
+          `effect ${effect.id} belongs to a different run`);
+      }
+      // (c) sibling overreach: a request-local list is never authority. An
+      // out-of-subtree effect needs an approved, exact-scope durable approval
+      // that will be copied into repair_cross_frame_authorizations with the
+      // generated repair id in the same event transaction.
       if (!this.isInSubtree(effect.ownerFrameId, target.id)) {
-        throw new OgraError(OgraErrorCode.REPAIR_SIBLING_OVERREACH,
-          `effect ${effect.id} is outside target frame subtree ${target.id}`);
+        if ((req.authorizedCrossFrameEffectIds ?? []).includes(effect.id)) {
+          throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+            `effect ${effect.id} cross-frame ids are not durable authority`);
+        }
+        this.verifyCrossFrameApproval(
+          req.crossFrameApprovalIds?.[effect.id] ?? null,
+          req.runId, target.id, effect, step.expectedEffectRevision,
+        );
       }
       // (d) revision snapshot must match effect's current revision
-      if (!req.authorizedEffectRevisions.includes(step.expectedEffectRevision)
+      if (req.authorizedEffectRevisions[effect.id] !== step.expectedEffectRevision
           || effect.effectRevision !== step.expectedEffectRevision) {
         throw new OgraError(OgraErrorCode.REPAIR_INVALID,
           `effect ${effect.id} revision drift: expected ${step.expectedEffectRevision} but was ${effect.effectRevision}`);
       }
+      if (!effect.allowedRepairActions.includes(step.action)
+          || !this.isRepairActionAllowedInState(step.action, effect.state)) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `repair action ${step.action} is not permitted for effect ${effect.id} in ${effect.state}`);
+      }
+      this.verifyRepairEffectEvidence(effect);
     }
     // (e) dependencies must appear before dependents in the plan
     const stepIndexByEffect = new Map<string, number>();
@@ -750,10 +860,212 @@ export class DurableRuntimeService {
     }
   }
 
+  private verifyCrossFrameApproval(
+    approvalId: string | null, runId: string, targetFrameId: string,
+    effect: RunEffect, expectedEffectRevision: number,
+  ): void {
+    if (!approvalId) {
+      throw new OgraError(OgraErrorCode.REPAIR_SIBLING_OVERREACH,
+        `effect ${effect.id} is outside target frame subtree ${targetFrameId}`);
+    }
+    const approval = this.db.getDB().prepare(`
+      SELECT run_id, approval_type, decision, expires_at, effect_id,
+             effect_revision, requested_scope_json, payload_fingerprint,
+             scope_hash, policy_version_hash
+        FROM approvals WHERE id = ?
+    `).get(approvalId) as {
+      run_id: string | null; approval_type: string; decision: string;
+      expires_at: string | null; effect_id: string | null;
+      effect_revision: number | null; requested_scope_json: string | null;
+      payload_fingerprint: string | null; scope_hash: string | null;
+      policy_version_hash: string | null;
+    } | undefined;
+    let scope: Record<string, unknown> | null = null;
+    try { scope = approval?.requested_scope_json ? JSON.parse(approval.requested_scope_json) : null; } catch { /* fail below */ }
+    if (!approval || approval.decision !== 'approved'
+        || approval.approval_type !== 'repair_cross_frame'
+        || (approval.expires_at && approval.expires_at <= new Date().toISOString())
+        || approval.run_id !== runId || approval.effect_id !== effect.id
+        || approval.effect_revision !== expectedEffectRevision
+        || approval.payload_fingerprint !== effect.payloadFingerprint
+        || approval.scope_hash !== effect.scopeHash
+        || approval.policy_version_hash !== effect.policyVersionHash
+        || !scope || scope.runId !== runId || scope.targetFrameId !== targetFrameId
+        || scope.effectId !== effect.id || scope.effectRevision !== expectedEffectRevision) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        `effect ${effect.id} cross-frame approval is missing, stale, or out of scope`);
+    }
+  }
+
+  private isRepairActionAllowedInState(action: string, state: EffectState): boolean {
+    switch (action) {
+      case 'retry': return state === 'planned' || state === 'unknown' || state === 'failed';
+      case 'compensate': return state === 'committed';
+      case 'amend': return state === 'planned' || state === 'unknown';
+      case 'reconcile': return state === 'in_flight' || state === 'unknown' || state === 'received';
+      case 'preserve': return !['compensated', 'cancelled_before_send'].includes(state);
+      case 'escalate': return true;
+      default: return false;
+    }
+  }
+
+  /** Repair is a durable authorization boundary, not a graph edit. */
+  private verifyRepairEffectEvidence(effect: RunEffect): void {
+    if (!effect.callbackCapsuleRef || !effect.callbackCapsuleHash
+        || !effect.callbackCapsuleFormatVersion || !effect.idempotencyKeyRef
+        || !effect.idempotencyKeyHash) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        `effect ${effect.id} is missing callback capsule or idempotency evidence`);
+    }
+    // Real M1 capsule refs are content-addressed SHA-256 values.  Opaque
+    // legacy projections have no immutable, decryptable provenance and must
+    // never be accepted once the M1 capsule authority is wired.  The sole
+    // compatibility boundary is an M0-only runtime without a capsule store;
+    // it cannot execute M1 recovery and therefore cannot use this as an
+    // externally visible retry path.
+    const hasContentAddressedRef = /^[a-f0-9]{64}$/i.test(effect.callbackCapsuleRef);
+    if (!hasContentAddressedRef && this.capsuleStore) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        `effect ${effect.id} has opaque legacy callback provenance; M1 repair is prohibited`);
+    }
+    if (hasContentAddressedRef) {
+      if (!this.capsuleStore) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} sealed callback cannot be verified without a capsule store`);
+      }
+      let opened: OpenCapsule<{
+        egressPayloadFingerprint?: unknown;
+        idempotencyKeyHash?: unknown;
+        idempotencyKey?: unknown;
+      }>;
+      try {
+        opened = this.capsuleStore.open(effect.callbackCapsuleRef);
+      } catch {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} callback capsule cannot be authenticated`);
+      }
+      const expectedCapsuleFingerprint = effect.capsuleFingerprint ?? effect.payloadFingerprint;
+      const idempotencyKey = opened.payload?.idempotencyKey;
+      const recomputedIdempotencyHash = typeof idempotencyKey === 'string'
+        ? crypto.createHash('sha256').update(idempotencyKey).digest('hex')
+        : null;
+      const canonicalCallbackFingerprint = crypto.createHash('sha256')
+        .update(canonicalJSON(opened.payload)).digest('hex');
+      if (opened.verifiedHash !== effect.callbackCapsuleHash
+          || opened.binding.capsuleKind !== 'callback'
+          || opened.binding.formatVersion !== effect.callbackCapsuleFormatVersion
+          || opened.binding.runId !== effect.runId
+          || opened.binding.effectId !== effect.id
+          || opened.binding.adapterKind !== effect.adapterKind
+          || opened.binding.payloadFingerprint !== expectedCapsuleFingerprint
+          || canonicalCallbackFingerprint !== expectedCapsuleFingerprint
+          || opened.payload?.egressPayloadFingerprint !== effect.payloadFingerprint
+          || opened.payload?.idempotencyKeyHash !== effect.idempotencyKeyHash
+          || recomputedIdempotencyHash !== effect.idempotencyKeyHash
+          || effect.idempotencyKeyRef !== effect.callbackCapsuleRef) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} callback capsule/idempotency evidence is not intact`);
+      }
+      // A real M1 sealed effect has no legitimate unscoped repair path.
+      // Keep the M0 projection compatibility below, but require current
+      // route/policy evidence before a content-addressed callback can enter
+      // a repair transaction.
+      if (!effect.routeDecisionId || !effect.policyVersionHash) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} is missing route or policy evidence`);
+      }
+    }
+    let routeKind: string | null = null;
+    if (effect.routeDecisionId) {
+      const route = this.db.getDB().prepare(
+        'SELECT route FROM route_decisions WHERE id = ? AND run_id = ?',
+      ).get(effect.routeDecisionId, effect.runId) as { route: string } | undefined;
+      if (!route || route.route === 'blocked') {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} route is missing or blocked`);
+      }
+      routeKind = route.route;
+    }
+    if (effect.currentApprovalId) {
+      const approval = this.db.getDB().prepare(
+        `SELECT decision, expires_at, payload_fingerprint, scope_hash, policy_version_hash
+           FROM approvals WHERE id = ?`,
+      ).get(effect.currentApprovalId) as {
+        decision: string; expires_at: string | null; payload_fingerprint: string | null;
+        scope_hash: string | null; policy_version_hash: string | null;
+      } | undefined;
+      if (!approval || approval.decision !== 'approved'
+          || (approval.expires_at && approval.expires_at <= new Date().toISOString())
+          || approval.payload_fingerprint !== effect.payloadFingerprint
+          || approval.scope_hash !== effect.scopeHash
+          || approval.policy_version_hash !== effect.policyVersionHash) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} approval evidence is stale or mismatched`);
+      }
+    }
+    if (effect.policyVersionHash && effect.policyVersionHash !== this.getPolicyVersionHash()) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        `effect ${effect.id} policy version is stale`);
+    }
+    if (routeKind === 'redact_then_egress' && (!effect.redactionRuleVersion
+        || effect.redactionRuleVersion !== this.getRedactionRuleVersion())) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        `effect ${effect.id} redaction rule version is stale or missing`);
+    }
+  }
+
   setRepairStatus(
     repairId: string,
     next: RepairStatus,
     rejectionReason?: string,
+    commitAuthority?: RepairCommitAuthority,
+  ): RepairTransaction {
+    if (next === 'committed' && this.repairConditionChecker) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        'M1 repair commit requires setRepairStatusWithCurrentConditions()');
+    }
+    return this.setRepairStatusInternal(repairId, next, rejectionReason, commitAuthority);
+  }
+
+  async setRepairStatusWithCurrentConditions(
+    repairId: string,
+    next: RepairStatus,
+    commitAuthority: RepairCommitAuthority,
+    rejectionReason?: string,
+  ): Promise<RepairTransaction> {
+    if (next !== 'committed') {
+      return this.setRepairStatusInternal(repairId, next, rejectionReason, commitAuthority);
+    }
+    if (!this.repairConditionChecker) {
+      throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+        'M1 repair current policy/route verifier is not configured');
+    }
+    const row = this.db.getDB().prepare(
+      'SELECT proposed_plan_json FROM repair_transactions WHERE id = ?',
+    ).get(repairId) as { proposed_plan_json: string } | undefined;
+    if (!row) throw new OgraError(OgraErrorCode.REPAIR_NOT_FOUND, `repair ${repairId} not found`);
+    const steps = JSON.parse(row.proposed_plan_json || '[]') as Array<{ effectId: string }>;
+    for (const step of steps) {
+      const effect = this.readEffect(step.effectId);
+      const result = await this.repairConditionChecker.check({
+        effect, approvalId: effect.currentApprovalId,
+        policyVersionHash: effect.policyVersionHash,
+        routeDecisionId: effect.routeDecisionId,
+        payloadFingerprint: effect.payloadFingerprint, scopeHash: effect.scopeHash,
+      });
+      if (!result.ok) {
+        throw new OgraError(OgraErrorCode.REPAIR_INVALID,
+          `effect ${effect.id} current policy/route check failed: ${result.reason ?? 'unknown'}`);
+      }
+    }
+    return this.setRepairStatusInternal(repairId, next, rejectionReason, commitAuthority);
+  }
+
+  private setRepairStatusInternal(
+    repairId: string,
+    next: RepairStatus,
+    rejectionReason?: string,
+    commitAuthority?: RepairCommitAuthority,
   ): RepairTransaction {
     const row = this.db.getDB().prepare(
       'SELECT * FROM repair_transactions WHERE id = ?',
@@ -774,6 +1086,23 @@ export class DurableRuntimeService {
       throw new OgraError(OgraErrorCode.REPAIR_INVALID,
         `repair ${repairId}: ${current} -> ${next} is not allowed`);
     }
+    if (next === 'committed') {
+      const target = this.readFrame(row['target_frame_id'] as string);
+      this.verifyRepairInvariants({
+        runId: row['run_id'] as string,
+        targetFrameId: target.id,
+        expectedSubtreeRevision: row['target_subtree_revision'] as number,
+        authorizedEffectRevisions: JSON.parse(
+          (row['authorized_effect_revisions_json'] as string) || '{}',
+        ) as Record<string, number>,
+        crossFrameApprovalIds: this.crossFrameApprovalIdsForRepair(repairId),
+        proposedPlan: JSON.parse((row['proposed_plan_json'] as string) || '[]'),
+      }, target);
+      if (!commitAuthority) {
+        throw new OgraError(OgraErrorCode.LEASE_NOT_HELD,
+          `repair ${repairId} commit requires captured recovery lease authority`);
+      }
+    }
     return this.transactionalAppend({
       meta: {
         runId: row['run_id'] as string,
@@ -784,11 +1113,36 @@ export class DurableRuntimeService {
         frameId: row['target_frame_id'] as string,
       },
       body: (eventId) => {
+      if (next === 'committed') {
+        // Re-read and re-validate inside the transaction.  A pre-transaction
+        // check is useful for diagnostics, but is not authorization: the
+        // lease or subtree could change between it and this status CAS.
+        this.assertActiveRepairLease(
+          row['run_id'] as string,
+          commitAuthority!.holderId,
+          commitAuthority!.expectedLeaseVersion,
+        );
+        const target = this.readFrame(row['target_frame_id'] as string);
+        this.verifyRepairInvariants({
+          runId: row['run_id'] as string,
+          targetFrameId: target.id,
+          expectedSubtreeRevision: row['target_subtree_revision'] as number,
+          authorizedEffectRevisions: JSON.parse(
+            (row['authorized_effect_revisions_json'] as string) || '{}',
+          ) as Record<string, number>,
+          crossFrameApprovalIds: this.crossFrameApprovalIdsForRepair(repairId),
+          proposedPlan: JSON.parse((row['proposed_plan_json'] as string) || '[]'),
+        }, target);
+      }
       const now = new Date().toISOString();
-      this.db.getDB().prepare(`
+      const statusCas = this.db.getDB().prepare(`
         UPDATE repair_transactions SET status = ?, rejection_reason = ?, updated_at = ?
-          WHERE id = ?
-      `).run(next, rejectionReason ?? null, now, repairId);
+          WHERE id = ? AND status = ?
+      `).run(next, rejectionReason ?? null, now, repairId, current);
+      if (statusCas.changes !== 1) {
+        throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
+          `repair ${repairId} status CAS lost`);
+      }
       if (['rejected', 'committed', 'aborted'].includes(next)) {
         this.db.getDB().prepare(
           'UPDATE repair_transactions SET terminal_event_id = ? WHERE id = ?',
@@ -797,6 +1151,27 @@ export class DurableRuntimeService {
       return this.readRepair(repairId);
       },
     });
+  }
+
+  private assertActiveRepairLease(
+    runId: string, holderId: string, expectedLeaseVersion: number,
+  ): void {
+    const row = this.db.getDB().prepare(`
+      SELECT 1 FROM recovery_leases WHERE run_id = ? AND holder_id = ?
+        AND lease_version = ? AND released_at IS NULL AND expires_at > ?
+    `).get(runId, holderId, expectedLeaseVersion, new Date().toISOString());
+    if (!row) {
+      throw new OgraError(OgraErrorCode.LEASE_NOT_HELD,
+        `repair commit lease is not actively held by ${holderId}`);
+    }
+  }
+
+  private crossFrameApprovalIdsForRepair(repairId: string): Record<string, string> {
+    const rows = this.db.getDB().prepare(`
+      SELECT effect_id, approval_id FROM repair_cross_frame_authorizations
+       WHERE repair_transaction_id = ?
+    `).all(repairId) as Array<{ effect_id: string; approval_id: string }>;
+    return Object.fromEntries(rows.map(row => [row.effect_id, row.approval_id]));
   }
 
   readRepair(repairId: string): RepairTransaction {
@@ -1371,6 +1746,14 @@ export class DurableRuntimeService {
       effectType: row['effect_type'] as string,
       adapterKind: row['adapter_kind'] as string,
       payloadFingerprint: row['payload_fingerprint'] as string,
+      // Series 1B M1 round 5: separated from the redactor's
+      // egress hash; set when the protocol seals the capsule.
+      capsuleFingerprint: (row['capsule_fingerprint'] as string | null) ?? null,
+      // Round 6: snapshot of approval binding fields captured
+      // at prepare-time.
+      policyVersionHash: (row['policy_version_hash'] as string | null) ?? null,
+      scopeHash: (row['scope_hash'] as string | null) ?? null,
+      redactionRuleVersion: (row['redaction_rule_version'] as string | null) ?? null,
       callbackCapsuleRef: (row['callback_capsule_ref'] as string | null) ?? null,
       callbackCapsuleHash: (row['callback_capsule_hash'] as string | null) ?? null,
       callbackCapsuleFormatVersion: (row['callback_capsule_format_version'] as string | null) ?? null,
@@ -1421,8 +1804,11 @@ export class DurableRuntimeService {
       targetFrameId: row['target_frame_id'] as string,
       targetSubtreeRevision: row['target_subtree_revision'] as number,
       authorizedEffectRevisions: JSON.parse(
-        (row['authorized_effect_revisions_json'] as string) || '[]',
+        (row['authorized_effect_revisions_json'] as string) || '{}',
       ),
+      authorizedCrossFrameEffectIds: (JSON.parse(
+        (row['verification_result_json'] as string) || '{}',
+      ) as { authorizedCrossFrameEffectIds?: string[] }).authorizedCrossFrameEffectIds ?? [],
       proposedPlan: JSON.parse((row['proposed_plan_json'] as string) || '[]'),
       verificationResult: JSON.parse(
         (row['verification_result_json'] as string) || '{}',

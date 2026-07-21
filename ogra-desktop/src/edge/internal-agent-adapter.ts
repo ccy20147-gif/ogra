@@ -9,6 +9,8 @@ import { DataClassification, RunEventType, RouteDecisionType } from '../shared/t
 import { HighWaterMarkService } from '../core/high-water-mark';
 import { PromptInjectionDetector } from '../core/prompt-injection-detector';
 import { OgraError, OgraErrorCode } from '../shared/errors';
+import { EffectProtocolService } from '../core/effect-protocol-service';
+import { DurableRuntimeService } from '../core/durable-runtime-service';
 import * as crypto from 'crypto';
 
 export interface AgentRunInput {
@@ -100,6 +102,28 @@ export class InternalAgentAdapter {
     private ragEngine: RagEngine,
     private redactionService: RedactionService,
   ) {}
+
+  /**
+   * Sequence 1B Milestone 1 — wire the durable effect kernel into
+   * the agent. When `protocol` is non-null, the model call goes
+   * through prepare → casToInFlight → recordReceipt /
+   * recordUnknownOutcome → commitToTerminal (all atomic via
+   * `transactionalAppend`). When `protocol` is null, the agent
+   * falls back to the Sequence 0 write path (direct model_calls
+   * table), which is preserved for backwards compatibility.
+   *
+   * OgraCore wires this AFTER both the runtime and the protocol
+   * service are constructed. Idempotent.
+   */
+  bindKernel(deps: {
+    runtime: DurableRuntimeService;
+    protocol: EffectProtocolService;
+  }): void {
+    (this as unknown as { runtime: DurableRuntimeService }).runtime = deps.runtime;
+    (this as unknown as { protocol: EffectProtocolService }).protocol = deps.protocol;
+  }
+  private runtime: DurableRuntimeService | null = null;
+  private protocol: EffectProtocolService | null = null;
 
   /** Wire the canonical RunService after both services are constructed
    *  (breaks the constructor cycle). Idempotent; only the first call
@@ -386,7 +410,10 @@ export class InternalAgentAdapter {
     let egressText = JSON.stringify(baseEgress);
     let egressPayloadEgress: { task: string; contextBlock: string; chunkIds?: string[] } = baseEgress;
     let redactionRecordId: string | undefined;
-    let redactionRuleVersion: string | undefined;
+    // Carry the live service authority through every durable effect. The
+    // recovery checker compares this persisted evidence with the same
+    // provider, so no production path invents a rule version.
+    const redactionRuleVersion = this.redactionService.getCurrentRuleVersion();
     let redactedContextBlock = contextAssembly.contextBlock;
     if (routeDecision.route === RouteDecisionType.Redact_Then_Egress) {
       // Approve-then-Egress: an approved canonical approval row is
@@ -432,13 +459,12 @@ export class InternalAgentAdapter {
       const result = this.redactionService.redact({
         runId,
         ruleSetId: 'builtin-core-v1',
-        ruleVersion: 'r1.0.0',
+        ruleVersion: redactionRuleVersion,
         beforeText: egressText,
         classification: hwm.highWaterMark,
         approvalId: approvalRecord.id,
       });
       redactionRecordId = undefined; // service uses its own id; we look up later
-      redactionRuleVersion = 'r1.0.0';
       egressText = result.redactedText;
       // P0 #1: overwrite payloadHash with the redacted egress
       // afterHash so ModelRequest.payloadHash, egress_record.
@@ -507,7 +533,7 @@ export class InternalAgentAdapter {
         egressMode: 'approve_then_egress',
         payloadHash: result.afterHash,
         payloadSummary: `[REDACTED ${result.matches.length} matches]`,
-        redactionRuleVersion: 'r1.0.0',
+        redactionRuleVersion,
         payloadClassification: hwm.highWaterMark,
       });
     } else if (!adapter.isLocal && routeDecision.route !== RouteDecisionType.Local) {
@@ -516,11 +542,10 @@ export class InternalAgentAdapter {
       const result = this.redactionService.redact({
         runId,
         ruleSetId: 'builtin-core-v1',
-        ruleVersion: 'r1.0.0',
+        ruleVersion: redactionRuleVersion,
         beforeText: egressText,
         classification: hwm.highWaterMark,
       });
-      redactionRuleVersion = 'r1.0.0';
       egressText = result.redactedText;
       // P0 #1: overwrite payloadHash with the redacted egress
       // afterHash for auto-redact cloud paths too.
@@ -540,7 +565,7 @@ export class InternalAgentAdapter {
         egressMode: hwm.highWaterMark === DataClassification.Confidential ? 'log_and_proceed' : 'auto_redact',
         payloadHash: result.afterHash,
         payloadSummary: `[REDACTED ${result.matches.length} matches]`,
-        redactionRuleVersion: 'r1.0.0',
+        redactionRuleVersion,
         payloadClassification: hwm.highWaterMark,
       });
     }
@@ -555,8 +580,64 @@ export class InternalAgentAdapter {
       approvalScopeHash: approvalRecord?.scopeHash ?? null,
     });
 
+    // Sequence 1B Milestone 1 — when the durable kernel is wired,
+    // the model call is wrapped by the effect protocol:
+    //   prepare (seals callback capsule) -> casToInFlight
+    //   (pre-callback CAS) -> adapter.generate (real call) ->
+    //   recordReceipt (seals result capsule) | recordUnknownOutcome
+    //   (no receipt, transitions to `unknown`) -> commitToTerminal
+    //   (terminal CAS to `committed`).
+    //
+    // The kernel is optional. If OgraCore has not wired it (e.g.
+    // unit tests for the Sequence 0 path), we fall back to the
+    // direct model_calls write. This preserves Sequence 0 backwards
+    // compatibility while making M1 the canonical production
+    // path.
+    let durableEffectId: string | null = null;
+    let durableAttemptNo: number | null = null;
+    let durableReceiptId: string | null = null;
+    let durableHolderId: string | null = null;
+    let durableLeaseVersion: number | null = null;
+    let durableRootFrameId: string | null = null;
+    let durablePlanFrameId: string | null = null;
+    if (this.protocol && this.runtime && routeDecision.route !== RouteDecisionType.Blocked) {
+      // 1. Resolve (or create) the root frame. The kernel
+      // de-dupes via UNIQUE(run_id) on root frames, so a
+      // second call to run() with the same runId reuses
+      // the existing root.
+      let rootFrame = this.runtime.rootFrameForRun(runId);
+      if (!rootFrame) {
+        rootFrame = this.runtime.createRootFrame({ runId });
+      }
+      durableRootFrameId = rootFrame.id;
+      durableHolderId = `agent_${rootFrame.id}`;
+      // 2. Acquire the recovery lease. If the lease is
+      // currently held by another holder we either take it
+      // back over (if expired) or fail closed.
+      try {
+        this.runtime.acquireLease({
+          runId, holderId: durableHolderId, ttlMs: 5 * 60 * 1000,
+        });
+      } catch (err) {
+        if ((err as { code?: string })?.code
+            !== OgraErrorCode.LEASE_VERSION_CONFLICT) {
+          throw err;
+        }
+        const existing = this.runtime.readLease(runId);
+        if (this.runtime.leaseExpired(existing)) {
+          this.runtime.renewLease({
+            runId, holderId: durableHolderId,
+            expectedLeaseVersion: existing.leaseVersion,
+            ttlMs: 5 * 60 * 1000,
+          });
+        } else {
+          throw err;
+        }
+      }
+      durableLeaseVersion = this.runtime.readLease(runId).leaseVersion;
+    }
     const abortController = new AbortController();
-    const modelRequest: ModelRequest = {
+    let modelRequest: ModelRequest = {
       runId,
       workspaceId,
       routeDecisionId: routeDecision.id,
@@ -613,6 +694,141 @@ export class InternalAgentAdapter {
       });
     }
 
+    // Sequence 1B Milestone 1 — `prepare` (seals callback
+    // capsule) + `casToInFlight` (pre-callback CAS). The adapter
+    // is not allowed to run until this CAS succeeds. Capsule
+    // integrity is verified here, not later — so a
+    // corrupt/missing/wrong-workspace/expired callback capsule
+    // fails closed BEFORE the adapter is invoked. The
+    // `payload` of the sealed capsule is a sanitized summary
+    // (no raw modelRequest body); the protocol includes only
+    // the request hash + prompt sizes + adapter identity.
+    if (this.protocol && this.runtime && durableHolderId
+        && routeDecision.route !== RouteDecisionType.Blocked) {
+      let rootFrame = this.runtime.rootFrameForRun(runId);
+      if (!rootFrame) {
+        rootFrame = this.runtime.createRootFrame({ runId });
+        durableHolderId = `agent_${rootFrame.id}`;
+      }
+      const childFrame = this.runtime.createChildFrame({
+        runId, parentFrameId: rootFrame.id, frameKind: 'plan_step',
+      });
+      durablePlanFrameId = childFrame.id;
+      this.runtime.transitionFrame({
+        frameId: childFrame.id, expectedStatus: 'pending', nextStatus: 'running',
+      });
+      const idempotencyKey = `idem_${runId}_${rootFrame.id}_${childFrame.id}`;
+      // Sequence 1B Milestone 1 fail-closed gate: the sealed
+      // callback capsule MUST contain exactly the bytes that
+      // produced `payloadFingerprint`. Otherwise recovery
+      // would refuse to re-callback because the capsule's
+      // canonical hash != the effect's approved fingerprint.
+      //
+      // Sequence 1B M1 Round 5: the agent seals a callback
+      // capsule whose canonical bytes are the canonical
+      // envelope below. The capsule fingerprint is the hash
+      // of that envelope and is stored on the EFFECT as a
+      // separate column (`capsule_fingerprint`), distinct
+      // from the redactor's egress hash stored on
+      // `payload_fingerprint`. The Two Hash columns have two
+      // intents:
+      //   - `payload_fingerprint` is the Sequence-0 approval
+      //     anchor (binds to the actual egress bytes the user
+      //     approved). It MUST stay == the redactor's
+      //     afterHash.
+      //   - `capsule_fingerprint` is the Round-5 recovery
+      //     anchor (proves the capsule would re-apply the
+      //     canonical capsule bytes).
+      const capsulePayload = {
+        runId, workspaceId,
+        allowedProviderId: routeDecision.providerId,
+        allowedModelId: routeDecision.modelId,
+        modelRequest, // includes promptParts + contextSourceIds + payloadHash
+        route: routeDecision.route,
+        classification: hwm.highWaterMark,
+        approvalId: approvalRecord?.id ?? null,
+        approvalScopeHash: approvalRecord?.scopeHash ?? null,
+      };
+      const prepared = this.protocol.prepare({
+        runId,
+        ownerFrameId: childFrame.id,
+        effectType: 'model.generate',
+        adapterKind: adapter.constructor.name,
+        adapterVersion: 'M1-fixture',
+        payload: capsulePayload,
+        // Sequence-0 approval anchor stays INTACT.
+        payloadFingerprint: payloadHash,
+        // Round 5 recovery anchor: written to the new
+        // `run_effects.capsule_fingerprint` column. The
+        // recovery layer proves the capsule would re-apply
+        // the canonical capsule bytes by comparing against
+        // this column.
+        // Also persist the current approval row id so that
+        // recovery can prove the capsule is bound to a real
+        // approval. Sequence-0 approval stays the binding
+        // reference for the egress payload.
+        currentApprovalId: approvalRecord?.id ?? null,
+        idempotencyKey,
+        scopeHash: approvalRecord?.scopeHash ?? '',
+        routeDecisionId: routeDecision.id,
+        policyEvaluationId: `pe_final_for_${runId}`,
+        policyVersionHash,
+        redactionRuleVersion,
+        classification: hwm.highWaterMark,
+        // Seal the concrete adapter declaration with the callback. Recovery
+        // must never rely on a caller asserting stronger capabilities after a
+        // crash.
+        recoveryCapabilities: adapter.recoveryCapabilities(),
+      });
+      durableEffectId = prepared.effectId;
+      durableAttemptNo = prepared.attemptNo;
+      const callbackIntent = this.protocol.casToInFlight({
+        effectId: durableEffectId,
+        expectedRevision: 1,
+        expectedAttemptNo: durableAttemptNo,
+        leaseHolder: durableHolderId,
+        expectedLeaseVersion: durableLeaseVersion ?? undefined,
+        // Only the opaque approval id crosses into the durable callback
+        // protocol. The protocol reloads and validates its canonical scope /
+        // fingerprint / policy revision before atomically consuming it.
+        approvalId: approvalRecord?.id ?? null,
+      });
+      // The CAS result contains the only callback command that may be sent.
+      // Never use the pre-prepare in-memory request here: a caller can alter
+      // it after prepare, while this object was decrypted and fingerprinted
+      // against the durable effect inside casToInFlight.
+      const command = callbackIntent.callbackPayload as {
+        payload?: { modelRequest?: unknown };
+        idempotencyKey?: unknown;
+      };
+      const sealedRequest = command.payload?.modelRequest;
+      if (!sealedRequest || typeof sealedRequest !== 'object'
+          || typeof command.idempotencyKey !== 'string') {
+        throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
+          'callback capsule has no valid model request or idempotency key');
+      }
+      const authoritativeRequest = sealedRequest as ModelRequest;
+      if (authoritativeRequest.runId !== runId
+          || authoritativeRequest.workspaceId !== workspaceId
+          || authoritativeRequest.routeDecisionId !== routeDecision.id
+          || authoritativeRequest.policyVersionHash !== policyVersionHash
+          || authoritativeRequest.allowedProviderId !== providerId
+          || authoritativeRequest.allowedModelId !== modelId
+          || authoritativeRequest.payloadHash !== payloadHash
+          || !Array.isArray(authoritativeRequest.promptParts)
+          || !Array.isArray(authoritativeRequest.contextSourceIds)) {
+        throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
+          'callback capsule model request does not match current durable authority');
+      }
+      // AbortSignal cannot be serialized; it is process-local control, not
+      // callback content. Every other adapter input comes from the capsule.
+      modelRequest = {
+        ...authoritativeRequest,
+        idempotencyKey: command.idempotencyKey,
+        signal: abortController.signal,
+      };
+    }
+
     let modelResult: ModelResult;
     try {
       modelResult = await adapter.generate(modelRequest);
@@ -631,9 +847,83 @@ export class InternalAgentAdapter {
         // explicitly omit errorMessage/details; payload fingerprint
         // would be the right field here, kept for Sequence 1.
       });
+      // Sequence 1B Milestone 1: when the durable kernel is wired,
+      // a failed adapter call means the effect is `unknown` —
+      // we transition the effect to `unknown` with an incident
+      // log entry. The recovery layer is then responsible for
+      // either outcome-query reconciliation or a controlled
+      // idempotent retry. We DO NOT auto-commit the effect as
+      // `failed` from inside a single call.
+      if (this.protocol && durableEffectId && durableAttemptNo !== null) {
+        try {
+          this.protocol.recordUnknownOutcome({
+            effectId: durableEffectId,
+            attemptNo: durableAttemptNo,
+            providerStatus: `error:${errorCode}`,
+            resolvedOutcome: 'not_applied',
+          });
+        } catch {
+          // best-effort: the effect is already in a transitional
+          // state; the recovery layer will reconcile.
+        }
+      }
+      if (this.runtime && durablePlanFrameId) {
+        try {
+          // A callback with an unresolved outcome is not a completed frame;
+          // it waits for durable recovery/renewed authority.
+          this.runtime.transitionFrame({
+            frameId: durablePlanFrameId, expectedStatus: 'running',
+            nextStatus: 'awaiting_approval',
+          });
+        } catch { /* preserve the original adapter error */ }
+      }
       throw new OgraError(errorCode as OgraErrorCode, sanitized);
     } finally {
       // No-op placeholder: cancellation hook is registered below.
+    }
+
+    // Sequence 1B Milestone 1 — record a trusted receipt in the
+    // same transaction that seals the result capsule. The
+    // modelResult.httpBodyHash was already written by the adapter
+    // before the HTTP body was sent; we re-use it as the
+    // response hash so the receipt and the audit chain agree on
+    // what was sent. If the durable kernel is wired, this is
+    // the SOLE receipt — recovery will use it directly.
+    if (this.protocol && durableEffectId && durableAttemptNo !== null) {
+      try {
+        const receipt = this.protocol.recordReceipt({
+          effectId: durableEffectId,
+          attemptNo: durableAttemptNo,
+          requestId: `req_${durableEffectId}_${durableAttemptNo}`,
+          requestHash: payloadHash,
+          result: {
+            answerPreview: modelResult.content.slice(0, 200),
+            responseHash: modelResult.responseHash,
+            httpBodyHash: modelResult.httpBodyHash,
+            tokenUsage: modelResult.tokenUsage,
+          },
+          applicationStatus: 'applied',
+          providerStatus: 'ok',
+        });
+        durableReceiptId = receipt.receiptId;
+      } catch (err) {
+        // Record-receipt must not eat the model output. The
+        // recovery layer will reconcile on restart.
+        this.db.appendRunEvent(runId, workspaceId, RunEventType.ModelCallFailed, {
+          errorCode: OgraErrorCode.ADAPTER_ERROR,
+          providerId,
+          modelId,
+        });
+        if (this.runtime && durablePlanFrameId) {
+          try {
+            this.runtime.transitionFrame({
+              frameId: durablePlanFrameId, expectedStatus: 'running',
+              nextStatus: 'awaiting_approval',
+            });
+          } catch { /* durable recovery owns the remaining state */ }
+        }
+        throw err;
+      }
     }
 
     // Cancellation mid-flight: if the run was cancelled while the
@@ -643,6 +933,13 @@ export class InternalAgentAdapter {
     // result so RunService's success path sees the cancellation
     // and writes `cancelled` instead of `completed`.
     if (isCancelled && isCancelled()) {
+      if (this.runtime && durablePlanFrameId) {
+        try {
+          this.runtime.transitionFrame({
+            frameId: durablePlanFrameId, expectedStatus: 'running', nextStatus: 'cancelled',
+          });
+        } catch { /* cancellation remains the terminal result */ }
+      }
       this.db.appendRunEvent(runId, workspaceId, RunEventType.RunCancelled, {
         reason: 'cancelled mid-call (adapter returned but run was cancelled)',
       });
@@ -695,6 +992,48 @@ export class InternalAgentAdapter {
       policyVersionHash,
       redactionRuleVersion: modelResult.redactionRuleVersion ?? undefined,
     });
+
+    // Sequence 1B Milestone 1 — commit the durable effect to
+    // the terminal `committed` state. The CAS enforces that
+    // only one process (or one retry) can win the terminal
+    // write; a second commit on the same receipt with the same
+    // effect_revision loses to REVISION_CONFLICT and the
+    // process that lost re-reads the row instead.
+    if (this.protocol && durableEffectId && durableReceiptId) {
+      const refreshed = this.runtime?.readEffect(durableEffectId);
+      if (refreshed && refreshed.state === 'received') {
+        try {
+          this.protocol.commitToTerminal({
+            effectId: durableEffectId,
+            expectedRevision: refreshed.effectRevision,
+            expectedAttemptNo: durableAttemptNo ?? 1,
+            receiptId: durableReceiptId,
+            leaseHolder: durableHolderId ?? '',
+            expectedLeaseVersion: durableLeaseVersion ?? -1,
+          });
+        } catch (err) {
+          if ((err as { code?: string })?.code !== OgraErrorCode.REVISION_CONFLICT) {
+            if (this.runtime && durablePlanFrameId) {
+              try {
+                this.runtime.transitionFrame({
+                  frameId: durablePlanFrameId, expectedStatus: 'running',
+                  nextStatus: 'awaiting_approval',
+                });
+              } catch { /* retain the finalization error */ }
+            }
+            throw err;
+          }
+          // CAS lost — another process already committed.
+        }
+      }
+    }
+
+    if (this.runtime && durablePlanFrameId) {
+      this.runtime.transitionFrame({
+        frameId: durablePlanFrameId, expectedStatus: 'running', nextStatus: 'completed',
+        outputHash: modelResult.responseHash,
+      });
+    }
 
     return {
       answer: modelResult.content,

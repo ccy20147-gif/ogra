@@ -70,6 +70,17 @@ export class DatabaseService {
   }
 
   /**
+   * Sequence 1B Milestone 1 — expose the underlying
+   * OgraDatabase for the durable runtime kernel. The kernel is
+   * a separate service from DatabaseService (it owns its own
+   * state machines) but they share the same SQLite database.
+   * The OgraDatabase handle is the bridge.
+   */
+  getOgraDatabase(): OgraDatabase {
+    return this.db;
+  }
+
+  /**
    * @deprecated Use typed query methods instead of raw DB access.
    * Direct DB manipulation bypasses validation, audit, and FK constraints.
    * Only use for migration bootstrap or test cleanup.
@@ -140,7 +151,25 @@ export class DatabaseService {
     redactionRuleVersion?: string,
   ): RunEventRow {
     // Use a transaction to ensure atomicity of hash chain append
-    const result = this.db.getDB().transaction(() => {
+    return this.db.getDB().transaction(() => this.appendRunEventInTransaction(
+      runId, workspaceId, eventType, eventPayload,
+      policyVersionHash, redactionRuleVersion,
+    ))();
+  }
+
+  /**
+   * Append an event while the caller already owns the SQLite transaction.
+   * This is used when an L0 mutation and its L1 event must commit or roll
+   * back together. Callers must not invoke it outside `db.transaction()`.
+   */
+  appendRunEventInTransaction(
+    runId: string,
+    workspaceId: string,
+    eventType: string,
+    eventPayload: Record<string, unknown>,
+    policyVersionHash?: string,
+    redactionRuleVersion?: string,
+  ): RunEventRow {
       // Get next sequence
       const lastSeq = this.db.getDB().prepare(
         'SELECT MAX(sequence) as seq FROM run_events WHERE run_id = ?'
@@ -198,9 +227,6 @@ export class DatabaseService {
         hash_envelope_version: envelopeVersion,
         created_at: now,
       };
-    })();
-
-    return result;
   }
 
   getRunEvents(runId: string, limit = 100, offset = 0): RunEventRow[] {

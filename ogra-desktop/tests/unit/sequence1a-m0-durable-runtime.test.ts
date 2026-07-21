@@ -48,10 +48,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import * as crypto from 'crypto';
 import Database from 'better-sqlite3';
 import { DatabaseService } from '../../src/core/database-service';
 import { OgraDatabase } from '../../src/core/database';
 import { DurableRuntimeService } from '../../src/core/durable-runtime-service';
+import { EffectProtocolService } from '../../src/core/effect-protocol-service';
+import { EncryptedCapsuleStore, StaticMasterKeyProvider } from '../../src/core/capsule-store';
 import { BaseModelAdapter } from '../../src/core/model-adapter';
 import {
   composeV2Envelope,
@@ -159,6 +162,8 @@ describe('Sequence 1A M0 — migration v18', () => {
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           UNIQUE(run_id, sequence)
         );
+        -- v24 rebuilds approvals with their real workspace parent intact.
+        CREATE TABLE workspaces (id TEXT PRIMARY KEY);
         CREATE TABLE approvals (
           id TEXT PRIMARY KEY, run_id TEXT, workspace_id TEXT,
           approval_type TEXT, requested_scope_json TEXT, scope_hash TEXT,
@@ -375,31 +380,32 @@ describe('Sequence 1A M0 — effect transitions and ownership', () => {
   });
 
   it('unknown -> in_flight requires lease holder + attempt number', () => {
-    const eff = rt.planEffect({
-      runId, ownerFrameId: frameId, effectType: 'cloud.egress',
-      adapterKind: 'ollama', payloadFingerprint: 'fp1',
-      callbackCapsuleRef: 'caps://1', callbackCapsuleHash: 'capH1',
-      callbackCapsuleFormatVersion: 'v1',
-      idempotencyKeyRef: 'idem://1', idempotencyKeyHash: 'idemH1',
-      allowedRepairActions: ['retry'], dependencyEffectIds: [],
-      classification: 'Public' as any,
-    });
-    rt.transitionEffect({ effectId: eff.id, expectedRevision: 1,
-      expectedState: 'planned', nextState: 'in_flight' });
-    rt.transitionEffect({ effectId: eff.id, expectedRevision: 2,
-      expectedState: 'in_flight', nextState: 'unknown' });
-    // Now unknown -> in_flight without lease must fail.
-    expect(() => rt.transitionEffect({
-      effectId: eff.id, expectedRevision: 3, expectedState: 'unknown',
-      nextState: 'in_flight',
-    })).toThrow(/LEASE_NOT_HELD/);
-    // With lease it succeeds.
+    const protocol = new EffectProtocolService(odb, rt,
+      new EncryptedCapsuleStore(odb, new StaticMasterKeyProvider(crypto.randomBytes(32))));
     rt.acquireLease({ runId, holderId: 'holder_x', ttlMs: 60_000 });
-    rt.transitionEffect({
-      effectId: eff.id, expectedRevision: 3, expectedState: 'unknown',
-      nextState: 'in_flight', leaseHolder: 'holder_x', nextAttemptNo: 2,
+    const eff = protocol.prepare({
+      runId, ownerFrameId: frameId, effectType: 'cloud.egress',
+      adapterKind: 'ollama', adapterVersion: 'test', payload: { value: 1 },
+      payloadFingerprint: 'fp1', capsuleFingerprint: 'cap-fp1',
+      idempotencyKey: 'idem-1', scopeHash: 'scope-1', routeDecisionId: 'rd-1',
+      policyEvaluationId: 'pe-1', policyVersionHash: policyHash(),
     });
-    const reloaded = rt.readEffect(eff.id);
+    // The generic runtime API deliberately cannot reserve a callback attempt.
+    expect(() => rt.transitionEffect({ effectId: eff.effectId, expectedRevision: 1,
+      expectedState: 'planned', nextState: 'in_flight' })).toThrow(/EFFECT_INVALID_TRANSITION/);
+    protocol.casToInFlight({ effectId: eff.effectId, expectedRevision: 1,
+      expectedAttemptNo: 1, leaseHolder: 'holder_x' });
+    rt.transitionEffect({ effectId: eff.effectId, expectedRevision: 2,
+      expectedState: 'in_flight', nextState: 'unknown' });
+    // Public state mutation cannot bypass the callback-intent protocol, even
+    // when a valid lease exists. The protocol performs the lease/attempt CAS.
+    expect(() => rt.transitionEffect({
+      effectId: eff.effectId, expectedRevision: 3, expectedState: 'unknown',
+      nextState: 'in_flight', leaseHolder: 'holder_x', nextAttemptNo: 2,
+    })).toThrow(/EFFECT_INVALID_TRANSITION/);
+    protocol.casToInFlight({ effectId: eff.effectId, expectedRevision: 3,
+      expectedAttemptNo: 2, expectedState: 'unknown', leaseHolder: 'holder_x' });
+    const reloaded = rt.readEffect(eff.effectId);
     expect(reloaded.state).toBe('in_flight');
     expect(reloaded.effectRevision).toBe(4);
   });
@@ -420,18 +426,19 @@ describe('Sequence 1A M0 — receipt uniqueness', () => {
     rt = newRuntime(odb);
     runId = createRunHelper(odb, 'r_rec', 'ws_x', 't');
     frameId = rt.createRootFrame({ runId }).id;
-    const eff = rt.planEffect({
+    const protocol = new EffectProtocolService(odb, rt,
+      new EncryptedCapsuleStore(odb, new StaticMasterKeyProvider(crypto.randomBytes(32))));
+    rt.acquireLease({ runId, holderId: 'receipt-holder', ttlMs: 60_000 });
+    const eff = protocol.prepare({
       runId, ownerFrameId: frameId, effectType: 'cloud.egress',
-      adapterKind: 'ollama', payloadFingerprint: 'fp1',
-      callbackCapsuleRef: 'caps://1', callbackCapsuleHash: 'capH1',
-      callbackCapsuleFormatVersion: 'v1',
-      idempotencyKeyRef: 'idem://1', idempotencyKeyHash: 'idemH1',
-      allowedRepairActions: ['retry'], dependencyEffectIds: [],
-      classification: 'Public' as any,
+      adapterKind: 'ollama', adapterVersion: 'test', payload: { value: 1 },
+      payloadFingerprint: 'fp1', capsuleFingerprint: 'cap-fp-receipt',
+      idempotencyKey: 'idem-1', scopeHash: 'scope-1', routeDecisionId: 'rd-1',
+      policyEvaluationId: 'pe-1', policyVersionHash: policyHash(),
     });
-    effId = eff.id;
-    rt.transitionEffect({ effectId: effId, expectedRevision: 1,
-      expectedState: 'planned', nextState: 'in_flight' });
+    effId = eff.effectId;
+    protocol.casToInFlight({ effectId: effId, expectedRevision: 1,
+      expectedAttemptNo: 1, leaseHolder: 'receipt-holder' });
   });
   afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -639,7 +646,7 @@ describe('Sequence 1A M0 — repair invariants', () => {
     expect(() => rt.createRepair({
       runId, targetFrameId: targetChild.id,
       expectedSubtreeRevision: rt.readFrame(targetChild.id).subtreeRevision,
-      authorizedEffectRevisions: [eff.effectRevision],
+      authorizedEffectRevisions: { [eff.id]: eff.effectRevision },
       proposedPlan: [{
         effectId: eff.id, expectedEffectRevision: eff.effectRevision,
         action: 'retry',
@@ -673,7 +680,7 @@ describe('Sequence 1A M0 — repair invariants', () => {
     expect(() => rt.createRepair({
       runId, targetFrameId: rootId,
       expectedSubtreeRevision: rt.readFrame(rootId).subtreeRevision,
-      authorizedEffectRevisions: [e1.effectRevision, e2.effectRevision],
+      authorizedEffectRevisions: { [e1.id]: e1.effectRevision, [e2.id]: e2.effectRevision },
       proposedPlan: [
         { effectId: e2.id, expectedEffectRevision: e2.effectRevision, action: 'retry' },
         { effectId: e1.id, expectedEffectRevision: e1.effectRevision, action: 'retry' },
@@ -698,7 +705,7 @@ describe('Sequence 1A M0 — repair invariants', () => {
     expect(() => rt.createRepair({
       runId, targetFrameId: rootId,
       expectedSubtreeRevision: currentSubtreeRev,
-      authorizedEffectRevisions: [eff.effectRevision],
+      authorizedEffectRevisions: { [eff.id]: eff.effectRevision },
       proposedPlan: [{
         effectId: eff.id, expectedEffectRevision: eff.effectRevision,
         action: 'retry',
@@ -726,7 +733,7 @@ describe('Sequence 1A M0 — repair invariants', () => {
     expect(() => rt.createRepair({
       runId, targetFrameId: targetChild.id,
       expectedSubtreeRevision: rt.readFrame(targetChild.id).subtreeRevision,
-      authorizedEffectRevisions: [eff.effectRevision],
+      authorizedEffectRevisions: { [eff.id]: eff.effectRevision },
       proposedPlan: [{
         effectId: eff.id, expectedEffectRevision: eff.effectRevision,
         action: 'retry',
@@ -745,7 +752,7 @@ describe('Sequence 1A M0 — repair invariants', () => {
     const repair = rt.createRepair({
       runId, targetFrameId: rootId,
       expectedSubtreeRevision: rt.readFrame(rootId).subtreeRevision,
-      authorizedEffectRevisions: [effect.effectRevision],
+      authorizedEffectRevisions: { [effect.id]: effect.effectRevision },
       proposedPlan: [{ effectId: effect.id, expectedEffectRevision: effect.effectRevision, action: 'retry' }],
     });
     const committed = rt.setRepairStatus(repair.id, 'accepted');

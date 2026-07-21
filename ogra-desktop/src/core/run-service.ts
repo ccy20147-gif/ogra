@@ -1087,6 +1087,49 @@ export class RunService {
     return { id: row.id, decision: input.decision };
   }
 
+  /** Revoke an approved callback authority with run/workspace ownership checks. */
+  async revokeApproval(input: {
+    approvalId: string;
+    runId: string;
+    workspaceId: string;
+    decidedBy?: string;
+    reason?: string;
+  }): Promise<{ id: string; decision: 'revoked' }> {
+    const row = this.db.getRawDB().prepare(
+      'SELECT id, run_id, workspace_id, decision FROM approvals WHERE id = ?',
+    ).get(input.approvalId) as any;
+    if (!row || row.run_id !== input.runId || row.workspace_id !== input.workspaceId) {
+      throw new OgraError(OgraErrorCode.PERMISSION_DENIED,
+        'Approval does not belong to the supplied run and workspace');
+    }
+    if (row.decision !== 'approved') {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        `Approval cannot be revoked from ${row.decision}`);
+    }
+    const now = new Date().toISOString();
+    // The revocation is an L0 authority mutation. Its L1 evidence must be
+    // appended in the same SQLite transaction, otherwise a failed audit
+    // append could leave a revoked approval with no durable explanation.
+    this.db.getRawDB().transaction(() => {
+      const updated = this.db.getRawDB().prepare(`
+        UPDATE approvals SET decision = 'revoked', decided_by = ?, reason = ?,
+          decided_at = ?, revision = revision + 1
+        WHERE id = ? AND decision = 'approved'
+      `).run(input.decidedBy ?? null, input.reason ?? null, now, input.approvalId);
+      if (updated.changes !== 1) {
+        throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
+          `Approval ${input.approvalId} changed while being revoked`);
+      }
+      this.db.appendRunEventInTransaction(
+        row.run_id,
+        row.workspace_id,
+        RunEventType.ApprovalDecision,
+        { approvalId: row.id, decision: 'revoked', decidedBy: input.decidedBy ?? null },
+      );
+    })();
+    return { id: row.id, decision: 'revoked' };
+  }
+
   /** Add a free-form note to an existing approval row (rendered-visible). */
   annotateApprovalReason(approvalId: string, reason: string): void {
     this.db.getRawDB().prepare(

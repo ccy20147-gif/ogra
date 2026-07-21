@@ -45,6 +45,26 @@ export class OgraSecretBroker {
     this.auditService = auditService;
   }
 
+  /**
+   * Sequence 1B Milestone 1 — derive a 32-byte workspace-scoped
+   * key from the broker's master encryption key. Used by the
+   * durable effect capsule store so workspaces can be re-keyed
+   * independently without touching the master key. The master
+   * key never leaves this object.
+   */
+  deriveWorkspaceKey(scope: string, workspaceId: string): Buffer {
+    if (!workspaceId || typeof workspaceId !== 'string') {
+      throw new Error('deriveWorkspaceKey requires a workspaceId');
+    }
+    const salt = Buffer.from(`${scope}:${workspaceId}`, 'utf8');
+    const info = Buffer.from('ogra.capsule.v1', 'utf8');
+    return Buffer.from(
+      (require('crypto') as typeof import('crypto')).hkdfSync(
+        'sha256', this.encryptionKey, salt, info, 32,
+      ),
+    );
+  }
+
   private loadOrCreateEncryptionKey(appDataDir: string): Buffer {
     const keyDir = path.join(appDataDir, 'secrets');
     const keyFile = path.join(keyDir, 'key.bin');

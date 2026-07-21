@@ -933,6 +933,9 @@ describe('Sequence 0 — v15→v16 migration adds model_calls.http_body_hash', (
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           UNIQUE(run_id, sequence)
         );
+        -- The later v24 approval rebuild requires its real FK parent even
+        -- when this fixture does not exercise approvals directly.
+        CREATE TABLE workspaces (id TEXT PRIMARY KEY);
         CREATE TABLE model_calls (
           id TEXT PRIMARY KEY,
           run_id TEXT,
@@ -1217,6 +1220,10 @@ describe('Sequence 0 — v16→v17 approval preview migration', () => {
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           UNIQUE(run_id, sequence)
         );
+        -- v24 validates the real approvals -> workspaces foreign key. A
+        -- representative legacy fixture must include the parent table rather
+        -- than relying on migrations to fabricate an empty one.
+        CREATE TABLE workspaces (id TEXT PRIMARY KEY);
         CREATE TABLE approvals (
           id TEXT PRIMARY KEY, run_id TEXT, workspace_id TEXT, approval_type TEXT,
           requested_scope_json TEXT, scope_hash TEXT, payload_fingerprint TEXT,

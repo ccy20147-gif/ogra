@@ -105,6 +105,27 @@ export interface RunEffect {
   effectType: string;
   adapterKind: string;
   payloadFingerprint: string;
+  /**
+   * Series 1B M1 round 5: hash of the sealed capsule payload
+   * (independent of the redactor's egress hash). The redactor's
+   * egress hash stays in `payloadFingerprint` — that is the
+   * Sequence 0 approval anchor. `capsuleFingerprint` is the
+   * Round-5 recovery anchor: the recovery layer proves the
+   * capsule would re-apply the canonical capsule bytes by
+   * comparing against this column.
+   */
+  capsuleFingerprint: string | null;
+  /**
+   * Series 1B M1 Round 6: snapshot of approval binding fields
+   * captured at prepare-time so the recovery layer can re-check
+   * them without joining every related table. The agent supplies
+   * these at `protocol.prepare()`; the recovery service
+   * consults `recovery-condition-checker` with them.
+   */
+  policyVersionHash: string | null;
+  scopeHash: string | null;
+  /** Exact rule version that produced the approved egress payload. */
+  redactionRuleVersion: string | null;
   callbackCapsuleRef: string | null;
   callbackCapsuleHash: string | null;
   callbackCapsuleFormatVersion: string | null;
@@ -235,7 +256,10 @@ export interface RepairTransaction {
   runId: string;
   targetFrameId: string;
   targetSubtreeRevision: number;
-  authorizedEffectRevisions: number[];
+  /** Immutable effect-id -> revision authorization snapshot. */
+  authorizedEffectRevisions: Record<string, number>;
+  /** Explicit exception list for effects outside target subtree. */
+  authorizedCrossFrameEffectIds: string[];
   proposedPlan: RepairStepProposal[];
   verificationResult: Record<string, unknown>;
   status: RepairStatus;
@@ -460,8 +484,27 @@ export interface RepairCreateRequest {
   runId: string;
   targetFrameId: string;
   expectedSubtreeRevision: number;
-  authorizedEffectRevisions: number[];
+  /** Each proposed effect must have an exact entry. Positional revision
+   * lists are ambiguous and cannot authorize a repair. */
+  authorizedEffectRevisions: Record<string, number>;
+  /** @deprecated Caller-supplied ids are not durable authorization. */
+  authorizedCrossFrameEffectIds?: string[];
+  /**
+   * Effect -> approval id for an out-of-subtree repair. The approval must be
+   * an approved `repair_cross_frame` authority whose immutable requested
+   * scope names this run, target frame, effect and exact effect revision.
+   */
+  crossFrameApprovalIds?: Record<string, string>;
   proposedPlan: RepairStepProposal[];
+}
+
+/** Required only for the terminal `accepted -> committed` repair transition.
+ * This is captured recovery-lease authority, not a caller assertion: the
+ * runtime checks holder, version, release state and expiry in the same SQLite
+ * transaction as the repair status CAS. */
+export interface RepairCommitAuthority {
+  holderId: string;
+  expectedLeaseVersion: number;
 }
 
 export interface LeaseAcquireRequest {

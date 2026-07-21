@@ -54,6 +54,9 @@ export class OgraDatabase {
           migration.preflight(this.db);
         }
         this.db.exec(migration.sql);
+        if (migration.postflight) {
+          migration.postflight(this.db);
+        }
         this.db.prepare(
           'INSERT INTO _migrations (version, name) VALUES (?, ?)'
         ).run(migration.version, migration.name);
@@ -69,6 +72,7 @@ export class OgraDatabase {
   private getMigrations(): Array<{
     version: number; name: string; sql: string;
     preflight?: (db: any) => void;
+    postflight?: (db: any) => void;
   }> {
     return [
       {
@@ -245,7 +249,410 @@ export class OgraDatabase {
           }
         },
       },
+      // Sequence 1B Milestone 1: sealed capsule durability + M1
+      // effect protocol. Append-only; never alters prior migrations.
+      {
+        version: 19,
+        name: 'm1-capsule-store-and-recovery',
+        sql: this.getV19Schema(),
+        preflight: (db: any) => {
+          // Capsule table additions are gated by an explicit
+          // migration so production databases do not auto-create
+          // tables from a pre-M1 baseline without the kernel
+          // service being present. The preflight also adds the
+          // per-workspace `workspace_tag` column to `workspaces`
+          // (used as AAD for capsule encryption).
+          //
+          // Tolerate pre-v18 test fixtures that don't have a
+          // workspaces table — CapsuleStore will create the tag
+          // lazily on first use once CapsuleStore is wired in.
+          const wsTable = db.prepare(
+            `SELECT name FROM sqlite_master WHERE type='table' AND name='workspaces'`,
+          ).get();
+          if (!wsTable) return;
+          const wsCols = db.prepare(
+            `SELECT name FROM pragma_table_info('workspaces')`,
+          ).all() as Array<{ name: string }>;
+          const wsNames = new Set(wsCols.map(c => c.name));
+          if (!wsNames.has('workspace_tag')) {
+            db.exec('ALTER TABLE workspaces ADD COLUMN workspace_tag TEXT;');
+          }
+          // Backfill tags for existing workspaces.
+          const existing = db.prepare(
+            `SELECT id FROM workspaces WHERE workspace_tag IS NULL OR workspace_tag = ''`,
+          ).all() as Array<{ id: string }>;
+          for (const row of existing) {
+            // Use SQLite's randomblob so the migration is fully
+            // self-contained — no external crypto needed.
+            db.prepare(
+              `UPDATE workspaces SET workspace_tag = hex(randomblob(16))
+                 WHERE id = ?`,
+            ).run(row.id);
+          }
+        },
+      },
+      // Sequence 1B Round-5: split fingerprint columns. The
+      // sequence-0 approval contract binds `payload_fingerprint`
+      // to the redactor's egress hash — must NOT be overwritten.
+      // The capsule-keyed recovery binding is a separate column.
+      {
+        version: 20,
+        name: 'm1-fingerprint-split',
+        sql: this.getV20Schema(),
+        preflight: (db: any) => {
+          // Tolerate databases already migrated to v19 without
+          // the new columns. Add via ALTER TABLE IF NOT EXISTS
+          // pattern (SQLite supports IF NOT EXISTS in 3.35+;
+          // our tests run 3.45+).
+          const effectCols = db.prepare(
+            `SELECT name FROM pragma_table_info('run_effects')`,
+          ).all() as Array<{ name: string }>;
+          const names = new Set(effectCols.map(c => c.name));
+          if (!names.has('capsule_fingerprint')) {
+            db.exec(
+              'ALTER TABLE run_effects ADD COLUMN capsule_fingerprint TEXT;',
+            );
+          }
+          // Round 5 recovery anchor is set on `capsule_fingerprint`
+        // column. The Round 6 condition gate needs additional
+        // columns for revalidation — `policy_version_hash` and
+        // `scope_hash` — added by the v21 migration below.
+        // The v20 preflight is intentionally minimal (it only
+        // adds `capsule_fingerprint`); v21's preflight handles
+        // the new columns.
+        },
+      },
+      // Round 6: revalidation columns so the recovery layer can
+      // re-check the approval/policy/route gate before any retry
+      // without joining every related table. v20 had the
+      // capsule_fingerprint column for the recovery anchor; v21
+      // adds `policy_version_hash` and `scope_hash` snapshots.
+      // Tolerate databases already migrated to v20 without the
+      // new columns. Idempotent preflight via `pragma_table_info`.
+      {
+        version: 21,
+        name: 'm1-recovery-revalidation-columns',
+        sql: this.getV21Schema(),
+        preflight: (db: any) => {
+          const cols = db.prepare(
+            `SELECT name FROM pragma_table_info('run_effects')`,
+          ).all() as Array<{ name: string }>;
+          const names = new Set(cols.map(c => c.name));
+          if (!names.has('policy_version_hash')) {
+            db.exec(
+              'ALTER TABLE run_effects ADD COLUMN policy_version_hash TEXT;',
+            );
+          }
+          if (!names.has('scope_hash')) {
+            db.exec(
+              'ALTER TABLE run_effects ADD COLUMN scope_hash TEXT;',
+            );
+          }
+        },
+      },
+      // Sequence 1B M1 approval callback authority. Approval consumption is
+      // SQLite-authoritative and one-use by default; the callback-intent CAS
+      // checks both the immutable approval revision and these counters.
+      {
+        version: 22,
+        name: 'm1-approval-consumption-cas',
+        sql: this.getV22Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approvals'",
+          ).get();
+          if (!table) return;
+          const cols = db.prepare(
+            "SELECT name FROM pragma_table_info('approvals')",
+          ).all() as Array<{ name: string }>;
+          const names = new Set(cols.map(c => c.name));
+          if (!names.has('use_limit')) {
+            db.exec('ALTER TABLE approvals ADD COLUMN use_limit INTEGER NOT NULL DEFAULT 1;');
+          }
+          if (!names.has('uses_consumed')) {
+            db.exec('ALTER TABLE approvals ADD COLUMN uses_consumed INTEGER NOT NULL DEFAULT 0;');
+          }
+        },
+      },
+      {
+        version: 23,
+        name: 'm1-approval-effect-authority',
+        sql: this.getV23Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approvals'").get();
+          if (!table) return;
+          const names = new Set((db.prepare("SELECT name FROM pragma_table_info('approvals')").all() as Array<{ name: string }>).map(c => c.name));
+          if (!names.has('effect_id')) db.exec('ALTER TABLE approvals ADD COLUMN effect_id TEXT;');
+          if (!names.has('effect_revision')) db.exec('ALTER TABLE approvals ADD COLUMN effect_revision INTEGER;');
+        },
+      },
+      {
+        version: 24,
+        name: 'm1-approval-revocation',
+        sql: this.getV24Schema(),
+        preflight: (db: any) => {
+          // v24 rebuilds approvals with a workspace FK. Never fabricate an
+          // empty parent table: doing so can make a legacy approval row look
+          // structurally migrated while silently orphaning its authority.
+          // A released v22 database necessarily has workspaces; a partial or
+          // damaged snapshot must be repaired/restored before this migration.
+          const workspaceTable = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspaces'",
+          ).get();
+          if (!workspaceTable) {
+            throw new Error(
+              'v24 approval rebuild requires the existing workspaces parent table; refusing to create an empty replacement',
+            );
+          }
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approvals'",
+          ).get();
+          if (!table) {
+            // Some pre-v18 fixture/installation schemas did not yet have
+            // approvals. Create the projection that the v24 rebuild reads;
+            // it is empty, so no published evidence is rewritten.
+            db.exec(`CREATE TABLE approvals (
+              id TEXT PRIMARY KEY, run_id TEXT, approval_type TEXT NOT NULL,
+              requested_scope_json TEXT, decision TEXT NOT NULL DEFAULT 'pending',
+              decided_by TEXT, reason TEXT, expires_at TEXT, created_at TEXT,
+              decided_at TEXT, workspace_id TEXT, scope_hash TEXT,
+              policy_version_hash TEXT, payload_fingerprint TEXT,
+              revision INTEGER NOT NULL DEFAULT 1, sanitized_preview TEXT,
+              redaction_rule_version TEXT, use_limit INTEGER NOT NULL DEFAULT 1,
+              uses_consumed INTEGER NOT NULL DEFAULT 0, effect_id TEXT,
+              effect_revision INTEGER
+            );`);
+            return;
+          }
+          const names = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('approvals')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          // v24 rebuilds the table to extend the decision CHECK. Its SELECT
+          // must therefore be readable from every released approval schema.
+          // These are additive compatibility columns only; existing rows and
+          // their values stay intact through the subsequent copy.
+          const additions: Array<[string, string]> = [
+            ['requested_scope_json', 'TEXT'],
+            ['decision', "TEXT NOT NULL DEFAULT 'pending'"],
+            ['decided_by', 'TEXT'],
+            ['reason', 'TEXT'],
+            ['expires_at', 'TEXT'],
+            ['created_at', 'TEXT'],
+            ['decided_at', 'TEXT'],
+            ['workspace_id', 'TEXT'],
+            ['scope_hash', 'TEXT'],
+            ['policy_version_hash', 'TEXT'],
+            ['payload_fingerprint', 'TEXT'],
+            ['revision', 'INTEGER NOT NULL DEFAULT 1'],
+            ['sanitized_preview', 'TEXT'],
+            ['redaction_rule_version', 'TEXT'],
+            ['use_limit', 'INTEGER NOT NULL DEFAULT 1'],
+            ['uses_consumed', 'INTEGER NOT NULL DEFAULT 0'],
+            ['effect_id', 'TEXT'],
+            ['effect_revision', 'INTEGER'],
+          ];
+          for (const [name, definition] of additions) {
+            if (!names.has(name)) db.exec(`ALTER TABLE approvals ADD COLUMN ${name} ${definition};`);
+          }
+          db.exec("UPDATE approvals SET created_at = datetime('now') WHERE created_at IS NULL;");
+        },
+        postflight: (db: any) => {
+          const violations = db.prepare(
+            'PRAGMA foreign_key_check(approvals)',
+          ).all() as Array<{ table: string; rowid: number; parent: string; fkid: number }>;
+          if (violations.length > 0) {
+            throw new Error(
+              `v24 approval rebuild foreign_key_check failed for ${violations.length} row(s)`,
+            );
+          }
+        },
+      },
+      // Durable cross-frame repair authority. This is intentionally separate
+      // from the proposed plan: the effect/revision/approval binding becomes
+      // immutable evidence owned by the repair transaction itself.
+      {
+        version: 25,
+        name: 'm1-repair-cross-frame-authority',
+        sql: this.getV25Schema(),
+      },
+      {
+        version: 26,
+        name: 'm1-effect-redaction-rule-binding',
+        sql: this.getV26Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'run_effects'",
+          ).get();
+          if (!table) return;
+          const names = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('run_effects')",
+          ).all() as Array<{ name: string }>).map(column => column.name));
+          if (!names.has('redaction_rule_version')) {
+            db.exec('ALTER TABLE run_effects ADD COLUMN redaction_rule_version TEXT;');
+          }
+        },
+      },
     ];
+  }
+
+
+  private getV22Schema(): string {
+    return `SELECT 1;`;
+  }
+
+  private getV25Schema(): string {
+    return `
+      CREATE TABLE IF NOT EXISTS repair_cross_frame_authorizations (
+        id TEXT PRIMARY KEY,
+        repair_transaction_id TEXT NOT NULL REFERENCES repair_transactions(id) ON DELETE CASCADE,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        target_frame_id TEXT NOT NULL REFERENCES run_frames(id),
+        effect_id TEXT NOT NULL REFERENCES run_effects(id),
+        effect_revision INTEGER NOT NULL,
+        approval_id TEXT NOT NULL REFERENCES approvals(id),
+        created_event_id TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(repair_transaction_id, effect_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_repair_cross_frame_authorizations_repair
+        ON repair_cross_frame_authorizations(repair_transaction_id);
+    `;
+  }
+
+  private getV26Schema(): string { return `SELECT 1;`; }
+
+  private getV23Schema(): string { return `SELECT 1;`; }
+
+  private getV24Schema(): string {
+    // SQLite cannot extend a CHECK constraint. Rebuild only after v23 so every
+    // referenced approval column exists; preserve every existing evidence row.
+    return `
+      CREATE TABLE approvals_new (
+        id TEXT PRIMARY KEY, run_id TEXT, approval_type TEXT NOT NULL,
+        requested_scope_json TEXT,
+        decision TEXT NOT NULL DEFAULT 'pending'
+          CHECK(decision IN ('pending','approved','denied','expired','revoked')),
+        decided_by TEXT, reason TEXT, expires_at TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')), decided_at TEXT,
+        workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE,
+        scope_hash TEXT, policy_version_hash TEXT, payload_fingerprint TEXT,
+        revision INTEGER NOT NULL DEFAULT 1, sanitized_preview TEXT,
+        redaction_rule_version TEXT, use_limit INTEGER NOT NULL DEFAULT 1,
+        uses_consumed INTEGER NOT NULL DEFAULT 0, effect_id TEXT,
+        effect_revision INTEGER
+      );
+      INSERT INTO approvals_new (id, run_id, approval_type, requested_scope_json,
+        decision, decided_by, reason, expires_at, created_at, decided_at,
+        workspace_id, scope_hash, policy_version_hash, payload_fingerprint,
+        revision, sanitized_preview, redaction_rule_version, use_limit,
+        uses_consumed, effect_id, effect_revision)
+      SELECT id, run_id, approval_type, requested_scope_json, decision,
+        decided_by, reason, expires_at, created_at, decided_at, workspace_id,
+        scope_hash, policy_version_hash, payload_fingerprint, revision,
+        sanitized_preview, redaction_rule_version, use_limit, uses_consumed,
+        effect_id, effect_revision FROM approvals;
+      DROP TABLE approvals;
+      ALTER TABLE approvals_new RENAME TO approvals;
+      CREATE INDEX IF NOT EXISTS idx_approvals_workspace ON approvals(workspace_id);
+      CREATE INDEX IF NOT EXISTS idx_approvals_decision ON approvals(decision);
+      CREATE INDEX IF NOT EXISTS idx_approvals_run_decision ON approvals(run_id, decision);
+    `;
+  }
+
+  private getV21Schema(): string {
+    // Round 6: column-only addition. Same pattern as v20.
+    return `SELECT 1;`;
+  }
+
+  private getV20Schema(): string {
+    // Round 5 fingerprint split: the v20 migration ONLY adds
+    // columns (handled by preflight) so the v20 SQL is a no-op
+    // SELECT. Idempotency is preserved because every ALTER
+    // is guarded by `pragma_table_info`.
+    return `SELECT 1;`;
+  }
+
+  private getV19Schema(): string {
+    // Capsule storage (plan 10 §3.2.1, plan 02 §3.3 audit /
+    // egress). Workspace-scoped, authenticated-encrypted blobs.
+    // The same SQLite transaction that writes the effect state
+    // and audit event also writes the capsule row + ref + hash,
+    // satisfying plan 10 §3.2.1 step 6 (capsule, receipt, state,
+    // event commit in the same SQLite transaction).
+    //
+    // blob_payload stores the AES-256-GCM ciphertext + 12-byte
+    // nonce + 16-byte auth tag (concatenated). Workspace_tag is
+    // a random per-workspace AAD so a capsule cannot be replayed
+    // across workspaces. expires_at caps lifetime; recovery
+    // refuses to honor an expired capsule.
+    return `
+      CREATE TABLE IF NOT EXISTS capsules (
+        id TEXT PRIMARY KEY,
+        workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+        capsule_kind TEXT NOT NULL CHECK(capsule_kind IN ('callback','result')),
+        format_version TEXT NOT NULL,
+        workspace_tag TEXT NOT NULL,
+        ref TEXT NOT NULL,
+        hash TEXT NOT NULL,
+        -- Bound to one of run, effect, receipt. Exactly one is non-null.
+        run_id TEXT,
+        effect_id TEXT REFERENCES run_effects(id) ON DELETE CASCADE,
+        receipt_id TEXT REFERENCES effect_receipts(id) ON DELETE CASCADE,
+        attempt_no INTEGER,
+        adapter_kind TEXT,
+        adapter_version TEXT,
+        payload_fingerprint TEXT,
+        scope_hash TEXT,
+        expires_at TEXT NOT NULL,
+        blob_payload BLOB NOT NULL,
+        created_event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(effect_id, capsule_kind, attempt_no)
+      );
+      CREATE INDEX IF NOT EXISTS idx_capsules_run ON capsules(run_id);
+      CREATE INDEX IF NOT EXISTS idx_capsules_effect ON capsules(effect_id);
+      CREATE INDEX IF NOT EXISTS idx_capsules_workspace_kind
+        ON capsules(workspace_id, capsule_kind);
+
+      -- Capsule incident log (plan 10 §3.2.1: missing / corrupt /
+      -- expired / wrong-workspace / hash-mismatched capsules MUST
+      -- fail closed and create an incident).
+      CREATE TABLE IF NOT EXISTS capsule_failures (
+        id TEXT PRIMARY KEY,
+        run_id TEXT,
+        effect_id TEXT,
+        workspace_id TEXT,
+        capsule_ref TEXT,
+        attempt_no INTEGER,
+        failure_kind TEXT NOT NULL CHECK(failure_kind IN (
+          'missing','corrupt','expired','wrong_workspace','hash_mismatch',
+          'decrypt_failed','format_mismatch','unsupported_primitives')),
+        detail TEXT NOT NULL,
+        recovered_by_event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_capsule_failures_run
+        ON capsule_failures(run_id);
+      CREATE INDEX IF NOT EXISTS idx_capsule_failures_effect
+        ON capsule_failures(effect_id);
+
+      -- Effect ingress finding rows (plan 10 §4 step 7). The M1
+      -- kernel writes a minimal "accepted" finding so the commit
+      -- audit event carries the ingress_finding_id pointer. Full
+      -- ingress review is M2.
+      CREATE TABLE IF NOT EXISTS ingress_findings (
+        id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+        receipt_id TEXT REFERENCES effect_receipts(id) ON DELETE CASCADE,
+        finding_kind TEXT NOT NULL CHECK(finding_kind IN
+          ('accepted','quarantined','rejected')),
+        detail TEXT NOT NULL,
+        event_id TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_ingress_findings_effect
+        ON ingress_findings(effect_id);
+    `;
   }
 
   private getV17Schema(): string {

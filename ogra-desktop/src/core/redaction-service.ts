@@ -60,6 +60,16 @@ export class RedactionService {
   ) {}
 
   /**
+   * Returns the version of the rules currently used to produce egress
+   * evidence. Durable recovery deliberately asks the live service instead
+   * of carrying its own default: a rule upgrade must invalidate an old
+   * callback until it is re-authorized under the new rules.
+   */
+  getCurrentRuleVersion(): string {
+    return RULE_VERSION;
+  }
+
+  /**
    * Apply the deterministic built-in rule set to a payload and
    * persist a redaction_record row. Returns a sanitized preview that
    * may be shown in the UI / approval dialog; never the original.

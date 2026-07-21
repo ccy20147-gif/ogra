@@ -38,6 +38,9 @@ export interface ModelRequest {
    */
   approvalScopeHash?: string;
   payloadHash: string;
+  /** Raw adapter idempotency authority, supplied only from an authenticated
+   * callback capsule. It must never be persisted in plaintext. */
+  idempotencyKey?: string;
   routeDecisionSnapshot: Record<string, unknown>;
   /**
    * AbortSignal the adapter MUST honor to honor cancellation.
