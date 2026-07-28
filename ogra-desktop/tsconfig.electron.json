@@ -11,11 +11,12 @@
     "outDir": "dist-electron",
     "rootDir": ".",
     "sourceMap": true,
+    "allowJs": true,
     "declaration": false,
     "baseUrl": ".",
     "paths": {
       "@shared/*": ["src/shared/*"]
     }
   },
-  "include": ["electron/**/*", "src/shared/**/*"]
+  "include": ["electron/**/*", "src/shared/**/*", "src/core/ingress-review-worker.js"]
 }

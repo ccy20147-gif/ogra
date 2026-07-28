@@ -1,4 +1,5 @@
 import React from 'react';
+import { EffectStateBadge, RecoveryDecisionBadge } from './EffectStateBadge';
 import { RouteTraceViewer } from './RouteTraceViewer';
 import { buttonStyle, secondaryButtonStyle } from '../styles';
 
@@ -54,6 +55,17 @@ interface RunWorkspaceTabProps {
   riskLevel: string;        // low | medium | high | critical
   contextSources: ContextSource[];
   citations?: CitationInfo[];
+
+  /* Series 1B Milestone 2 — frame/effect status badges. Each
+     entry carries ONLY refs / hashes / state names — never
+     raw payload bytes. */
+  effectStatuses?: Array<{
+    effectId: string;
+    state: string;
+    sanitizedReasonCode?: string | null;
+    awaitingApproval?: boolean;
+    recoveryDecision?: { decisionCode: string; sanitizedReason?: string | null };
+  }>;
 
   onTaskInputChange: (value: string) => void;
   onRunDemo: () => void;
@@ -571,6 +583,7 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
   riskLevel,
   contextSources,
   citations,
+  effectStatuses: effectStatusesProp,
   onTaskInputChange,
   onRunDemo,
   onModelChange,
@@ -606,6 +619,36 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
         modelOptions={modelOptions}
         onChange={onModelChange}
       />
+
+      {/* Series 1B Milestone 2 — effect status badges (refs / hashes
+          / state only — never raw payload bytes). */}
+      {(effectStatusesProp?.length ?? 0) > 0 && (
+        <div data-testid="effect-status-row" style={{
+          display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '10px',
+        }}>
+          {effectStatusesProp!.map((es: {
+            effectId: string; state: string;
+            sanitizedReasonCode?: string | null;
+            awaitingApproval?: boolean;
+            recoveryDecision?: { decisionCode: string; sanitizedReason?: string | null };
+          }) => (
+            <span key={es.effectId} data-testid={`effect-status-${es.effectId}`}
+              style={{ display: 'inline-flex', gap: 4, alignItems: 'center' }}>
+              <EffectStateBadge
+                state={es.state}
+                sanitizedReasonCode={es.sanitizedReasonCode ?? null}
+                awaitingApproval={es.awaitingApproval ?? false}
+              />
+              {es.recoveryDecision && (
+                <RecoveryDecisionBadge
+                  decisionCode={es.recoveryDecision.decisionCode}
+                  sanitizedReason={es.recoveryDecision.sanitizedReason ?? null}
+                />
+              )}
+            </span>
+          ))}
+        </div>
+      )}
 
       {/* Run / Stop buttons */}
       <div style={{ display: 'flex', gap: '8px', marginBottom: '8px' }}>

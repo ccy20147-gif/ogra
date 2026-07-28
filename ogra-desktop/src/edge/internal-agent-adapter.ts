@@ -11,6 +11,7 @@ import { PromptInjectionDetector } from '../core/prompt-injection-detector';
 import { OgraError, OgraErrorCode } from '../shared/errors';
 import { EffectProtocolService } from '../core/effect-protocol-service';
 import { DurableRuntimeService } from '../core/durable-runtime-service';
+import { IndependentIngressReviewer } from '../core/independent-ingress-reviewer';
 import * as crypto from 'crypto';
 
 export interface AgentRunInput {
@@ -118,12 +119,18 @@ export class InternalAgentAdapter {
   bindKernel(deps: {
     runtime: DurableRuntimeService;
     protocol: EffectProtocolService;
+    independentIngressReviewer: IndependentIngressReviewer;
   }): void {
     (this as unknown as { runtime: DurableRuntimeService }).runtime = deps.runtime;
     (this as unknown as { protocol: EffectProtocolService }).protocol = deps.protocol;
+    (this as unknown as { independentIngressReviewer: IndependentIngressReviewer }).independentIngressReviewer = deps.independentIngressReviewer;
   }
   private runtime: DurableRuntimeService | null = null;
   private protocol: EffectProtocolService | null = null;
+  // The agent depends on IndependentIngressReviewer for the
+  // production finalize path. The agent CANNOT choose the
+  // outcome itself — only canonical inputs are passed in.
+  private independentIngressReviewer: IndependentIngressReviewer | null = null;
 
   /** Wire the canonical RunService after both services are constructed
    *  (breaks the constructor cycle). Idempotent; only the first call
@@ -596,6 +603,8 @@ export class InternalAgentAdapter {
     let durableEffectId: string | null = null;
     let durableAttemptNo: number | null = null;
     let durableReceiptId: string | null = null;
+    let durableResultCapsuleHash: string | null = null;
+    let durableResultPayloadDigest: string | null = null;
     let durableHolderId: string | null = null;
     let durableLeaseVersion: number | null = null;
     let durableRootFrameId: string | null = null;
@@ -906,6 +915,8 @@ export class InternalAgentAdapter {
           providerStatus: 'ok',
         });
         durableReceiptId = receipt.receiptId;
+        durableResultCapsuleHash = receipt.resultCapsuleHash;
+        durableResultPayloadDigest = receipt.resultPayloadDigest;
       } catch (err) {
         // Record-receipt must not eat the model output. The
         // recovery layer will reconcile on restart.
@@ -993,24 +1004,47 @@ export class InternalAgentAdapter {
       redactionRuleVersion: modelResult.redactionRuleVersion ?? undefined,
     });
 
-    // Sequence 1B Milestone 1 — commit the durable effect to
-    // the terminal `committed` state. The CAS enforces that
-    // only one process (or one retry) can win the terminal
-    // write; a second commit on the same receipt with the same
-    // effect_revision loses to REVISION_CONFLICT and the
-    // process that lost re-reads the row instead.
-    if (this.protocol && durableEffectId && durableReceiptId) {
+    // Sequence 1B Milestone 2 — the production finalize path
+    // delegates to the SOLE entry point:
+    // IndependentIngressReviewer. The agent does NOT decide
+    // the outcome itself; the policy does. The reviewer
+    // computes the verdict from canonical inputs only:
+    // effectId, runId, workspaceId, receiptId, attemptNo,
+    // payloadDigest, source. The agent cannot influence the
+    // verdict through the response body.
+    if (this.protocol && this.independentIngressReviewer && durableEffectId
+        && durableReceiptId && durableHolderId && durableAttemptNo !== null) {
       const refreshed = this.runtime?.readEffect(durableEffectId);
-      if (refreshed && refreshed.state === 'received') {
+      if (refreshed && (refreshed.state === 'received'
+          || refreshed.state === 'awaiting_callback_verification')) {
         try {
-          this.protocol.commitToTerminal({
+          const reviewed = this.independentIngressReviewer.reviewAndFinalize({
             effectId: durableEffectId,
-            expectedRevision: refreshed.effectRevision,
-            expectedAttemptNo: durableAttemptNo ?? 1,
+            runId,
+            workspaceId: workspaceId,
             receiptId: durableReceiptId,
-            leaseHolder: durableHolderId ?? '',
-            expectedLeaseVersion: durableLeaseVersion ?? -1,
+            attemptNo: durableAttemptNo,
+            // This must be the authenticated plaintext payload digest, not
+            // the encrypted capsule blob hash. Ingress recomputes the same
+            // canonical digest after opening the authoritative receipt.
+            payloadDigest: durableResultPayloadDigest ?? modelResult.responseHash,
+            source: 'agent',
+            ruleVersion: 'm2',
+            leaseHolderId: durableHolderId,
+            leaseVersion: durableLeaseVersion ?? 0,
           });
+          // The policy may decide to quarantine / reject —
+          // surface the outcome up the call stack; otherwise
+          // fall through to frame completion.
+          if (reviewed.outcome !== 'accepted') {
+            return {
+              answer: '',
+              answerRedacted: true,
+              quarantineReason: reviewed.sanitizedReasonCode ?? reviewed.outcome,
+              redactedFields: ['response'],
+              runId,
+            } as unknown as AgentRunResult;
+          }
         } catch (err) {
           if ((err as { code?: string })?.code !== OgraErrorCode.REVISION_CONFLICT) {
             if (this.runtime && durablePlanFrameId) {
@@ -1023,7 +1057,7 @@ export class InternalAgentAdapter {
             }
             throw err;
           }
-          // CAS lost — another process already committed.
+          // CAS lost — another process already finalised.
         }
       }
     }

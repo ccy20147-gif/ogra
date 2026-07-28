@@ -38,6 +38,9 @@ export interface OgraAPI {
     status: (runId: string) => Promise<IpcResult>;
     cancel: (runId: string) => Promise<IpcResult>;
     createId: (req: { workspaceId: string; task: string }) => Promise<IpcResult>;
+    // Sequence 1B Milestone 2 — sanitized per-effect status
+    // snapshot (refs / hashes / state names only).
+    effectStatusList: (runId: string) => Promise<IpcResult>;
   };
   /** Sequence 0 Plan 03 §3.6 — approve-then-egress tier. */
   approval: {

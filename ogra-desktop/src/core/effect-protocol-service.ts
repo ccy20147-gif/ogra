@@ -160,6 +160,8 @@ export interface RecordReceiptOutput {
   attemptNo: number;
   resultCapsuleRef: string;
   resultCapsuleHash: string;
+  /** sha256(canonicalJSON(decrypted result capsule payload)). */
+  resultPayloadDigest: string;
 }
 
 export interface CommitTerminalInput {
@@ -570,52 +572,88 @@ export class EffectProtocolService {
     eventId: string;
   }): void {
     const workspaceId = this.resolveWorkspaceId(input.effect.runId);
-    const approval = this.odb.getDB().prepare(`
-      SELECT id, run_id, workspace_id, approval_type, decision, expires_at,
-             scope_hash, payload_fingerprint, policy_version_hash, revision,
-             use_limit, uses_consumed, effect_id, effect_revision
-        FROM approvals WHERE id = ?
-    `).get(input.approvalId) as {
-      id: string; run_id: string; workspace_id: string; approval_type: string; decision: string;
-      expires_at: string | null; scope_hash: string | null;
-      payload_fingerprint: string | null; policy_version_hash: string | null;
-      revision: number | null;
-      use_limit: number | null; uses_consumed: number | null;
-      effect_id: string | null; effect_revision: number | null;
+    // M2 — an approval id can be either a prepare-time
+    // approvals row (UUID-style) or a recovery-approval row
+    // (rap_*). The callback MUST bind to the canonical
+    // approval that authorizes the attempt. The recovery
+    // approval row carries the same bindings (effect_id,
+    // scope_hash, payload_fingerprint, policy_version_hash)
+    // so the same checks apply.
+    const isRecoveryApproval = input.approvalId.startsWith('rap_');
+    const approvalRow = this.odb.getDB().prepare(isRecoveryApproval ? `
+        SELECT id, run_id, workspace_id, decided_by AS decision_by,
+               expires_at, scope_hash, payload_fingerprint,
+               policy_version_hash, use_limit, uses_consumed,
+               effect_id, recovery_attempt
+          FROM recovery_approvals WHERE id = ?
+      ` : `
+        SELECT id, run_id, workspace_id, decision, expires_at,
+               scope_hash, payload_fingerprint, policy_version_hash,
+               revision, use_limit, uses_consumed, effect_id,
+               effect_revision, approval_type
+          FROM approvals WHERE id = ?
+      `).get(input.approvalId) as {
+      id: string; run_id: string; workspace_id: string;
+      decision?: string; decision_by?: string;
+      expires_at: string | null;
+      scope_hash: string | null; payload_fingerprint: string | null;
+      policy_version_hash: string | null;
+      revision?: number; use_limit: number; uses_consumed: number;
+      effect_id: string | null;
+      effect_revision?: number | null;
+      recovery_attempt?: number;
+      approval_type?: string;
     } | undefined;
-    if (!approval || approval.decision !== 'approved'
-        || approval.run_id !== input.effect.runId
-        || approval.workspace_id !== workspaceId
-        || !approval.scope_hash || approval.scope_hash !== input.effect.scopeHash
-        || !approval.payload_fingerprint
-        || approval.payload_fingerprint !== input.effect.payloadFingerprint
-        || !approval.policy_version_hash
-        || approval.policy_version_hash !== input.effect.policyVersionHash
-        || approval.effect_id !== input.effect.id
-        || approval.effect_revision !== input.effect.effectRevision
-        || (approval.expires_at && approval.expires_at <= new Date().toISOString())) {
+    if (!approvalRow || approvalRow.run_id !== input.effect.runId
+        || approvalRow.workspace_id !== workspaceId
+        || !approvalRow.scope_hash
+        || approvalRow.scope_hash !== input.effect.scopeHash
+        || !approvalRow.payload_fingerprint
+        || approvalRow.payload_fingerprint !== input.effect.payloadFingerprint
+        || !approvalRow.policy_version_hash
+        || approvalRow.policy_version_hash !== input.effect.policyVersionHash
+        || approvalRow.effect_id !== input.effect.id
+        || (approvalRow.expires_at
+            && approvalRow.expires_at <= new Date().toISOString())) {
       throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
         `pre-callback CAS: approval ${input.approvalId} is not valid for this effect`);
     }
-    const invocationApproval = approval.approval_type === 'egress'
-      || approval.approval_type === 'tool_invocation';
-    const validType = input.bindingKind === 'initial'
-      ? invocationApproval
-      : approval.approval_type === 'recovery_retry';
-    if (!validType) {
-      throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
-        `pre-callback CAS: approval ${input.approvalId} type is not valid for ${input.bindingKind}`);
+    if (!isRecoveryApproval) {
+      const decision = approvalRow.decision as string;
+      if (decision !== 'approved') {
+        throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+          `pre-callback CAS: approval ${input.approvalId} decision=${decision}; expected 'approved'`);
+      }
+      const apType = approvalRow.approval_type;
+      const validType = input.bindingKind === 'initial'
+        ? (apType === 'egress' || apType === 'tool_invocation')
+        : apType === 'recovery_retry';
+      if (!validType) {
+        throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+          `pre-callback CAS: approval ${input.approvalId} type=${apType} is not valid for ${input.bindingKind}`);
+      }
+    } else {
+      if (input.bindingKind !== 'recovery_retry') {
+        throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+          `pre-callback CAS: recovery_approval ${input.approvalId} cannot be used as initial binding`);
+      }
+      if (approvalRow.recovery_attempt !== undefined
+          && approvalRow.recovery_attempt !== input.attemptNo) {
+        throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+          `pre-callback CAS: recovery_approval ${input.approvalId} attempt=${approvalRow.recovery_attempt}; expected ${input.attemptNo}`);
+      }
     }
-    const approvalRevision = approval.revision ?? 1;
-    // SQLite is the authority for the one-use reservation. The revision
-    // predicate rejects a changed approval row; the counter predicate lets
-    // only one concurrent callback consume a default single-use approval.
-    const consumed = this.odb.getDB().prepare(`
-      UPDATE approvals
-         SET uses_consumed = uses_consumed + 1
-       WHERE id = ? AND revision = ? AND decision = 'approved'
-         AND uses_consumed < use_limit
-    `).run(input.approvalId, approvalRevision);
+    const approvalRevision = approvalRow.revision ?? 1;
+    const consumed = this.odb.getDB().prepare(isRecoveryApproval ? `
+        UPDATE recovery_approvals
+           SET uses_consumed = uses_consumed + 1
+         WHERE id = ? AND uses_consumed < use_limit
+      ` : `
+        UPDATE approvals
+           SET uses_consumed = uses_consumed + 1
+         WHERE id = ? AND revision = ? AND decision = 'approved'
+           AND uses_consumed < use_limit
+      `).run(input.approvalId, approvalRevision);
     if (consumed.changes !== 1) {
       throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
         `pre-callback CAS: approval ${input.approvalId} was already consumed or changed`);
@@ -638,7 +676,8 @@ export class EffectProtocolService {
     this.runtime.appendEdge({
       runId: input.effect.runId,
       fromKind: 'effect', fromId: input.effect.id,
-      relation: 'bound_to_approval', toKind: 'approval',
+      relation: 'bound_to_approval',
+      toKind: isRecoveryApproval ? 'recovery_approval' : 'approval',
       toId: input.approvalId, sourceEventId: input.eventId,
     });
   }
@@ -807,6 +846,7 @@ export class EffectProtocolService {
           attemptNo: input.attemptNo,
           resultCapsuleRef: resultCapsule.ref,
           resultCapsuleHash: resultCapsule.hash,
+          resultPayloadDigest: responseHash,
         };
       },
     });

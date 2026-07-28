@@ -116,27 +116,65 @@ export class DefaultRecoveryConditionChecker
     // Approval binding checks (when an approval was used at
     // prepare-time).
     if (input.approvalId) {
-      const row = this.odb.getDB().prepare(`
-        SELECT id, run_id, workspace_id, decision, expires_at,
-               payload_fingerprint, scope_hash, policy_version_hash,
-               redaction_rule_version
-          FROM approvals WHERE id = ?
-      `).get(input.approvalId) as
-        { id: string; run_id: string; workspace_id: string; decision: string; expires_at: string | null;
-          payload_fingerprint: string | null; scope_hash: string | null;
-          policy_version_hash: string | null;
-          redaction_rule_version: string | null; } | undefined;
+      // M2: an approval id can be either a prepare-time
+      // approvals row (UUID-style) or a recovery-approval row
+      // (rap_*). The recovery path must look in BOTH places.
+      const isRecoveryApproval = input.approvalId.startsWith('rap_');
+      const row = (isRecoveryApproval
+        ? this.odb.getDB().prepare(`
+            SELECT id, run_id, workspace_id, decided_by, expires_at,
+                   payload_fingerprint, scope_hash, policy_version_hash,
+                   redaction_rule_version, use_limit, uses_consumed
+              FROM recovery_approvals WHERE id = ?
+          `).get(input.approvalId) as
+            { id: string; run_id: string; workspace_id: string;
+              decided_by: string; expires_at: string | null;
+              payload_fingerprint: string | null; scope_hash: string | null;
+              policy_version_hash: string | null;
+              redaction_rule_version: string | null;
+              use_limit: number; uses_consumed: number; } | undefined
+        : this.odb.getDB().prepare(`
+            SELECT id, run_id, workspace_id, decision, expires_at,
+                   payload_fingerprint, scope_hash, policy_version_hash,
+                   redaction_rule_version, revoked_for_recovery
+              FROM approvals WHERE id = ?
+          `).get(input.approvalId) as
+            { id: string; run_id: string; workspace_id: string; decision: string; expires_at: string | null;
+              payload_fingerprint: string | null; scope_hash: string | null;
+              policy_version_hash: string | null;
+              redaction_rule_version: string | null;
+              revoked_for_recovery: number | null; } | undefined);
       if (!row) {
         return fail('approval_missing',
           `approval ${input.approvalId} not found`);
       }
-      if (row.run_id !== input.effect.runId) {
+      // For prepare-time approvals, validate decision +
+      // revocation. For recovery approvals, the decision is
+      // implicit (it was minted by RecoveryApprovalService
+      // and is one-use by construction: use_limit=1 +
+      // uses_consumed <= 1).
+      if (!isRecoveryApproval) {
+        const decision = (row as any).decision as string;
+        if (decision !== 'approved') {
+          return fail('approval_revoked',
+            `approval ${input.approvalId} decision=${decision}`);
+        }
+        const revoked = (row as any).revoked_for_recovery as number | null;
+        if (revoked === 1) {
+          return fail('approval_revoked',
+            `approval ${input.approvalId} was revoked for recovery`);
+        }
+      } else {
+        // Recovery approval one-use enforcement.
+        if ((row as any).uses_consumed >= (row as any).use_limit) {
+          return fail('approval_revoked',
+            `recovery_approval ${input.approvalId} use limit exceeded`);
+        }
+      }
+      const runIdField = (row as any).run_id as string;
+      if (runIdField !== input.effect.runId) {
         return fail('approval_missing',
           `approval ${input.approvalId} is not bound to run ${input.effect.runId}`);
-      }
-      if (row.decision !== 'approved') {
-        return fail('approval_revoked',
-          `approval ${input.approvalId} decision=${row.decision}`);
       }
       if (row.expires_at && row.expires_at <= asOf) {
         return fail('approval_expired',
@@ -210,17 +248,26 @@ export class DefaultRecoveryConditionChecker
         return fail('redaction_rule_version_mismatch',
           `effect ${input.effect.id} redaction_rule_version=${input.effect.redactionRuleVersion ?? '(missing)'} current=${redactionRuleVersionCurrent || '(missing)'}`);
       }
-      const approvalRow = this.odb.getDB().prepare(
-        'SELECT redaction_rule_version FROM approvals WHERE id = ?',
-      ).get(input.approvalId) as { redaction_rule_version: string | null } | undefined;
+      const approvalRow = (input.approvalId?.startsWith('rap_')
+        ? this.odb.getDB().prepare(
+          'SELECT redaction_rule_version FROM recovery_approvals WHERE id = ?',
+        ).get(input.approvalId)
+        : this.odb.getDB().prepare(
+          'SELECT redaction_rule_version FROM approvals WHERE id = ?',
+        ).get(input.approvalId)) as { redaction_rule_version: string | null } | undefined;
       if (!approvalRow || approvalRow.redaction_rule_version !== redactionRuleVersionCurrent) {
         return fail('redaction_rule_version_mismatch',
           `redaction route ${route.id} approval provenance is missing or stale`);
       }
-      const approvalEvidence = this.odb.getDB().prepare(`
-        SELECT id FROM approvals
-         WHERE id = ? AND redaction_rule_version = ?
-      `).get(input.approvalId, redactionRuleVersionCurrent) as { id: string } | undefined;
+      const approvalEvidence = (input.approvalId?.startsWith('rap_')
+        ? this.odb.getDB().prepare(`
+            SELECT id FROM recovery_approvals
+             WHERE id = ? AND redaction_rule_version = ?
+          `).get(input.approvalId, redactionRuleVersionCurrent)
+        : this.odb.getDB().prepare(`
+            SELECT id FROM approvals
+             WHERE id = ? AND redaction_rule_version = ?
+          `).get(input.approvalId, redactionRuleVersionCurrent)) as { id: string } | undefined;
       if (!approvalEvidence) {
         return fail('redaction_rule_version_mismatch',
           `redaction route ${route.id} has no approval evidence for current rule version`);

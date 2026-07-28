@@ -1,4 +1,7 @@
 import { RecoveryService } from './recovery-service';
+import { RecoveryApprovalService } from './recovery-approval-service';
+import { IngressReviewService } from './ingress-review-service';
+import { IndependentIngressReviewer } from './independent-ingress-reviewer';
 import { DefaultRecoveryConditionChecker } from './recovery-condition-checker';
 import { OgraSecretBroker } from './secret-broker';
 import { DatabaseService } from './database-service';
@@ -69,6 +72,24 @@ export class OgraCore {
   // path goes through policy/route re-evaluation.
   public readonly recoveryService: RecoveryService;
   public readonly recoveryConditionChecker: DefaultRecoveryConditionChecker;
+  // Round-8a (M2): ingress review + recovery approval services.
+  // IngressReviewService.finalizeIngressDecision() is the
+  // single entry point that moves an effect from
+  // received → committed|quarantined|failed with the
+  // reviewer-driven outcome, payload digest, and audit edges
+  // all in one SQLite transaction.
+  /** Internal finalizer; only the isolated reviewer receives its capability. */
+  private readonly ingressReviewService: IngressReviewService;
+  // M2 — the IndependentIngressReviewer is the SOLE entry
+  // point for both the agent's production path and the
+  // recovery's received/unknown finalize path. The agent /
+  // recovery MUST NOT call ingressReviewService directly.
+  // This indirection enforces that the verdict comes from a
+  // policy that does NOT trust the producer's claimed
+  // payload / outcome.
+  public readonly independentIngressReviewer: IndependentIngressReviewer;
+  /** Legacy recovery-approval ledger is deliberately not a public Core authority. */
+  private readonly recoveryApprovalService: RecoveryApprovalService;
   public readonly dataSafetyService: DataSafetyService;
   /**
    * Sequence 1B Milestone 1 — durable effect kernel. The agent
@@ -175,7 +196,40 @@ export class OgraCore {
       this.capsuleStore,
       this.effectProtocol,
       this.recoveryConditionChecker,
+      // placeholder; replaced after ingressReviewService is built
+      undefined as any,
     );
+
+    // Round-8a (M2): ingress review + recovery approval services.
+    // IngressReviewService operates on verified result capsules.
+    this.ingressReviewService = new IngressReviewService(
+      this.databaseService.getOgraDatabase(),
+      this.durableRuntime,
+      this.capsuleStore,
+    );
+    // IndependentIngressReviewer is the SOLE entry point for
+    // finalize; it composes the policy verdict with the
+    // canonical finalize transaction. The agent + recovery
+    // depend on this class (not on IngressReviewService
+    // directly) so a producer cannot self-author its verdict.
+    this.independentIngressReviewer = new IndependentIngressReviewer(
+      this.databaseService.getOgraDatabase(),
+      this.durableRuntime,
+      this.capsuleStore,
+      this.ingressReviewService,
+    );
+    // RecoveryApprovalService mints per-retry approvals.
+    this.recoveryApprovalService = new RecoveryApprovalService(
+      this.databaseService.getOgraDatabase(),
+      this.durableRuntime,
+    );
+    // Wire the independent reviewer into RecoveryService now
+    // that both are constructed. This is the M2 production
+    // gate: recovery's received / unknown finalize paths go
+    // through the reviewer, not directly to terminal state.
+    (this.recoveryService as unknown as {
+      independentIngressReviewer: IndependentIngressReviewer;
+    }).independentIngressReviewer = this.independentIngressReviewer;
 
     this.internalAgent = new InternalAgentAdapter(
       this.databaseService,
@@ -305,6 +359,7 @@ export class OgraCore {
     this.internalAgent.bindKernel({
       runtime: this.durableRuntime,
       protocol: this.effectProtocol,
+      independentIngressReviewer: this.independentIngressReviewer,
     });
 
     this.knowledgeService = new KnowledgeService(this.auditService, this.pathValidator, config, this.ragEngine, this.databaseService);
@@ -344,6 +399,110 @@ export class OgraCore {
       conditionChecker: this.recoveryConditionChecker,
     };
     return this.recoveryService.recover(merged);
+  }
+
+  /**
+   * Sequence 1B Milestone 2 — return a sanitized snapshot of
+   * every effect in the run. The shape carries ONLY refs /
+   * hashes / state names + sanitized reason codes — NEVER
+   * raw payload bytes, secrets, or response bodies. The
+   * renderer (and any other consumer) is responsible for
+   * passing this array through a closed-set renderer; the
+   * closed-set is enforced in
+   * `src/renderer/components/EffectStateBadge.tsx`.
+   */
+  effectStatusList(runId: string): Array<{
+    effectId: string;
+    state: string;
+    sanitizedReasonCode: string | null;
+    awaitingApproval: boolean;
+    recoveryDecision: { decisionCode: string; sanitizedReason: string | null } | null;
+  }> {
+    if (!runId) {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        'effectStatusList: runId is required');
+    }
+    // Read every effect row + the most recent recovery_decisions
+    // row for each. The result carries no payload fields.
+    // Note: recovery_decisions has no sanitized_reason_code
+    // column — the sanitized reason lives on the
+    // ingress_review_decisions / ingress_findings rows.
+    // We use incident_kind (always present in
+    // recovery_decisions) as the surfaced reason, falling
+    // back to e.interrupted_reason_code.
+    const db = this.databaseService.getRawDB();
+    const effectRows = db.prepare(`
+      SELECT e.id AS effect_id, e.state AS state,
+             COALESCE(rr.incident_kind, e.interrupted_reason_code)
+               AS sanitized_reason_code,
+             CASE WHEN e.state IN ('planned', 'unknown', 'awaiting_callback_verification')
+                       AND e.current_approval_id IS NOT NULL
+                  THEN 1 ELSE 0 END
+               AS awaiting_approval,
+             rr.decision_code AS recovery_decision_code,
+             rr.final_state AS recovery_final_state
+        FROM run_effects e
+        LEFT JOIN recovery_decisions rr
+          ON rr.effect_id = e.id
+         AND rr.created_at = (
+           SELECT MAX(created_at) FROM recovery_decisions
+            WHERE effect_id = e.id
+         )
+       WHERE e.run_id = ?
+       ORDER BY e.created_at
+    `).all(runId) as Array<{
+      effect_id: string; state: string; sanitized_reason_code: string | null;
+      awaiting_approval: number; recovery_decision_code: string | null;
+      recovery_final_state: string | null;
+    }>;
+    return effectRows.map((row) => ({
+      effectId: row.effect_id,
+      state: row.state,
+      sanitizedReasonCode: row.sanitized_reason_code ?? null,
+      awaitingApproval: row.awaiting_approval === 1,
+      recoveryDecision: row.recovery_decision_code
+        ? { decisionCode: row.recovery_decision_code,
+            sanitizedReason: null }
+        : null,
+    }));
+  }
+
+  /**
+   * Restricted quarantine projection. This deliberately does not expose the
+   * sealed capsule reference or content: callers receive only the incident
+   * summary needed to show a risk notification/sandbox placeholder.
+   */
+  quarantineRead(quarantineId: string): {
+    id: string;
+    runId: string;
+    ingressFindingId: string;
+    summary: string;
+    classification: string;
+    status: string;
+    userCanView: boolean;
+    createdAt: string;
+  } {
+    if (!quarantineId) {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        'quarantineRead: quarantine id is required');
+    }
+    const row = this.databaseService.getRawDB().prepare(`
+      SELECT id, run_id, ingress_finding_id, summary, classification,
+             status, user_can_view, created_at
+        FROM quarantine_contents WHERE id = ?
+    `).get(quarantineId) as {
+      id: string; run_id: string; ingress_finding_id: string; summary: string;
+      classification: string; status: string; user_can_view: number; created_at: string;
+    } | undefined;
+    if (!row) {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        'quarantineRead: quarantine content was not found');
+    }
+    return {
+      id: row.id, runId: row.run_id, ingressFindingId: row.ingress_finding_id,
+      summary: row.summary, classification: row.classification, status: row.status,
+      userCanView: row.user_can_view === 1, createdAt: row.created_at,
+    };
   }
 
   /**
@@ -452,13 +611,17 @@ export class OgraCore {
 
     const id = `apr_recovery_${Date.now()}_${crypto.randomBytes(4).toString('hex')}`;
     const now = new Date().toISOString();
+    // A recovery retry needs an explicit human/Core approval decision. This
+    // records a standard pending approval bound to this exact effect revision;
+    // it does not mint a usable rap_* capability and cannot invoke a retry.
+    // Once approved, EffectProtocolService consumes this row atomically with
+    // callback intent under the recovery lease.
     this.durableRuntime.transactionalAppend({
       meta: {
         runId: input.runId,
         workspaceId: input.workspaceId,
         eventType: 'recovery_approval_requested',
         eventPayload: {
-          approvalId: id,
           effectId: effect.id,
           effectRevision: effect.effectRevision,
           approvalType: 'recovery_retry',
@@ -471,37 +634,40 @@ export class OgraCore {
         policyVersionHash: currentPolicyVersion,
       },
       body: (eventId) => {
-        const inserted = db.prepare(`
-          INSERT INTO approvals (id, run_id, workspace_id, approval_type,
-            requested_scope_json, scope_hash, payload_fingerprint,
-            policy_version_hash, effect_id, effect_revision, expires_at,
-            decision, created_at, reason)
-          SELECT ?, ?, ?, 'recovery_retry', ?, ?, ?, ?, ?, effect_revision,
-                 ?, 'pending', ?, ?
-            FROM run_effects
-           WHERE id = ? AND run_id = ? AND state = 'unknown'
-             AND effect_revision = ? AND payload_fingerprint = ?
-             AND scope_hash = ? AND policy_version_hash = ?
+        const insert = db.prepare(`
+          INSERT INTO approvals
+            (id, run_id, workspace_id, approval_type, requested_scope_json,
+             scope_hash, payload_fingerprint, policy_version_hash,
+             redaction_rule_version, expires_at, decision, created_at,
+             use_limit, uses_consumed, effect_id, effect_revision, reason)
+          VALUES (?, ?, ?, 'recovery_retry', ?, ?, ?, ?, ?, ?, 'pending',
+                  ?, 1, 0, ?, ?, ?)
         `).run(
           id, input.runId, input.workspaceId, scopeJson, scopeHash,
-          effect.payloadFingerprint, currentPolicyVersion, effect.id,
-          input.expiresAt ?? null, now, input.reason ?? null,
-          effect.id, input.runId, effect.effectRevision,
-          effect.payloadFingerprint, scopeHash, currentPolicyVersion,
+          effect.payloadFingerprint, currentPolicyVersion,
+          effect.redactionRuleVersion, input.expiresAt ?? null, now,
+          effect.id, effect.effectRevision, input.reason ?? null,
         );
-        if (inserted.changes !== 1) {
+        if (insert.changes !== 1) {
           throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
-            `Recovery approval effect ${effect.id} changed while requesting authority`);
+            'Recovery approval request insert lost');
         }
         this.durableRuntime.appendEdge({
           runId: input.runId,
           fromKind: 'effect', fromId: effect.id,
           relation: 'recovery_approval_requested',
-          toKind: 'approval', toId: id, sourceEventId: eventId,
+          toKind: 'approval', toId: id,
+          sourceEventId: eventId,
         });
+        return { id };
       },
     });
-    return { id, status: 'pending', scopeHash, effectRevision: effect.effectRevision };
+    return {
+      id,
+      status: 'pending',
+      scopeHash,
+      effectRevision: effect.effectRevision,
+    };
   }
 
   shutdown(): void {

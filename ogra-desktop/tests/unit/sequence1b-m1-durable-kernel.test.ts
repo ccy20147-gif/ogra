@@ -36,6 +36,8 @@ import { DatabaseService } from '../../src/core/database-service';
 import { OgraDatabase } from '../../src/core/database';
 import { DurableRuntimeService } from '../../src/core/durable-runtime-service';
 import { EncryptedCapsuleStore, StaticMasterKeyProvider } from '../../src/core/capsule-store';
+import { IngressReviewService } from '../../src/core/ingress-review-service';
+import { IndependentIngressReviewer } from '../../src/core/independent-ingress-reviewer';
 import { EffectProtocolService } from '../../src/core/effect-protocol-service';
 import { RecoveryService } from '../../src/core/recovery-service';
 import { RecoveryAuditPacketService } from '../../src/core/recovery-audit-packet';
@@ -1137,7 +1139,9 @@ describe('Sequence 1B M1 — agent path: capsule canonical == effect fingerprint
       const runtime = new DurableRuntimeService(odb, () => 'ph_m1_prod');
       const capsuleStore = new EncryptedCapsuleStore(odb, new StaticMasterKeyProvider(masterKey));
       const protocol = new EffectProtocolService(odb, runtime, capsuleStore);
-      adapter.bindKernel({ runtime, protocol });
+      const ingressReview = new IngressReviewService(odb, runtime, capsuleStore);
+      const independentIngressReviewer = new IndependentIngressReviewer(odb, runtime, capsuleStore, ingressReview);
+      adapter.bindKernel({ runtime, protocol, independentIngressReviewer });
       // The agent path needs a workspace + approvalContext +
       // (optional) redactionService. We don't drive it through
       // OgraCore here — too many services. Instead, we call
@@ -1280,7 +1284,9 @@ describe('Sequence 1B M1 — round 5 real-agent-run double anchor', () => {
     const odb = db.getOgraDatabase();
     const runtime = new DurableRuntimeService(odb, () => 'ph_r5');
     const capsuleStore = new EncryptedCapsuleStore(odb, new StaticMasterKeyProvider(masterKey));
-    const protocol = new EffectProtocolService(odb, runtime, capsuleStore);
+        const protocol = new EffectProtocolService(odb, runtime, capsuleStore);
+    const ingressReview = new IngressReviewService(odb, runtime, capsuleStore);
+    const independentIngressReviewer = new IndependentIngressReviewer(odb, runtime, capsuleStore, ingressReview);
 
     const runId = 'round5-real-run-1';
     const wsId = fx.workspaceId;
@@ -1293,7 +1299,7 @@ describe('Sequence 1B M1 — round 5 real-agent-run double anchor', () => {
     const internalAgent = new InternalAgentAdapter(
       db, policy, route, null, rag, red,
     );
-    internalAgent.bindKernel({ runtime, protocol });
+    internalAgent.bindKernel({ runtime, protocol, independentIngressReviewer });
 
     // Drive the agent. agent.run() will:
     //   1. Resolve route via routeService (Public/Internal)
@@ -2537,16 +2543,25 @@ describe('Sequence 1B M1 — stale lease finalizers roll back', () => {
   afterEach(() => { try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} });
 
   function invalidateLeaseAtFinalizer(recovery: RecoveryService, odb: OgraDatabase, runId: string): void {
-    const original = (recovery as any).assertActiveRecoveryLease.bind(recovery);
+    // M2 moves received finalization into IndependentIngressReviewer. Inject
+    // the crash at the shared runtime's actual ingress L1 append, rather than
+    // at the old RecoveryService-only helper, so the test exercises the
+    // transaction-local lease CAS used in production.
+    const runtime = (recovery as any).runtime as DurableRuntimeService;
+    const original = runtime.transactionalAppend.bind(runtime);
     let invalidated = false;
-    (recovery as any).assertActiveRecoveryLease = (...args: any[]) => {
-      if (!invalidated) {
+    (runtime as any).transactionalAppend = (input: any) => {
+      if (!invalidated
+          && typeof input?.meta?.eventType === 'string'
+          && input.meta.eventType.startsWith('effect_')
+          && ['effect_received', 'effect_accepted', 'effect_quarantined', 'effect_rejected']
+            .includes(input.meta.eventType)) {
         invalidated = true;
         odb.getDB().prepare(`UPDATE recovery_leases SET released_at = ?,
           lease_version = lease_version + 1 WHERE run_id = ?`)
           .run(new Date().toISOString(), runId);
       }
-      return original(...args);
+      return original(input);
     };
   }
 

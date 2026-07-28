@@ -292,8 +292,15 @@ describe('InternalAgentAdapter — M1 kernel binding', () => {
       odb, new OgraSecretBrokerKeyProvider(masterKey),
     );
     const protocol = new EffectProtocolService(odb, runtime, capsuleStore);
-    agent.bindKernel({ runtime, protocol });
-
+    const { IngressReviewService } = await import(
+      '../../src/core/ingress-review-service');
+    const { IndependentIngressReviewer } = await import(
+      '../../src/core/independent-ingress-reviewer');
+    const ingressReview = new IngressReviewService(
+      odb, runtime, capsuleStore);
+    const independentIngressReviewer = new IndependentIngressReviewer(
+      odb, runtime, capsuleStore, ingressReview);
+    agent.bindKernel({ runtime, protocol, independentIngressReviewer });
     const wsId = fx.workspaceId;
     const runId = 'm1_internal_agent_run_1';
     db.storeRun({

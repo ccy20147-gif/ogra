@@ -86,6 +86,16 @@ const App: React.FC = () => {
   const [routeDecision, setRouteDecision] = useState<any>(null);
   const [taskInput, setTaskInput] = useState<string>('');
   const [runResult, setRunResult] = useState<string>('');
+  // Series 1B Milestone 2 — per-effect status badges. The
+  // shape carries ONLY refs / hashes / state names — never raw
+  // payload bytes. The renderer sanitises this further.
+  const [effectStatuses, setEffectStatuses] = useState<Array<{
+    effectId: string;
+    state: string;
+    sanitizedReasonCode?: string | null;
+    awaitingApproval?: boolean;
+    recoveryDecision?: { decisionCode: string; sanitizedReason?: string | null };
+  }>>([]);
   const [safetySummary, setSafetySummary] = useState<any>(null);
   const [governanceData, setGovernanceData] = useState<any>({ runs: [], incidents: [], policies: [] });
   const [providers, setProviders] = useState<any[]>([]);
@@ -368,6 +378,45 @@ const App: React.FC = () => {
   useEffect(() => {
     void refreshPendingApprovals();
   }, [currentWorkspace?.id]);
+
+  // Series 1B Milestone 2 — poll the sanitized effect
+  // status snapshot from Core whenever the active run
+  // changes. The shape carries ONLY refs / hashes / state
+  // names + sanitized reason codes; EffectStateBadge +
+  // RecoveryDecisionBadge further restrict those via a
+  // closed-set sanitizer (see EffectStateBadge.tsx).
+  const refreshEffectStatuses = async (): Promise<void> => {
+    if (!currentRunId) {
+      setEffectStatuses([]);
+      return;
+    }
+    try {
+      const result = await window.ogra.run.effectStatusList(currentRunId);
+      // IPC returns IpcResult<T>. The list lives in
+      // result.data. result.success === false means the
+      // main process refused (e.g. stale run id); we
+      // surface no stale data in that case.
+      const list = (result?.success && Array.isArray(result.data))
+        ? (result.data as Array<{
+            effectId: string;
+            state: string;
+            sanitizedReasonCode?: string | null;
+            awaitingApproval?: boolean;
+            recoveryDecision?: { decisionCode: string; sanitizedReason?: string | null };
+          }>)
+        : [];
+      setEffectStatuses(list);
+    } catch {
+      // IPC may be unavailable in some contexts; never throw
+      // out of the renderer poll loop.
+    }
+  };
+  useEffect(() => {
+    void refreshEffectStatuses();
+    const interval = window.setInterval(
+      () => { void refreshEffectStatuses(); }, 1000);
+    return () => window.clearInterval(interval);
+  }, [currentRunId]);
 
   const runDemo = async () => {
     if (!currentWorkspace) {
@@ -892,6 +941,7 @@ const App: React.FC = () => {
               runPhase={runPhase}
               riskLevel={riskLevel}
               contextSources={contextSources}
+              effectStatuses={effectStatuses}
               onTaskInputChange={setTaskInput}
               onRunDemo={runDemo}
               onModelChange={setModelId}

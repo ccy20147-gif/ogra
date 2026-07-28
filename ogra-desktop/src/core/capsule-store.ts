@@ -503,6 +503,27 @@ export class EncryptedCapsuleStore {
   }
 
   /**
+   * Series 1B Milestone 2: open a capsule by its `ref` (a string
+   * like `cap_…`). Returns the same `OpenCapsule<T>` as
+   * `openByEffect` but resolves through the `ref` column.
+   */
+  openByRef<T = unknown>(args: { ref: string }): OpenCapsule<T> {
+    const row = this.odb.getDB().prepare(
+      `SELECT * FROM capsules WHERE ref = ?`,
+    ).get(args.ref) as CapsuleRow | undefined;
+    if (!row) {
+      this.recordFailure({
+        capsuleRef: args.ref, attemptNo: 0,
+        failureKind: 'missing',
+        detail: `capsule ${args.ref} not found`,
+      });
+      throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
+        `capsule ${args.ref} not found`);
+    }
+    return this.openRow<T>(row);
+  }
+
+  /**
    * Open the exact result material named by an authoritative receipt.
    *
    * A receipt hash alone is deliberately not sufficient evidence for a

@@ -27,6 +27,12 @@ export class OgraDatabase {
     return this.db;
   }
 
+  /** Read-only worker capability: the ingress reviewer opens its own SQLite
+   * handle instead of accepting producer plaintext over IPC. */
+  getDatabasePath(): string {
+    return this.dbPath;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -492,6 +498,402 @@ export class OgraDatabase {
           }
         },
       },
+      // Sequence 1B Milestone 2 — Alpha Trust Loop.
+      // v27: ingress finding state (reviewer / decision / payload digest).
+      //       Every ingress finalization writes reviewer + decision_at +
+      //       payload_digest so the UI can render accepted/quarantined/
+      //       rejected without ever needing raw response bytes. The
+      //       ingress_review_decisions table captures the
+      //       sanitized_reason_code for quarantine / reject paths.
+      {
+        version: 27,
+        name: 'm2-ingress-finding-state',
+        sql: this.getV27Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_findings'",
+          ).get();
+          if (!table) return;
+          const names = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('ingress_findings')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          const adds: Array<[string, string]> = [
+            ['reviewer', 'TEXT'],
+            ['reviewer_decision_at', 'TEXT'],
+            ['payload_digest', 'TEXT'],
+            ['reject_reason_code', 'TEXT'],
+            ['reject_reason_detail', 'TEXT'],
+            ['quarantine_note', 'TEXT'],
+          ];
+          for (const [name, decl] of adds) {
+            if (!names.has(name)) {
+              db.exec(`ALTER TABLE ingress_findings ADD COLUMN ${name} ${decl};`);
+            }
+          }
+          // Independent append-only table for each ingress
+          // finalization decision. Reviewer-driven rows live here
+          // so the audit chain can show every gate change with its
+          // own L0 row.
+          db.exec(`CREATE TABLE IF NOT EXISTS ingress_review_decisions (
+            id TEXT PRIMARY KEY,
+            ingress_finding_id TEXT NOT NULL REFERENCES ingress_findings(id) ON DELETE CASCADE,
+            effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+            outcome TEXT NOT NULL CHECK(outcome IN ('accepted','quarantined','rejected')),
+            reviewer TEXT NOT NULL,
+            reviewer_decision_at TEXT NOT NULL,
+            payload_digest TEXT NOT NULL,
+            sanitized_reason_code TEXT,
+            sanitized_reason_detail TEXT,
+            rule_version TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );`);
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_ingress_review_decisions_effect
+            ON ingress_review_decisions(effect_id);`);
+        },
+      },
+      // v28: recovery approval + recovery decisions.
+      //     Each unknown->in_flight retry mints a new recovery
+      //     approval row. The prepare-time approval is marked
+      //     revoked_for_recovery so any further use fails closed.
+      //     recovery_decisions is append-only and captures every
+      //     recovery finalization with active lease CAS evidence.
+      {
+        version: 28,
+        name: 'm2-recovery-approval-and-decisions',
+        sql: this.getV28Schema(),
+        preflight: (db: any) => {
+          // Add the revoked_for_recovery column to approvals.
+          const apTbl = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'approvals'",
+          ).get();
+          if (apTbl) {
+            const apCols = new Set((db.prepare(
+              "SELECT name FROM pragma_table_info('approvals')",
+            ).all() as Array<{ name: string }>).map(c => c.name));
+            if (!apCols.has('revoked_for_recovery')) {
+              db.exec('ALTER TABLE approvals ADD COLUMN revoked_for_recovery INTEGER NOT NULL DEFAULT 0;');
+            }
+            if (!apCols.has('revoked_for_recovery_at')) {
+              db.exec('ALTER TABLE approvals ADD COLUMN revoked_for_recovery_at TEXT;');
+            }
+          }
+          // Recovery approvals: bound to (effect_id, recovery_attempt)
+          // with current policy_version + redaction_rule_version +
+          // scope_hash + payload_fingerprint snapshot at recovery time.
+          db.exec(`CREATE TABLE IF NOT EXISTS recovery_approvals (
+            id TEXT PRIMARY KEY,
+            effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+            run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+            recovery_attempt INTEGER NOT NULL,
+            workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+            policy_version_hash TEXT NOT NULL,
+            redaction_rule_version TEXT NOT NULL,
+            scope_hash TEXT,
+            payload_fingerprint TEXT NOT NULL,
+            decided_by TEXT NOT NULL,
+            reason TEXT,
+            expires_at TEXT,
+            use_limit INTEGER NOT NULL DEFAULT 1,
+            uses_consumed INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE(effect_id, recovery_attempt)
+          );`);
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_recovery_approvals_effect
+            ON recovery_approvals(effect_id);`);
+          // recovery_decisions: append-only ledger of every
+          // recovery finalization. Mandatory for the audit
+          // chain. Includes active lease holder + lease_version
+          // for CAS evidence.
+          db.exec(`CREATE TABLE IF NOT EXISTS recovery_decisions (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+            effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+            lease_holder_id TEXT NOT NULL,
+            lease_version INTEGER NOT NULL,
+            state_before TEXT NOT NULL,
+            final_state TEXT NOT NULL,
+            decision_code TEXT NOT NULL,
+            incident_kind TEXT,
+            detail TEXT,
+            payload_digest TEXT,
+            rule_version TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+          );`);
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_recovery_decisions_effect
+            ON recovery_decisions(effect_id);`);
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_recovery_decisions_run
+            ON recovery_decisions(run_id);`);
+        },
+      },
+      // v29: interrupted + quarantine columns on run_effects.
+      {
+        version: 29,
+        name: 'm2-effect-interrupted-and-quarantine',
+        sql: this.getV29Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'run_effects'",
+          ).get();
+          if (!table) return;
+          const names = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('run_effects')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          const adds: Array<[string, string]> = [
+            ['interrupted_at', 'TEXT'],
+            ['interrupted_by_holder', 'TEXT'],
+            ['interrupted_reason_code', 'TEXT'],
+            ['interrupted_reason_detail', 'TEXT'],
+            ['quarantined_at', 'TEXT'],
+            ['quarantined_review_id', 'TEXT'],
+            ['awaiting_callback_verification_at', 'TEXT'],
+          ];
+          for (const [name, decl] of adds) {
+            if (!names.has(name)) {
+              db.exec(`ALTER TABLE run_effects ADD COLUMN ${name} ${decl};`);
+            }
+          }
+          // Run-level checkpoint table for explicit recovery
+          // startup. Created at this migration so future state
+          // recovery can scan it without rebuilding the schema.
+          db.exec(`CREATE TABLE IF NOT EXISTS recovery_checkpoints (
+            id TEXT PRIMARY KEY,
+            run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+            checkpoint_at TEXT NOT NULL DEFAULT (datetime('now')),
+            recovered_by_holder TEXT NOT NULL,
+            rule_version TEXT NOT NULL,
+            detail TEXT
+          );`);
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_recovery_checkpoints_run
+            ON recovery_checkpoints(run_id);`);
+        },
+      },
+      // v30: extend audit_edges to_kind CHECK to include the
+      // M2 ingress review targets. SQLite cannot modify a
+      // CHECK constraint, so this migration rebuilds the
+      // table with the expanded set. Append-only semantics
+      // are preserved: existing rows are copied verbatim
+      // (no hash recomputation, no field transformation).
+      {
+        version: 30,
+        name: 'm2-audit-edges-ingress-kinds',
+        sql: this.getV30Schema(),
+        preflight: (db: any) => {
+          // Need both audit_edges AND agent_runs (for the
+          // foreign key) to exist before we can rebuild the
+          // table. Pre-v18 Sequence-0 fixtures do not have
+          // either — that's fine, the rebuild will run when
+          // the Sequence-1 migration creates both.
+          const auditEdges = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_edges'",
+          ).get();
+          if (!auditEdges) return;
+          const agentRuns = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+          ).get();
+          if (!agentRuns) return;
+          // Check whether the to_kind CHECK already includes
+          // 'ingress_finding'. If so, this migration is a no-op.
+          let sql = '';
+          try {
+            const row = db.prepare(
+              "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'audit_edges'",
+            ).get() as { sql: string } | undefined;
+            sql = row?.sql ?? '';
+          } catch (_) {
+            return; // safer fallback for pre-v18 fixtures
+          }
+          if (sql.includes("'ingress_finding'")) return;
+          db.exec(`
+            CREATE TABLE audit_edges_new (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+              from_kind TEXT NOT NULL CHECK(from_kind IN
+                ('run','frame','effect','repair','memory','event')),
+              from_id TEXT NOT NULL,
+              relation TEXT NOT NULL,
+              to_kind TEXT NOT NULL CHECK(to_kind IN
+                ('run','frame','effect','repair','route','policy','approval',
+                 'egress','ingress','ingress_finding','ingress_review_decision',
+                 'receipt','memory','event')),
+              to_id TEXT NOT NULL,
+              source_event_id TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(from_kind, from_id, relation, to_kind, to_id)
+            );
+            INSERT INTO audit_edges_new
+              (id, run_id, from_kind, from_id, relation, to_kind, to_id,
+               source_event_id, created_at)
+              SELECT id, run_id, from_kind, from_id, relation, to_kind, to_id,
+                     source_event_id, created_at
+                FROM audit_edges;
+            DROP TABLE audit_edges;
+            ALTER TABLE audit_edges_new RENAME TO audit_edges;
+            CREATE INDEX IF NOT EXISTS idx_edges_run
+              ON audit_edges(run_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_from
+              ON audit_edges(from_kind, from_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_to
+              ON audit_edges(to_kind, to_id);
+          `);
+        },
+      },
+      // v31: extend audit_edges to_kind CHECK to include
+      // `recovery_approval` and `recovery_decision`. The
+      // M2 services write edges with these to_kinds during
+      // the production finalize path.
+      {
+        version: 31,
+        name: 'm2-audit-edges-recovery-kinds',
+        sql: this.getV31Schema(),
+        preflight: (db: any) => {
+          const auditEdges = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'audit_edges'",
+          ).get();
+          if (!auditEdges) return;
+          const agentRuns = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+          ).get();
+          if (!agentRuns) return;
+          let sql = '';
+          try {
+            const row = db.prepare(
+              "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'audit_edges'",
+            ).get() as { sql: string } | undefined;
+            sql = row?.sql ?? '';
+          } catch (_) {
+            return;
+          }
+          // Idempotent: skip if the new kinds are already allowed.
+          if (sql.includes("'recovery_approval'")
+              && sql.includes("'recovery_decision'")) return;
+          db.exec(`
+            CREATE TABLE audit_edges_v31 (
+              id TEXT PRIMARY KEY,
+              run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+              from_kind TEXT NOT NULL CHECK(from_kind IN
+                ('run','frame','effect','repair','memory','event')),
+              from_id TEXT NOT NULL,
+              relation TEXT NOT NULL,
+              to_kind TEXT NOT NULL CHECK(to_kind IN
+                ('run','frame','effect','repair','route','policy','approval',
+                 'egress','ingress','ingress_finding','ingress_review_decision',
+                 'receipt','memory','event','recovery_approval','recovery_decision')),
+              to_id TEXT NOT NULL,
+              source_event_id TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              UNIQUE(from_kind, from_id, relation, to_kind, to_id)
+            );
+            INSERT INTO audit_edges_v31
+              (id, run_id, from_kind, from_id, relation, to_kind, to_id,
+               source_event_id, created_at)
+              SELECT id, run_id, from_kind, from_id, relation, to_kind, to_id,
+                     source_event_id, created_at
+                FROM audit_edges;
+            DROP TABLE audit_edges;
+            ALTER TABLE audit_edges_v31 RENAME TO audit_edges;
+            CREATE INDEX IF NOT EXISTS idx_edges_run
+              ON audit_edges(run_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_from
+              ON audit_edges(from_kind, from_id);
+            CREATE INDEX IF NOT EXISTS idx_edges_to
+              ON audit_edges(to_kind, to_id);
+          `);
+        },
+      },
+      // v32: ingress_findings + ingress_review_decisions must
+      //     carry receipt_id (NOT NULL) so evidence is bound
+      //     to the authoritative receipt row.
+      {
+        version: 32,
+        name: 'm2-ingress-evidence-receipt-binding',
+        sql: this.getV32Schema(),
+        preflight: (db: any) => {
+          const findings = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_findings'",
+          ).get();
+          if (!findings) return;
+          const decisions = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_review_decisions'",
+          ).get();
+          if (!decisions) return;
+          const findingsCols = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('ingress_findings')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          if (!findingsCols.has('receipt_id')) {
+            db.exec(`ALTER TABLE ingress_findings
+                       ADD COLUMN receipt_id TEXT
+                       REFERENCES effect_receipts(id);`);
+            db.exec(`CREATE INDEX IF NOT EXISTS
+                       idx_ingress_findings_receipt
+                       ON ingress_findings(receipt_id);`);
+          }
+          const decisionsCols = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('ingress_review_decisions')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          if (!decisionsCols.has('receipt_id')) {
+            db.exec(`ALTER TABLE ingress_review_decisions
+                       ADD COLUMN receipt_id TEXT
+                       REFERENCES effect_receipts(id);`);
+            db.exec(`CREATE INDEX IF NOT EXISTS
+                       idx_ingress_review_decisions_receipt
+                       ON ingress_review_decisions(receipt_id);`);
+          }
+        },
+      },
+      // v33: recovery approvals are run-scoped authority. Earlier M2
+      // drafts omitted run_id while the runtime/checker correctly require
+      // it; add and backfill it without rewriting immutable evidence.
+      {
+        version: 33,
+        name: 'm2-recovery-approval-run-binding',
+        sql: this.getV33Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'recovery_approvals'",
+          ).get();
+          if (!table) return;
+          const names = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('recovery_approvals')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          if (!names.has('run_id')) {
+            db.exec('ALTER TABLE recovery_approvals ADD COLUMN run_id TEXT;');
+            db.exec(`UPDATE recovery_approvals
+                       SET run_id = (SELECT run_id FROM run_effects
+                                      WHERE run_effects.id = recovery_approvals.effect_id)
+                     WHERE run_id IS NULL;`);
+          }
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_recovery_approvals_run
+                     ON recovery_approvals(run_id);`);
+        },
+      },
+      // v34: only structured, non-plaintext ingress detector evidence is
+      // retained. The separate reviewer process emits hashes and closed-set
+      // descriptors; the Core never persists raw reviewed text.
+      {
+        version: 34,
+        name: 'm2-ingress-detector-structured-findings',
+        sql: this.getV34Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_review_decisions'",
+          ).get();
+          if (!table) return;
+          const names = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('ingress_review_decisions')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          if (!names.has('structured_findings_json')) {
+            db.exec('ALTER TABLE ingress_review_decisions ADD COLUMN structured_findings_json TEXT;');
+          }
+        },
+      },
+      // v35: first-class ingress detector findings and quarantine metadata.
+      // The raw result remains exclusively in its encrypted result capsule;
+      // this ledger stores only hashes, refs and sanitized summaries.
+      {
+        version: 35,
+        name: 'm2-ingress-quarantine-ledger',
+        sql: this.getV35Schema(),
+      },
     ];
   }
 
@@ -518,6 +920,67 @@ export class OgraDatabase {
         ON repair_cross_frame_authorizations(repair_transaction_id);
     `;
   }
+
+  private getV32Schema(): string { return `SELECT 1;`; }
+
+  private getV33Schema(): string { return `SELECT 1;`; }
+
+  private getV34Schema(): string { return `SELECT 1;`; }
+
+  private getV35Schema(): string {
+    return `
+      CREATE TABLE IF NOT EXISTS ingress_review_findings (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        effect_id TEXT NOT NULL REFERENCES run_effects(id) ON DELETE CASCADE,
+        receipt_id TEXT NOT NULL REFERENCES effect_receipts(id) ON DELETE CASCADE,
+        ingress_review_decision_id TEXT NOT NULL REFERENCES ingress_review_decisions(id) ON DELETE CASCADE,
+        source_kind TEXT NOT NULL CHECK(source_kind IN ('cloud_response','tool_output','a2a_message','mcp_result','local_agent_stdout')),
+        source_ref TEXT NOT NULL,
+        pattern_id TEXT NOT NULL,
+        layer TEXT NOT NULL CHECK(layer IN ('result_payload')),
+        evidence TEXT NOT NULL CHECK(evidence = '[redacted]'),
+        evidence_hash TEXT NOT NULL,
+        severity TEXT NOT NULL CHECK(severity IN ('low','medium','high','critical')),
+        finding_class TEXT NOT NULL CHECK(finding_class IN ('clean','suspicious','malicious')),
+        ingress_mode TEXT NOT NULL CHECK(ingress_mode IN ('auto_filter','log','approve')),
+        user_decision TEXT NOT NULL DEFAULT 'pending' CHECK(user_decision IN ('approved','denied','pending')),
+        decided_by TEXT,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        decided_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_ingress_review_findings_effect
+        ON ingress_review_findings(effect_id);
+      CREATE INDEX IF NOT EXISTS idx_ingress_review_findings_run
+        ON ingress_review_findings(run_id);
+
+      CREATE TABLE IF NOT EXISTS quarantine_contents (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        ingress_finding_id TEXT NOT NULL REFERENCES ingress_review_findings(id) ON DELETE CASCADE,
+        content_hash TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        sealed_capsule_ref TEXT NOT NULL,
+        classification TEXT NOT NULL,
+        user_can_view INTEGER NOT NULL DEFAULT 0 CHECK(user_can_view IN (0,1)),
+        status TEXT NOT NULL CHECK(status IN ('quarantined','cleaned','discarded','released')),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_quarantine_contents_run
+        ON quarantine_contents(run_id);
+    `;
+  }
+
+  private getV31Schema(): string { return `SELECT 1;`; }
+
+  private getV30Schema(): string { return `SELECT 1;`; }
+
+  private getV29Schema(): string { return `SELECT 1;`; }
+
+  private getV28Schema(): string { return `SELECT 1;`; }
+
+  private getV27Schema(): string { return `SELECT 1;`; }
 
   private getV26Schema(): string { return `SELECT 1;`; }
 

@@ -25,6 +25,11 @@ export enum IpcChannel {
   RunCreateId = 'run:create-id',
   RunResult = 'run:result',
   RunHistory = 'run:history',
+  // Sequence 1B Milestone 2 — per-effect status snapshot
+  // (refs / hashes / state names only — never raw payload).
+  EffectStatusList = 'effect:status-list',
+  // Ingress quarantine metadata only. Raw result capsules never cross IPC.
+  QuarantineRead = 'quarantine:read',
   // Approvals — Sequence 0 Plan 03 §3.6 / plan 02 §3.4
   ApprovalRequest = 'approval:request',
   ApprovalList = 'approval:list',

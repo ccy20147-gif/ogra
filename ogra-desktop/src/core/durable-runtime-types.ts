@@ -72,6 +72,7 @@ export type EffectState =
   | 'in_flight'
   | 'unknown'
   | 'received'
+  | 'awaiting_callback_verification'
   | 'committed'
   | 'quarantined'
   | 'compensating'
@@ -87,8 +88,9 @@ export type EffectState =
  */
 export const EFFECT_TRANSITIONS: Record<EffectState, EffectState[]> = {
   planned: ['in_flight', 'cancelled_before_send', 'failed'],
-  in_flight: ['received', 'unknown', 'failed'],
-  received: ['committed', 'quarantined', 'failed'],
+  in_flight: ['received', 'awaiting_callback_verification', 'unknown', 'failed'],
+  received: ['awaiting_callback_verification', 'committed', 'quarantined', 'failed'],
+  awaiting_callback_verification: ['committed', 'quarantined', 'failed'],
   unknown: ['received', 'committed', 'quarantined', 'failed', 'in_flight'],
   committed: ['compensating'],
   compensating: ['compensated', 'failed', 'unknown'],
@@ -307,9 +309,13 @@ export type AuditEdgeToKind =
   | 'approval'
   | 'egress'
   | 'ingress'
+  | 'ingress_finding'
+  | 'ingress_review_decision'
   | 'receipt'
   | 'memory'
-  | 'event';
+  | 'event'
+  | 'recovery_approval'
+  | 'recovery_decision';
 
 export interface AuditEdge {
   id: string;

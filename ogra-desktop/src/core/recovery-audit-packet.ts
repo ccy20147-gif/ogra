@@ -396,7 +396,10 @@ export class RecoveryAuditPacketService {
           attemptNo: d.attemptNo ?? undefined,
           receiptId: d.receiptId ?? undefined,
           incidentKind: d.incidentKind ?? undefined,
-          detail: d.detail ?? '',
+          // `detail` may originate in a provider exception or caller input.
+          // Audit packets are a refs/hashes/state surface only, so never
+          // project it across the trust boundary.
+          detail: d.incidentKind ?? d.decision ?? '',
         })) : [],
       };
     } catch {

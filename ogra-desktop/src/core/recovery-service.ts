@@ -63,6 +63,8 @@ import {
 import { canonicalJSON } from './audit-envelope';
 import { EffectProtocolService } from './effect-protocol-service';
 import type { VerifiedCallbackRecoveryCapabilities } from './capsule-store';
+import { IngressReviewService } from './ingress-review-service';
+import { IndependentIngressReviewer } from './independent-ingress-reviewer';
 export interface RecoveryConditionChecker {
   /**
    * Series 1B M1 Round 6: re-verify before any recovery retry.
@@ -171,12 +173,25 @@ export interface RecoveryReport {
       | 'capsule_missing'
       | 'capsule_expired'
       | 'capsule_payload_mismatch'
-      | 'outcome_unknown';
+      | 'outcome_unknown'
+      | 'approval_missing'
+      | 'approval_expired'
+      | 'approval_revoked'
+      | 'approval_fingerprint_mismatch'
+      | 'approval_scope_mismatch'
+      | 'approval_policy_version_mismatch'
+      | 'route_decision_missing'
+      | 'route_policy_drift'
+      | 'redaction_rule_version_mismatch'
+      | 'no_reviewer_wired'
+      | 'no_recovery_approval';
     detail: string;
   }>;
 }
 
 export class RecoveryService {
+  private readonly independentIngressReviewer: IndependentIngressReviewer;
+
   constructor(
     private readonly odb: OgraDatabase,
     private readonly runtime: DurableRuntimeService,
@@ -190,7 +205,25 @@ export class RecoveryService {
      * service without one and inject a deterministic checker per call.
      */
     private readonly configuredConditionChecker?: RecoveryConditionChecker,
-  ) {}
+    /**
+     * M2 — the independent ingress reviewer is the SOLE
+     * entry point that may author an ingress finding. The
+     * received / unknown finalize path delegates to it
+     * instead of writing accepted directly. Hermetic
+     * fixtures may construct without one; production wires
+     * it through OgraCore.
+     */
+    independentIngressReviewer?: IndependentIngressReviewer,
+  ) {
+    // No legacy direct-commit fallback. Even hermetic recovery instances use
+    // the concrete reviewer, which verifies the result capsule before its
+    // sole terminal-finalization transaction.
+    this.independentIngressReviewer = independentIngressReviewer
+      ?? new IndependentIngressReviewer(
+        odb, runtime, capsuleStore,
+        new IngressReviewService(odb, runtime, capsuleStore),
+      );
+  }
 
   /**
    * Series 1B M1 Round 6: revalidate approval / policy / route
@@ -210,7 +243,16 @@ export class RecoveryService {
       | 'capsule_payload_mismatch'
       | 'capsule_corrupt'
       | 'capsule_expired'
-      | 'no_idempotency';
+      | 'no_idempotency'
+      | 'approval_missing'
+      | 'approval_expired'
+      | 'approval_revoked'
+      | 'approval_fingerprint_mismatch'
+      | 'approval_scope_mismatch'
+      | 'approval_policy_version_mismatch'
+      | 'route_decision_missing'
+      | 'route_policy_drift'
+      | 'redaction_rule_version_mismatch';
     detail: string;
   } | null> {
     if (!input.conditionChecker) {
@@ -235,10 +277,27 @@ export class RecoveryService {
     if (result.ok) return null;
     const detail = `recovery gate failed (${result.reason ?? 'unknown'}): ` +
       `${result.detail ?? ''}`;
+    // Map checker reason → incidentKind union (any new
+    // reason must be added to the union above).
+    const incidentKind = (result.reason ??
+      'capsule_payload_mismatch') as
+      | 'capsule_payload_mismatch'
+      | 'capsule_corrupt'
+      | 'capsule_expired'
+      | 'no_idempotency'
+      | 'approval_missing'
+      | 'approval_expired'
+      | 'approval_revoked'
+      | 'approval_fingerprint_mismatch'
+      | 'approval_scope_mismatch'
+      | 'approval_policy_version_mismatch'
+      | 'route_decision_missing'
+      | 'route_policy_drift'
+      | 'redaction_rule_version_mismatch';
     return {
       effectId: effect.id,
       decision: 'incident_blocked',
-      incidentKind: 'capsule_payload_mismatch',
+      incidentKind,
       detail,
     };
   }
@@ -403,10 +462,16 @@ export class RecoveryService {
     // considering a re-callback. Any drift in approval state
     // (revoked / expired / fingerprint / scope / policy version)
     // or missing route_decision must block the retry.
-    const gate = await this.checkRecoveryConditions(effect, input);
+    // A recovery retry replaces the consumed/revoked initial approval with
+    // its effect-bound rap_* authority. Checking the old id first would
+    // incorrectly block every legitimate retry.
+    const gate = await this.checkRecoveryConditions(
+      effect, input, input.recoveryApprovalId ?? effect.currentApprovalId,
+    );
     if (gate) {
       decision.decision = gate.decision;
       decision.detail = gate.detail;
+      decision.incidentKind = gate.incidentKind;
       return decision;
     }
     // planned => callback never started. Recovery may drive
@@ -512,17 +577,16 @@ export class RecoveryService {
   private handleReceived(
     effect: RunEffect, decision: RecoveryReport['effects'][number], input: RecoveryInput,
   ): RecoveryReport['effects'][number] {
-    // received => local commit pending. Recovery performs the
-    // commit (never re-invokes the callback). This is the
-    // canonical "crash after receipt, before ingress" path.
+    // M2: the received → terminal transition MUST go through
+    // the IndependentIngressReviewer. Recovery no longer
+    // writes accepted directly; it supplies canonical inputs
+    // and the reviewer decides the outcome.
     const receipts = effect.authoritativeReceiptId
       ? this.odb.getDB().prepare(
         'SELECT * FROM effect_receipts WHERE id = ? AND effect_id = ?',
       ).get(effect.authoritativeReceiptId, effect.id) as any | undefined
       : undefined;
     if (!receipts) {
-      // Defensive — should never happen because in_flight → received
-      // is only triggered by recordReceipt. Treat as incident.
       decision.decision = 'incident_blocked';
       decision.incidentKind = 'capsule_missing';
       decision.detail = `received effect ${effect.id} has no receipt row`;
@@ -534,25 +598,40 @@ export class RecoveryService {
       });
       return decision;
     }
-    // Rerun the receipt + commit path. The protocol's
-    // commitToTerminal is idempotent given the same receipt row
-    // and revision: if another recovery already committed, the
-    // revision CAS loses here and we treat it as noop.
+    if (!this.independentIngressReviewer) {
+      // M2 — fail-closed. Production MUST wire
+      // IndependentIngressReviewer. There is no production
+      // bypass; tests that want to opt out must inject a
+      // fake reviewer. The legacy commitTerminalEffect path
+      // is removed entirely.
+      decision.decision = 'incident_blocked';
+      decision.incidentKind = 'no_reviewer_wired';
+      decision.detail = `recovery: IndependentIngressReviewer is not wired for effect ${effect.id}; M2 fail-closed`;
+      return decision;
+    }
     try {
-      const result = this.commitTerminalEffect(
-        effect, receipts.id, receipts.attempt_no, input.holderId, input.recoveryLeaseVersion,
-      );
-      decision.decision = 'committed';
+      const reviewed = this.independentIngressReviewer.reviewAndFinalize({
+        effectId: effect.id,
+        runId: effect.runId,
+        workspaceId: this.resolveWorkspaceId(effect.runId),
+        receiptId: receipts.id,
+        attemptNo: receipts.attempt_no,
+        payloadDigest: receipts.response_hash ?? '',
+        source: 'recovery',
+        ruleVersion: 'm2',
+        leaseHolderId: input.holderId,
+        leaseVersion: input.recoveryLeaseVersion ?? 0,
+      });
+      decision.decision = reviewed.outcome === 'accepted'
+        ? 'committed' : 'incident_blocked';
       decision.attemptNo = receipts.attempt_no;
       decision.receiptId = receipts.id;
-      decision.detail = `received effect ${effect.id} committed on restart`;
-      decision.ingressFindingId = result.ingressFindingId;
+      decision.detail = `received effect ${effect.id} finalized by independent ingress review (${reviewed.outcome})`;
       return decision;
     } catch (err) {
-      // CAS lost or already-committed effect: treat as noop.
       if (err && (err as { code?: string }).code === OgraErrorCode.REVISION_CONFLICT) {
         decision.decision = 'noop_already_terminal';
-        decision.detail = `effect ${effect.id} was already committed`;
+        decision.detail = `effect ${effect.id} was already finalized`;
         return decision;
       }
       throw err;
@@ -569,6 +648,7 @@ export class RecoveryService {
     if (gate) {
       decision.decision = gate.decision;
       decision.detail = gate.detail;
+      decision.incidentKind = gate.incidentKind;
       return decision;
     }
     // in_flight / unknown => either the adapter applied with no
@@ -581,17 +661,33 @@ export class RecoveryService {
       'SELECT * FROM effect_receipts WHERE id = ? AND effect_id = ?',
     ).get(effect.authoritativeReceiptId ?? '', effect.id) as any | undefined;
     if (existingReceipt) {
-      // We have authoritative receipt evidence. Promote to
-      // committed via the normal commit path.
+      // M2: the unknown / in_flight finalize path delegates
+      // to the IndependentIngressReviewer. Recovery no longer
+      // writes accepted directly. Fail-closed.
+      if (!this.independentIngressReviewer) {
+        decision.decision = 'incident_blocked';
+        decision.incidentKind = 'no_reviewer_wired';
+        decision.detail = `recovery: IndependentIngressReviewer is not wired for effect ${effect.id}; M2 fail-closed`;
+        return decision;
+      }
       try {
-        const result = this.commitTerminalEffect(
-          effect, existingReceipt.id, existingReceipt.attempt_no, input.holderId, input.recoveryLeaseVersion,
-        );
-        decision.decision = 'committed';
+        const reviewed = this.independentIngressReviewer.reviewAndFinalize({
+          effectId: effect.id,
+          runId: effect.runId,
+          workspaceId: this.resolveWorkspaceId(effect.runId),
+          receiptId: existingReceipt.id,
+          attemptNo: existingReceipt.attempt_no,
+          payloadDigest: existingReceipt.response_hash ?? '',
+          source: 'recovery',
+          ruleVersion: 'm2',
+          leaseHolderId: input.holderId,
+          leaseVersion: input.recoveryLeaseVersion ?? 0,
+        });
+        decision.decision = reviewed.outcome === 'accepted'
+          ? 'committed' : 'incident_blocked';
         decision.attemptNo = existingReceipt.attempt_no;
         decision.receiptId = existingReceipt.id;
-        decision.detail = `in_flight/unknown effect ${effect.id} reconciled to committed via authoritative receipt`;
-        decision.ingressFindingId = result.ingressFindingId;
+        decision.detail = `in_flight/unknown effect ${effect.id} finalized by independent ingress review (${reviewed.outcome})`;
         return decision;
       } catch (err) {
         if (err && (err as { code?: string }).code === OgraErrorCode.REVISION_CONFLICT) {
@@ -632,6 +728,7 @@ export class RecoveryService {
             receiptId: string;
             capsuleRef: string;
             capsuleHash: string;
+            resultPayloadDigest: string;
             receivedEventId: string;
           }>({
             meta: {
@@ -743,77 +840,40 @@ export class RecoveryService {
               return {
                 effectId: effect.id, state: 'received' as const,
                 receiptId, capsuleRef: sealed.ref, capsuleHash: sealed.hash,
+                resultPayloadDigest: responseHash,
                 receivedEventId: eventId,
               };
             },
           });
-          // Phase 2: commit to terminal in a SECOND
-          // transactional append. ingress_finding.event_id is
-          // bound to the L1 `effect_recovery_committed` event
-          // and the receipt_id is NOT NULL (it carries the
-          // authoritative row we wrote in phase 1).
-          const phase2 = this.runtime.transactionalAppend<{
-            findingId: string;
-            terminalEventId: string;
-          }>({
-            meta: {
-              runId: effect.runId, workspaceId: null,
-              eventType: 'effect_recovery_committed',
-              eventPayload: {
-                effectId: effect.id,
-                receiptId: phase1.receiptId,
-                source: 'outcome_query',
-              },
-              frameId: effect.ownerFrameId,
-              effectId: effect.id,
-            },
-            body: (eventId) => {
-              this.assertActiveRecoveryLease(effect.runId, input.holderId, input.recoveryLeaseVersion);
-              const receivedEffect = this.runtime.readEffect(effect.id);
-              if (receivedEffect.state !== 'received') {
-                throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
-                  `recovery: effect ${effect.id} is no longer received`);
-              }
-              if (!receivedEffect.authoritativeReceiptId) {
-                throw new OgraError(OgraErrorCode.RECEIPT_NOT_FOUND,
-                  `recovery: authoritative receipt ${phase1.receiptId} is missing`);
-              }
-              this.verifyAuthoritativeResultCapsule(receivedEffect, phase1.receiptId, 1);
-              const findingId = `finding_${crypto.randomBytes(6).toString('hex')}`;
-              this.odb.getDB().prepare(`
-                INSERT INTO ingress_findings (id, effect_id, receipt_id,
-                  finding_kind, detail, event_id, created_at)
-                VALUES (?, ?, ?, 'accepted', ?, ?, ?)
-              `).run(findingId, effect.id, phase1.receiptId,
-                'M1 fixture: outcome-query accepted',
-                eventId, now);
-              const cas = this.odb.getDB().prepare(`
-                UPDATE run_effects SET state = 'committed',
-                  effect_revision = effect_revision + 1,
-                  ingress_finding_id = ?,
-                  terminal_event_id = ?,
-                  updated_at = ? WHERE id = ? AND state = 'received'
-              `).run(findingId, eventId, now, effect.id);
-              if (cas.changes === 0) {
-                throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
-                  `recovery: outcome-query commit CAS lost for effect ${effect.id}`);
-              }
-              // Edge: effect → ingress_finding.
-              this.runtime.appendEdge({
-                runId: effect.runId, fromKind: 'effect',
-                fromId: effect.id, relation: 'has_ingress',
-                toKind: 'ingress', toId: findingId,
-                sourceEventId: eventId,
-              });
-              return { findingId, terminalEventId: eventId };
-            },
+          // The reviewer owns the terminal transaction. Do not wrap it in a
+          // second transactionalAppend: nested L1 appends would otherwise
+          // leave an unrelated recovery event beside the reviewer outcome.
+          if (!this.independentIngressReviewer) {
+            throw new OgraError(OgraErrorCode.RECOVERY_BLOCKED,
+              'recovery: IndependentIngressReviewer is not wired; M2 fail-closed');
+          }
+          this.assertActiveRecoveryLease(effect.runId, input.holderId, input.recoveryLeaseVersion);
+          const reviewed = this.independentIngressReviewer.reviewAndFinalize({
+            effectId: effect.id,
+            runId: effect.runId,
+            workspaceId: this.resolveWorkspaceId(effect.runId),
+            receiptId: phase1.receiptId,
+            attemptNo: 1,
+            payloadDigest: phase1.resultPayloadDigest,
+            source: 'recovery',
+            ruleVersion: 'm2',
+            leaseHolderId: input.holderId,
+            leaseVersion: input.recoveryLeaseVersion ?? 0,
           });
-          void phase2;
-          decision.decision = 'committed';
+          decision.decision = reviewed.outcome === 'accepted'
+            ? 'committed' : 'incident_blocked';
           decision.receiptId = phase1.receiptId;
-          decision.detail = `effect ${effect.id} reconciled to ` +
-            `committed via outcome_query (no physical re-apply); ` +
-            `result capsule ${phase1.capsuleRef.slice(0, 16)}… → receipt ${phase1.receiptId.slice(0, 16)}… → finding ${phase2.findingId.slice(0, 16)}…`;
+          decision.detail = `effect ${effect.id} reconciled by ` +
+            `independent ingress review (${reviewed.outcome}) via ` +
+            `outcome_query (no physical re-apply); ` +
+            `result capsule ${phase1.capsuleRef.slice(0, 16)}… → ` +
+            `receipt ${phase1.receiptId.slice(0, 16)}… → ` +
+            `finding ${reviewed.findingId.slice(0, 16)}…`;
           return decision;
         } catch (err) {
           decision.decision = 'noop_already_terminal';
@@ -973,74 +1033,6 @@ export class RecoveryService {
       leaseHolder: input.leaseHolder,
       approvalId: input.approvalId,
       expectedLeaseVersion: input.expectedLeaseVersion,
-    });
-  }
-
-  /* ============================================================
-   * Terminal commit (received → committed)
-   * ============================================================ */
-
-  private commitTerminalEffect(
-    effect: RunEffect, receiptId: string, receiptAttemptNo: number, leaseHolder: string,
-    leaseVersion?: number,
-  ): { ingressFindingId: string } {
-    this.verifyAuthoritativeResultCapsule(effect, receiptId, receiptAttemptNo);
-    // We re-run the receipt path: insert a fresh result-capsule
-    // reference (the original capsule row is already on disk and
-    // immutable) and transition received -> committed.
-    //
-    // To avoid creating duplicate result capsules (the
-    // `effect_id, capsule_kind, attempt_no` UNIQUE), we reuse the
-    // existing capsule ref via the receipt row's existing
-    // result_capsule_ref column.
-    return this.runtime.transactionalAppend({
-      meta: {
-        runId: effect.runId,
-        workspaceId: null,
-        eventType: 'effect_recovery_committed',
-        eventPayload: {
-          effectId: effect.id,
-          receiptId,
-          attemptNo: receiptAttemptNo,
-          leaseHolder,
-        },
-        frameId: effect.ownerFrameId,
-        effectId: effect.id,
-        externalReceiptHash: null,
-      },
-      body: (eventId) => {
-        this.assertActiveRecoveryLease(effect.runId, leaseHolder, leaseVersion);
-        this.verifyAuthoritativeResultCapsule(effect, receiptId, receiptAttemptNo);
-        const findingId = `finding_${crypto.randomBytes(6).toString('hex')}`;
-        const now = new Date().toISOString();
-        this.odb.getDB().prepare(`
-          INSERT INTO ingress_findings (id, effect_id, receipt_id,
-            finding_kind, detail, event_id, created_at)
-          VALUES (?, ?, ?, 'accepted', ?, ?, ?)
-        `).run(findingId, effect.id, receiptId,
-          `M1 recovery accepted; attempt=${receiptAttemptNo}`,
-          eventId, now);
-        const casRes = this.odb.getDB().prepare(`
-          UPDATE run_effects SET state = 'committed',
-            effect_revision = effect_revision + 1,
-            ingress_finding_id = ?,
-            terminal_event_id = ?,
-            updated_at = ? WHERE id = ? AND state = 'received'
-        `).run(findingId, eventId, now, effect.id);
-        if (casRes.changes === 0) {
-          throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
-            `recovery commit CAS lost for effect ${effect.id}`);
-        }
-        // Plan 10 §3.2.1: the L1 audit event id is bound to the
-        // ingress finding + the audit edge.
-        this.runtime.appendEdge({
-          runId: effect.runId, fromKind: 'effect',
-          fromId: effect.id, relation: 'has_ingress',
-          toKind: 'ingress', toId: findingId,
-          sourceEventId: eventId,
-        });
-        return { ingressFindingId: findingId, terminalEventId: eventId };
-      },
     });
   }
 

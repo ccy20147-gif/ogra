@@ -274,6 +274,24 @@ function registerIpcHandlers(): void {
     { argCount: 1, requiresCaller: false },
   );
 
+  // Sequence 1B Milestone 2 — sanitized per-effect status
+  // snapshot for the renderer. The shape carries ONLY refs /
+  // hashes / state names — never raw payload bytes. The
+  // renderer-side EffectStateBadge runs every status through
+  // a closed-set sanitizer.
+  registerHandler(
+    IpcChannel.EffectStatusList,
+    async (_event, runId: string) => {
+      if (typeof runId !== 'string') throw new OgraError(OgraErrorCode.INVALID_ARGUMENT, 'runId is required');
+      return ograCore!.effectStatusList(runId);
+    },
+    { argCount: 1, requiresCaller: false },
+  );
+  registerHandler(
+    IpcChannel.QuarantineRead,
+    async (_event, quarantineId: string) => ograCore!.quarantineRead(quarantineId),
+  );
+
   registerHandler(
     IpcChannel.RunCancel,
     async (_event, runId: string) => {
