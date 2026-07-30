@@ -163,17 +163,27 @@ export class PolicyService {
     }
 
     // === Agent manifest validation (checks requestedTools against manifest capabilities) ===
-    if (input.agentManifest && input.requestedTools && input.requestedTools.length > 0) {
+    // A requested tool has no implicit allowlist. The gateway supplies these
+    // only from its Core-owned run snapshot; direct callers also fail closed.
+    if (input.requestedTools && input.requestedTools.length > 0) {
+      if (!input.agentManifest || !input.agentPermissions) {
+        matchedRules.push({ name: 'agent-manifest-missing', reason: 'Tool invocation lacks a Core-owned agent manifest or permissions' });
+        reasons.push('Requested tool is denied because the agent manifest or permissions are missing');
+        return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+      }
       try {
         const manifest = JSON.parse(input.agentManifest);
         const manifestTools: string[] = manifest.capabilities?.tools || manifest.tools || [];
-        if (Array.isArray(manifestTools) && manifestTools.length > 0) {
-          for (const tool of input.requestedTools) {
-            if (!manifestTools.includes(tool)) {
-              matchedRules.push({ name: 'agent-manifest-tool-blocked', reason: `Tool "${tool}" not in agent manifest capabilities` });
-              reasons.push(`Requested tool "${tool}" is not declared in agent manifest capabilities`);
-              return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
-            }
+        if (!Array.isArray(manifestTools) || manifestTools.length === 0) {
+          matchedRules.push({ name: 'agent-manifest-empty', reason: 'Agent manifest has no tool capability allowlist' });
+          reasons.push('Requested tool is denied because the agent manifest allowlist is empty');
+          return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
+        }
+        for (const tool of input.requestedTools) {
+          if (!manifestTools.includes(tool)) {
+            matchedRules.push({ name: 'agent-manifest-tool-blocked', reason: `Tool "${tool}" not in agent manifest capabilities` });
+            reasons.push(`Requested tool "${tool}" is not declared in agent manifest capabilities`);
+            return { matchedRules, decision: 'blocked', reasons, requiredApprovals, route: 'blocked' };
           }
         }
       } catch {

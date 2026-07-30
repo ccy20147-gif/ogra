@@ -51,6 +51,7 @@ import { RagEngine } from '../../src/edge/rag-engine';
 import { RedactionService } from '../../src/core/redaction-service';
 import { BaseModelAdapter, ModelResult, ProviderHealth } from '../../src/core/model-adapter';
 import { canonicalJSON } from '../../src/core/audit-envelope';
+import { OgraErrorCode } from '../../src/shared/errors';
 
 function newTmpDir(prefix: string): string {
   return path.join(os.tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`);
@@ -907,6 +908,165 @@ describe('Sequence 1B M1 — recovery capsule fingerprint binding', () => {
     // would call a different adapter with a different payload.
     expect(verified.outcome).toBe('mismatch');
     expect(verified.canonicalHash).not.toBe('forged-fingerprint-that-must-not-match');
+    const callback = proc.capsuleStore.fetchByBinding({
+      effectId: prepared.effectId, capsuleKind: 'callback', attemptNo: 1,
+    })!;
+    expect(verified.capsuleRef).toBe('[redacted]');
+    expect(JSON.stringify(verified)).not.toContain(callback.ref);
+    const persistedFailure = proc.odb.getDB().prepare(`
+      SELECT capsule_ref FROM capsule_failures
+       WHERE effect_id = ? ORDER BY created_at DESC LIMIT 1
+    `).get(prepared.effectId) as { capsule_ref: string | null };
+    expect(persistedFailure.capsule_ref).toBe('[redacted]');
+    expect(proc.capsuleStore.listFailures(prepared.effectId).at(-1)?.capsuleRef)
+      .toBe('[redacted]');
+  });
+
+  it('redacts decrypt exceptions from durable capsule failures and public callback diagnostics', () => {
+    const masterKey = crypto.randomBytes(32);
+    const proc = wireProcess(dir, masterKey);
+    const ws = makeWorkspaceId(proc.odb);
+    const runId = makeRunId(proc.odb, ws);
+    const root = proc.runtime.createRootFrame({ runId });
+    const child = proc.runtime.createChildFrame({
+      runId, parentFrameId: root.id, frameKind: 'plan_step',
+    });
+    const prepared = proc.protocol.prepare({
+      runId, ownerFrameId: child.id, effectType: 'mock.egress',
+      adapterKind: 'mock', adapterVersion: 'M1',
+      payload: { secret: 'payload-never-leaks' }, payloadFingerprint: 'approval-anchor',
+      idempotencyKey: 'idem-redaction', scopeHash: 'scope-redaction',
+      routeDecisionId: 'rd', policyEvaluationId: 'pe', policyVersionHash: 'ph',
+    });
+    const callback = proc.capsuleStore.fetchByBinding({
+      effectId: prepared.effectId, capsuleKind: 'callback', attemptNo: 1,
+    })!;
+    // Corrupt the blob as a real hostile-storage input. The injected
+    // key-provider exception supplies a sentinel to prove the failure
+    // boundary never stores or returns provider text.
+    const row = proc.odb.getDB().prepare('SELECT blob_payload FROM capsules WHERE ref = ?')
+      .get(callback.ref) as { blob_payload: Buffer };
+    const tampered = Buffer.from(row.blob_payload);
+    tampered[tampered.length - 1] ^= 0x01;
+    proc.odb.getDB().prepare('UPDATE capsules SET blob_payload = ? WHERE ref = ?')
+      .run(tampered, callback.ref);
+    const sentinel = 'CAPSULE_DECRYPT_SECRET_SENTINEL';
+    const mutableStore = proc.capsuleStore as unknown as {
+      keyProvider: { getMasterKey(): Buffer };
+    };
+    const originalKeyProvider = mutableStore.keyProvider;
+    // Key-provider faults are caught by the same decrypt/auth failure
+    // boundary as crypto failures. This lets the test carry a controlled
+    // sensitive exception without monkey-patching Node's frozen namespace.
+    mutableStore.keyProvider = {
+      getMasterKey: () => { throw new Error(sentinel); },
+    };
+    let verified: ReturnType<typeof proc.capsuleStore.verifyCallbackAgainstFingerprint>;
+    try {
+      verified = proc.capsuleStore.verifyCallbackAgainstFingerprint({
+        effectId: prepared.effectId, attemptNo: 1,
+        expectedFingerprint: proc.runtime.readEffect(prepared.effectId).capsuleFingerprint!,
+      });
+    } finally {
+      mutableStore.keyProvider = originalKeyProvider;
+    }
+    expect(verified!).toEqual({
+      outcome: 'capsule_failure', capsuleRef: null,
+      detail: 'callback_capsule_unavailable',
+    });
+    expect(JSON.stringify(verified)).not.toContain(sentinel);
+
+    const durable = proc.odb.getDB().prepare(
+      'SELECT failure_kind, detail FROM capsule_failures WHERE effect_id = ? ORDER BY created_at DESC LIMIT 1',
+    ).get(prepared.effectId) as { failure_kind: string; detail: string };
+    expect(durable).toEqual({
+      failure_kind: 'decrypt_failed', detail: 'capsule_decrypt_failed',
+    });
+    expect(JSON.stringify(durable)).not.toContain(sentinel);
+    const publicFailure = proc.capsuleStore.listFailures(prepared.effectId).at(-1)!;
+    expect(publicFailure).toMatchObject({
+      failureKind: 'decrypt_failed', detail: 'capsule_decrypt_failed',
+    });
+    expect(JSON.stringify(publicFailure)).not.toContain(sentinel);
+  });
+
+  it('masks SECRET_SENTINEL refs across capsule lookup and failure boundaries', () => {
+    const proc = wireProcess(dir, crypto.randomBytes(32));
+    const rawCapsuleRef = 'SECRET_SENTINEL';
+    const rawReceiptRef = 'RAW_CALLER_RECEIPT_REF_DO_NOT_EXPOSE';
+    const capture = (body: () => unknown): unknown => {
+      try {
+        body();
+        throw new Error('expected capsule operation to fail');
+      } catch (err) {
+        return err;
+      }
+    };
+
+    const openError = capture(() => proc.capsuleStore.open(rawCapsuleRef));
+    const byRefError = capture(() => proc.capsuleStore.openByRef({ ref: rawCapsuleRef }));
+    expect(proc.capsuleStore.fetchByRef(rawCapsuleRef)).toBeNull();
+    const receiptError = capture(() => proc.capsuleStore.openResultForReceipt({
+      workspaceId: 'ws_ref_redaction', effectId: 'effect_ref_redaction',
+      receiptId: rawReceiptRef, attemptNo: 1,
+      resultCapsuleRef: rawCapsuleRef,
+      resultCapsuleHash: 'a'.repeat(64), resultCapsuleFormatVersion: 'v1',
+    }));
+    for (const err of [openError, byRefError, receiptError]) {
+      expect(err).toMatchObject({ code: OgraErrorCode.CAPSULE_INVALID });
+      expect(JSON.stringify(err)).not.toContain(rawCapsuleRef);
+      expect(JSON.stringify(err)).not.toContain(rawReceiptRef);
+    }
+
+    proc.capsuleStore.recordFailure({
+      effectId: 'effect_direct_failure', capsuleRef: rawCapsuleRef,
+      failureKind: 'missing', detail: 'capsule_missing',
+    });
+    const persisted = proc.odb.getDB().prepare(
+      'SELECT capsule_ref FROM capsule_failures ORDER BY created_at, id',
+    ).all() as Array<{ capsule_ref: string | null }>;
+    expect(persisted).toHaveLength(4);
+    expect(persisted.every(row => row.capsule_ref === '[redacted]')).toBe(true);
+    expect(JSON.stringify(persisted)).not.toContain(rawCapsuleRef);
+
+    const publicFailures = proc.capsuleStore.listFailures('effect_ref_redaction');
+    expect(publicFailures).toHaveLength(1);
+    expect(publicFailures[0].capsuleRef).toBe('[redacted]');
+    expect(JSON.stringify(publicFailures)).not.toContain(rawCapsuleRef);
+
+    // Public reads also mask historical rows written before write-side
+    // sanitization existed.
+    proc.odb.getDB().prepare(`
+      INSERT INTO capsule_failures
+        (id, effect_id, capsule_ref, failure_kind, detail)
+      VALUES (?, ?, ?, 'missing', 'capsule_missing')
+    `).run('capfail_legacy_ref', 'effect_legacy_ref', rawCapsuleRef);
+    const legacyPublic = proc.capsuleStore.listFailures('effect_legacy_ref');
+    expect(legacyPublic).toHaveLength(1);
+    expect(legacyPublic[0].capsuleRef).toBe('[redacted]');
+    expect(JSON.stringify(legacyPublic)).not.toContain(rawCapsuleRef);
+
+    const ws = makeWorkspaceId(proc.odb);
+    const runId = makeRunId(proc.odb, ws);
+    const root = proc.runtime.createRootFrame({ runId });
+    const child = proc.runtime.createChildFrame({
+      runId, parentFrameId: root.id, frameKind: 'plan_step',
+    });
+    const prepared = proc.protocol.prepare({
+      runId, ownerFrameId: child.id, effectType: 'mock.egress',
+      adapterKind: 'mock', adapterVersion: 'M1', payload: { value: 'sealed' },
+      payloadFingerprint: 'raw-ref-test', idempotencyKey: 'raw-ref-test',
+      scopeHash: 'raw-ref-test', routeDecisionId: 'rd', policyEvaluationId: 'pe',
+      policyVersionHash: 'ph',
+    });
+    const callback = proc.capsuleStore.fetchByBinding({
+      effectId: prepared.effectId, capsuleKind: 'callback', attemptNo: 1,
+    })!;
+    proc.odb.getDB().prepare('UPDATE capsules SET workspace_tag = ? WHERE ref = ?')
+      .run('tampered-workspace-tag', callback.ref);
+    const storedRefError = capture(() => proc.capsuleStore.open(callback.ref));
+    expect(storedRefError).toMatchObject({ code: OgraErrorCode.CAPSULE_INVALID });
+    expect(JSON.stringify(storedRefError)).not.toContain(callback.ref);
   });
 
   it('derives the callback anchor from sealed plaintext, not a caller declaration', () => {
@@ -1724,7 +1884,7 @@ describe('Sequence 1B M1 Round 6 — recovery revalidation', () => {
     const decision = report.effects[0];
     expect(decision.decision).toBe('incident_blocked');
     expect(decision.detail ?? '').toContain('approval_expired');
-    expect(decision.detail ?? '').toContain(approvalId);
+    expect(decision.detail ?? '').not.toContain(approvalId);
   });
 
   it('rejected when approval fingerprint has drifted (Sequence 0 binding anchor)', async () => {
@@ -1979,7 +2139,8 @@ describe('Sequence 1B M1 — callback approval consumption', () => {
       recoveryApprovalId: administrativeApprovalId,
     });
     expect(adminBlocked.effects[0]).toMatchObject({ decision: 'incident_blocked' });
-    expect(adminBlocked.effects[0].detail).toContain('not valid for recovery_retry');
+    expect(adminBlocked.effects[0].detail).toContain('callback transition failed');
+    expect(adminBlocked.effects[0].detail).not.toContain('not valid for recovery_retry');
     expect(runtime.readEffect(prepared.effectId).state).toBe('unknown');
     expect(odb.getDB().prepare('SELECT uses_consumed FROM approvals WHERE id = ?')
       .get(administrativeApprovalId)).toMatchObject({ uses_consumed: 0 });
@@ -2629,7 +2790,11 @@ describe('Sequence 1B M1 — stale lease finalizers roll back', () => {
       runId, holderId: 'second', adapterSupportsOutcomeQuery: true,
       queryOutcome: async () => ({ applied: true, payload: { recovered: true } }),
     });
-    expect(report.effects[0].decision).toBe('noop_already_terminal');
+    // A stale lease is a recovery failure, not evidence that another
+    // finalizer already reached a terminal state. Keep the durable state
+    // untouched and report it fail-closed.
+    expect(report.effects[0].decision).toBe('incident_blocked');
+    expect(report.effects[0].incidentKind).toBe('recovery_finalize_failed');
     expect(process.runtime.readEffect(prepared.effectId)).toMatchObject({ state: 'unknown', effectRevision: 3 });
     expect(process.odb.getDB().prepare('SELECT COUNT(*) AS c FROM effect_receipts WHERE effect_id = ?')
       .get(prepared.effectId)).toMatchObject({ c: 0 });

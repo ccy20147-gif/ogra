@@ -287,6 +287,20 @@ function registerIpcHandlers(): void {
     },
     { argCount: 1, requiresCaller: false },
   );
+  // Plan 11 T2: renderer-visible Tool Broker trace. This is read-only and
+  // Core verifies that the requested run belongs to the requested workspace.
+  // There is intentionally no renderer-facing generic tool invocation IPC.
+  registerHandler(
+    IpcChannel.ToolTraceRead,
+    async (_event, req: any) => {
+      if (!req || typeof req.workspaceId !== 'string' || typeof req.runId !== 'string') {
+        throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+          'tool trace requires workspaceId and runId');
+      }
+      return ograCore!.toolTraceForRun({ workspaceId: req.workspaceId, runId: req.runId });
+    },
+    { argCount: 1 },
+  );
   registerHandler(
     IpcChannel.QuarantineRead,
     async (_event, quarantineId: string) => ograCore!.quarantineRead(quarantineId),

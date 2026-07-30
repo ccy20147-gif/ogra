@@ -41,6 +41,7 @@ export interface OgraAPI {
     // Sequence 1B Milestone 2 — sanitized per-effect status
     // snapshot (refs / hashes / state names only).
     effectStatusList: (runId: string) => Promise<IpcResult>;
+    toolTrace: (workspaceId: string, runId: string) => Promise<IpcResult>;
   };
   /** Sequence 0 Plan 03 §3.6 — approve-then-egress tier. */
   approval: {

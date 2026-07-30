@@ -105,6 +105,21 @@ export interface IngressReviewInput {
   ruleVersion: string;
   /** asOf override (test-only). */
   asOf?: string;
+  /**
+   * P0#3 fix: optional callback that runs INSIDE the same
+   * SQLite transaction as the terminal commit + recovery
+   * decision + audit edges. Its return value is forwarded to
+   * the caller; the callback may perform additional writes
+   * (e.g. action_ledger row + audit edge for the paired L1
+   * event) that must commit-or-rollback atomically with the
+   * terminal commit. Receives the outcome event id (the v2
+   * envelope event id minted by `transactionalAppend`) and the
+   * post-commit `IngressReviewResult` snapshot.
+   */
+  postCommitBody?: (args: {
+    outcomeEventId: string;
+    review: IngressReviewResult;
+  }) => unknown;
 }
 
 export interface IngressReviewResult {
@@ -477,7 +492,14 @@ export class IngressReviewService {
         `).run(edgeRecovery, effect.run_id, input.effectId,
           recoveryDecisionId, outcomeEventId, now);
 
-        return {
+        // P0#3 fix: package the post-commit snapshot and run
+        // the optional `postCommitBody` callback INSIDE this
+        // transactionalAppend body — the entire chain
+        // (terminal state + audit edges + recovery decision +
+        // the callback's writes) is one SQLite transaction.
+        // A throw inside the callback rolls the whole
+        // finalization back together.
+        const review: IngressReviewResult = {
           effectId: input.effectId,
           findingId: findingIdFinal,
           reviewDecisionId,
@@ -487,6 +509,13 @@ export class IngressReviewService {
           payloadDigest: computedDigest,
           outcomeEventId,
         };
+        if (input.postCommitBody) {
+          input.postCommitBody({
+            outcomeEventId,
+            review,
+          });
+        }
+        return review;
       },
       });
     } catch (err) {

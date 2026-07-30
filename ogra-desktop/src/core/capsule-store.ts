@@ -46,6 +46,49 @@ export const CAPSULE_NONCE_BYTES = 12;
 export const CAPSULE_TAG_BYTES = 16;
 export const CAPSULE_KEY_BYTES = 32;
 
+type CapsuleFailureKind =
+  | 'missing' | 'corrupt' | 'expired' | 'wrong_workspace'
+  | 'hash_mismatch' | 'decrypt_failed' | 'format_mismatch'
+  | 'unsupported_primitives';
+
+/**
+ * `capsule_failures.detail` crosses storage and UI/audit boundaries.  It is
+ * deliberately a closed set: callers may provide contextual diagnostics for
+ * local control flow, but no arbitrary text (including an adapter, crypto,
+ * or secret-provider exception) is durable or returned to callers.
+ */
+const CAPSULE_FAILURE_DETAIL_BY_KIND: Readonly<Record<CapsuleFailureKind, string>> = {
+  missing: 'capsule_missing',
+  corrupt: 'capsule_corrupt',
+  expired: 'capsule_expired',
+  wrong_workspace: 'capsule_wrong_workspace',
+  hash_mismatch: 'capsule_hash_mismatch',
+  decrypt_failed: 'capsule_decrypt_failed',
+  format_mismatch: 'capsule_format_mismatch',
+  unsupported_primitives: 'capsule_unsupported_primitives',
+};
+
+const APPROVED_CAPSULE_FAILURE_DETAILS = new Set<string>([
+  ...Object.values(CAPSULE_FAILURE_DETAIL_BY_KIND),
+  // This is consumed as a stable recovery diagnostic by existing incident
+  // projections. It is intentionally not a free-form exception message.
+  'recovery_capability_evidence_invalid',
+]);
+
+const MASKED_CAPSULE_FAILURE_REF = '[redacted]';
+
+function safeCapsuleFailureDetail(failureKind: CapsuleFailureKind | string, detail: unknown): string {
+  return typeof detail === 'string' && APPROVED_CAPSULE_FAILURE_DETAILS.has(detail)
+    ? detail
+    : CAPSULE_FAILURE_DETAIL_BY_KIND[failureKind as CapsuleFailureKind] ?? 'capsule_corrupt';
+}
+
+function safeCapsuleFailureRef(capsuleRef: unknown): string | null {
+  return capsuleRef === null || capsuleRef === undefined
+    ? null
+    : MASKED_CAPSULE_FAILURE_REF;
+}
+
 export interface CapsuleBinding {
   workspaceId: string;
   capsuleKind: CapsuleKind;
@@ -192,7 +235,7 @@ export class EncryptedCapsuleStore {
       this.odb.getDB().prepare(
         `UPDATE workspaces SET workspace_tag = ? WHERE id = ?`,
       ).run(tag, workspaceId);
-    } catch {
+    } catch (err) {
       // Column absent — keep tag in memory only.
     }
     return tag;
@@ -328,10 +371,10 @@ export class EncryptedCapsuleStore {
     if (!row) {
       this.recordFailure({
         capsuleRef: ref, failureKind: 'missing',
-        detail: `capsule ${ref} not found`,
+        detail: 'capsule_missing',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${ref} missing`);
+        'capsule lookup failed');
     }
     return this.openRow<T>(row);
   }
@@ -348,10 +391,10 @@ export class EncryptedCapsuleStore {
       this.recordFailure({
         effectId: args.effectId, capsuleRef: '', attemptNo: args.attemptNo,
         failureKind: 'missing',
-        detail: `no ${args.capsuleKind} capsule for effect ${args.effectId} attempt=${args.attemptNo}`,
+        detail: 'capsule_missing',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `${args.capsuleKind} capsule missing for effect ${args.effectId} attempt=${args.attemptNo}`);
+        'bound capsule is unavailable');
     }
     const opened = this.openRow<T>(row);
     return opened;
@@ -376,10 +419,10 @@ export class EncryptedCapsuleStore {
       this.recordFailure({
         effectId: args.effectId, capsuleRef: '', attemptNo: args.attemptNo,
         failureKind: 'missing',
-        detail: `no ${args.capsuleKind} capsule for effect ${args.effectId} attempt=${args.attemptNo}`,
+        detail: 'capsule_missing',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `${args.capsuleKind} capsule missing for effect ${args.effectId} attempt=${args.attemptNo}`);
+        'bound capsule is unavailable');
     }
     return { ...this.openRow<T>(row), capsuleRef: row.ref };
   }
@@ -394,20 +437,20 @@ export class EncryptedCapsuleStore {
         effectId: row.effect_id, workspaceId: row.workspace_id,
         capsuleRef: row.ref, attemptNo: row.attempt_no,
         failureKind: 'wrong_workspace',
-        detail: `workspace tag drift: stored=${row.workspace_tag} current=${currentTag}`,
+        detail: 'capsule_wrong_workspace',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${row.ref}: workspace tag drift — possible cross-workspace replay`);
+        'capsule workspace binding is invalid');
     }
     if (new Date(row.expires_at).getTime() <= this.now().getTime()) {
       this.recordFailure({
         effectId: row.effect_id, workspaceId: row.workspace_id,
         capsuleRef: row.ref, attemptNo: row.attempt_no,
         failureKind: 'expired',
-        detail: `capsule expired at ${row.expires_at}`,
+        detail: 'capsule_expired',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_EXPIRED,
-        `capsule ${row.ref} expired at ${row.expires_at}`);
+        'capsule has expired');
     }
     const blob = row.blob_payload;
     if (!blob || blob.length < CAPSULE_NONCE_BYTES + CAPSULE_TAG_BYTES) {
@@ -415,10 +458,10 @@ export class EncryptedCapsuleStore {
         effectId: row.effect_id, workspaceId: row.workspace_id,
         capsuleRef: row.ref, attemptNo: row.attempt_no,
         failureKind: 'corrupt',
-        detail: `blob too short: ${blob ? blob.length : 0} bytes`,
+        detail: 'capsule_corrupt',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${row.ref} blob too short`);
+        'capsule payload is corrupt');
     }
     const nonce = blob.subarray(0, CAPSULE_NONCE_BYTES);
     const tag = blob.subarray(blob.length - CAPSULE_TAG_BYTES);
@@ -445,15 +488,15 @@ export class EncryptedCapsuleStore {
       decipher.setAAD(this.buildAad(row.workspace_id, row.workspace_tag, binding));
       decipher.setAuthTag(tag);
       plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
-    } catch (err) {
+    } catch {
       this.recordFailure({
         effectId: row.effect_id, workspaceId: row.workspace_id,
         capsuleRef: row.ref, attemptNo: row.attempt_no,
         failureKind: 'decrypt_failed',
-        detail: `AES-GCM auth failure: ${(err as Error)?.message ?? ''}`,
+        detail: 'capsule_decrypt_failed',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${row.ref}: decrypt/auth failed`);
+        'capsule decrypt/authentication failed');
     }
     const verifiedHash = this.computeHash(plaintext);
     if (verifiedHash !== row.hash) {
@@ -461,10 +504,10 @@ export class EncryptedCapsuleStore {
         effectId: row.effect_id, workspaceId: row.workspace_id,
         capsuleRef: row.ref, attemptNo: row.attempt_no,
         failureKind: 'hash_mismatch',
-        detail: `hash drift: stored=${row.hash} computed=${verifiedHash}`,
+        detail: 'capsule_hash_mismatch',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${row.ref}: hash drift`);
+        'capsule content hash is invalid');
     }
     let payload: T;
     try {
@@ -477,7 +520,7 @@ export class EncryptedCapsuleStore {
         detail: 'JSON parse failure',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${row.ref}: payload JSON parse failure`);
+        'capsule payload is corrupt');
     }
     return { binding, workspaceTag: row.workspace_tag, payload, verifiedHash };
   }
@@ -515,10 +558,10 @@ export class EncryptedCapsuleStore {
       this.recordFailure({
         capsuleRef: args.ref, attemptNo: 0,
         failureKind: 'missing',
-        detail: `capsule ${args.ref} not found`,
+        detail: 'capsule_missing',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `capsule ${args.ref} not found`);
+        'capsule lookup failed');
     }
     return this.openRow<T>(row);
   }
@@ -549,30 +592,30 @@ export class EncryptedCapsuleStore {
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID, detail);
     };
     if (!args.resultCapsuleRef || !args.resultCapsuleHash || !args.resultCapsuleFormatVersion) {
-      return fail('missing', `receipt ${args.receiptId} has no complete result capsule reference`);
+      return fail('missing', 'capsule_missing');
     }
     const row = this.odb.getDB().prepare(
       'SELECT * FROM capsules WHERE ref = ?',
     ).get(args.resultCapsuleRef) as CapsuleRow | undefined;
     if (!row) {
-      return fail('missing', `result capsule ${args.resultCapsuleRef} is missing for receipt ${args.receiptId}`);
+      return fail('missing', 'capsule_missing');
     }
     if (row.workspace_id !== args.workspaceId
         || row.capsule_kind !== 'result'
         || row.effect_id !== args.effectId
         || row.receipt_id !== args.receiptId
         || row.attempt_no !== args.attemptNo) {
-      return fail('corrupt', `result capsule ${row.ref} ownership binding does not match receipt ${args.receiptId}`);
+      return fail('corrupt', 'capsule_corrupt');
     }
     if (row.format_version !== args.resultCapsuleFormatVersion) {
-      return fail('format_mismatch', `result capsule ${row.ref} format does not match receipt ${args.receiptId}`);
+      return fail('format_mismatch', 'capsule_format_mismatch');
     }
     if (row.hash !== args.resultCapsuleHash) {
-      return fail('hash_mismatch', `result capsule ${row.ref} hash does not match receipt ${args.receiptId}`);
+      return fail('hash_mismatch', 'capsule_hash_mismatch');
     }
     const opened = this.openRow<T>(row);
     if (opened.verifiedHash !== args.resultCapsuleHash) {
-      return fail('hash_mismatch', `result capsule ${row.ref} verified hash does not match receipt ${args.receiptId}`);
+      return fail('hash_mismatch', 'capsule_hash_mismatch');
     }
     return opened;
   }
@@ -588,9 +631,7 @@ export class EncryptedCapsuleStore {
     capsuleRef?: string | null;
     attemptNo?: number | null;
     failureKind:
-      | 'missing' | 'corrupt' | 'expired' | 'wrong_workspace'
-      | 'hash_mismatch' | 'decrypt_failed' | 'format_mismatch'
-      | 'unsupported_primitives';
+      CapsuleFailureKind;
     detail: string;
   }): void {
     const id = `capfail_${crypto.randomBytes(6).toString('hex')}`;
@@ -600,8 +641,9 @@ export class EncryptedCapsuleStore {
           capsule_ref, attempt_no, failure_kind, detail)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(id, input.runId ?? null, input.effectId ?? null,
-        input.workspaceId ?? null, input.capsuleRef ?? null,
-        input.attemptNo ?? null, input.failureKind, input.detail);
+        input.workspaceId ?? null, safeCapsuleFailureRef(input.capsuleRef),
+        input.attemptNo ?? null, input.failureKind,
+        safeCapsuleFailureDetail(input.failureKind, input.detail));
     } catch {
       // Best-effort; failure log itself must never fail closed.
     }
@@ -609,17 +651,29 @@ export class EncryptedCapsuleStore {
 
   listFailures(effectId: string): Array<{
     id: string;
+    capsuleRef: string | null;
     failureKind: string;
     detail: string;
     createdAt: string;
   }> {
     const rows = this.odb.getDB().prepare(`
-      SELECT id, failure_kind, detail, created_at FROM capsule_failures
+      SELECT id, capsule_ref, failure_kind, detail, created_at FROM capsule_failures
       WHERE effect_id = ? ORDER BY created_at ASC
-    `).all(effectId) as Array<{ id: string; failure_kind: string; detail: string; created_at: string }>;
-    return rows.map(r => ({
-      id: r.id, failureKind: r.failure_kind, detail: r.detail, createdAt: r.created_at,
-    }));
+    `).all(effectId) as Array<{
+      id: string; capsule_ref: string | null; failure_kind: string;
+      detail: string; created_at: string;
+    }>;
+    return rows.map(r => {
+      return {
+        id: r.id,
+        capsuleRef: safeCapsuleFailureRef(r.capsule_ref),
+        failureKind: r.failure_kind,
+        // Older databases can contain pre-redaction text. Mask it at the
+        // public read boundary as well as on all future writes.
+        detail: safeCapsuleFailureDetail(r.failure_kind, r.detail),
+        createdAt: r.created_at,
+      };
+    });
   }
 
   /* ============================================================
@@ -683,7 +737,7 @@ export class EncryptedCapsuleStore {
   }): {
     outcome: 'match' | 'mismatch' | 'capsule_failure';
     canonicalHash?: string;
-    capsuleRef?: string;
+    capsuleRef?: string | null;
     detail?: string;
   } {
     let opened: OpenCapsule<unknown> & { capsuleRef: string };
@@ -692,10 +746,11 @@ export class EncryptedCapsuleStore {
         effectId: args.effectId, capsuleKind: 'callback',
         attemptNo: args.attemptNo,
       });
-    } catch (err) {
+    } catch {
       return {
         outcome: 'capsule_failure',
-        detail: `callback capsule unavailable: ${(err as Error)?.message ?? 'unknown'}`,
+        capsuleRef: null,
+        detail: 'callback_capsule_unavailable',
       };
     }
     // The row binding is AEAD-authenticated by openRow(), but it is still
@@ -718,7 +773,7 @@ export class EncryptedCapsuleStore {
       return {
         outcome: 'mismatch',
         canonicalHash,
-        capsuleRef: opened.capsuleRef,
+        capsuleRef: safeCapsuleFailureRef(opened.capsuleRef),
         detail: 'callback plaintext differs from its durable authority anchor',
       };
     }
@@ -754,7 +809,7 @@ export class EncryptedCapsuleStore {
         detail: 'callback plaintext canonical hash does not match authenticated binding or effect anchor',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
-        `callback capsule ${opened.capsuleRef} plaintext fingerprint mismatch`);
+        'callback capsule fingerprint is invalid');
     }
     return { ...opened, canonicalHash };
   }

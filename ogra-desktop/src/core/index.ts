@@ -26,6 +26,19 @@ import { OllamaAdapter, OpenAICompatibleAdapter } from '../edge/model-adapters';
 import { OgraError, OgraErrorCode } from '../shared/errors';
 import { DataClassification, RouteDecisionType } from '../shared/types';
 import * as crypto from 'crypto';
+// Sequence 1C Milestone 1 — Action Ledger + ProgressGuard + Tool Broker T1/T2.
+import { ActionLedgerService } from './action-ledger';
+import { ProgressGuard, ProgressGuardConfig } from './progress-guard';
+import { ToolRegistry } from './tool-registry';
+import {
+  ToolHost, buildKnowledgeSearchDescriptor, KNOWLEDGE_SEARCH_LOGICAL_NAME,
+  MAX_KNOWLEDGE_SEARCH_KB_IDS,
+} from './knowledge-search-adapter';
+import { CapabilityGateway } from './capability-gateway';
+import { RagKnowledgeQueryAdapter } from './rag-knowledge-port';
+import { canonicalToolIdFor } from './tool-broker-types';
+import { ToolTerminalProjectionService } from './tool-terminal-projection';
+import { ToolTraceResponse } from '../shared/ipc-channels';
 
 export interface OgraCoreConfig {
   appDataDir: string;
@@ -37,6 +50,12 @@ export interface OgraCoreConfig {
    * Ollama / OpenAI-compatible adapter through ProviderService.
    */
   defaultAdapter?: BaseModelAdapter;
+  /**
+   * Core-owned ProgressGuard configuration. This is useful for deterministic
+   * integration tests and future workspace policy wiring; renderer and agent
+   * callers never control it per invocation.
+   */
+  progressGuardConfig?: ProgressGuardConfig;
 }
 
 /**
@@ -103,6 +122,39 @@ export class OgraCore {
   public readonly governanceService: GovernanceService;
   public readonly internalAgent: InternalAgentAdapter;
   public readonly redactionService: RedactionService;
+  // Sequence 1C Milestone 1 — Action Ledger + ProgressGuard + Tool Broker.
+  public readonly actionLedger: ActionLedgerService;
+  public readonly progressGuard: ProgressGuard;
+  public readonly toolRegistry: ToolRegistry;
+  /** Shared terminal projection authority for live tool calls and recovery. */
+  public readonly toolTerminalProjection: ToolTerminalProjectionService;
+  /**
+   * The ToolHost is built lazily so OgraCore construction does
+   * not depend on a workspace existing. Once the caller invokes
+   * `ensureKnowledgeSearchBinding(workspaceId, …)` the host is
+   * bound to that workspace + KB list. Calling host-bound code
+   * before any binding exists is a fail-closed PERMISSION_DENIED
+   * — not a Core-construction crash.
+   *
+   * P0#1 fix: tool hosts are keyed by workspaceId in a Map. A
+   * single-instance cache was unsafe: ensureKnowledgeSearchBinding(A)
+   * followed by ensureKnowledgeSearchBinding(B) would silently
+   * rebind the host to B's scope, so an A-owned run could end
+   * up dispatching through B's KB scope. Per-workspace keying
+   * eliminates the race.
+   */
+  private _toolHostsByWorkspace: Map<string, {
+    host: ToolHost;
+    workspaceId: string;
+    enabledKnowledgeBaseIds: string[];
+  }> = new Map();
+  public readonly capabilityGateway: CapabilityGateway;
+  /**
+   * Holder id used for tool-broker leases. A single Core-wide id
+   * keeps the lease table simple; the run-level CAS still
+   * enforces ownership.
+   */
+  private readonly leaseHolderId: string;
 
   private readonly config: OgraCoreConfig;
   private initialized = false;
@@ -190,6 +242,10 @@ export class OgraCore {
     // The checker is configured on the service itself, not merely supplied by
     // OgraCore.recover().  This keeps the production gate in force even when
     // another Core component holds recoveryService directly.
+    this.toolTerminalProjection = new ToolTerminalProjectionService(
+      this.databaseService.getOgraDatabase(), this.durableRuntime,
+      this.capsuleStore,
+    );
     this.recoveryService = new RecoveryService(
       this.databaseService.getOgraDatabase(),
       this.durableRuntime,
@@ -198,6 +254,7 @@ export class OgraCore {
       this.recoveryConditionChecker,
       // placeholder; replaced after ingressReviewService is built
       undefined as any,
+      this.toolTerminalProjection,
     );
 
     // Round-8a (M2): ingress review + recovery approval services.
@@ -217,6 +274,7 @@ export class OgraCore {
       this.durableRuntime,
       this.capsuleStore,
       this.ingressReviewService,
+      this.toolTerminalProjection,
     );
     // RecoveryApprovalService mints per-retry approvals.
     this.recoveryApprovalService = new RecoveryApprovalService(
@@ -365,6 +423,299 @@ export class OgraCore {
     this.knowledgeService = new KnowledgeService(this.auditService, this.pathValidator, config, this.ragEngine, this.databaseService);
     this.dataSafetyService = new DataSafetyService(this.auditService, this.workspaceService, this.databaseService);
     this.governanceService = new GovernanceService(this.auditService);
+
+    // Sequence 1C Milestone 1 — Action Ledger, ProgressGuard and
+    // Tool Broker T1/T2 wiring. These services are constructed
+    // AFTER the durable kernel so they can use its
+    // transactionalAppend, the ingress reviewer, and the
+    // effect protocol. They are constructed BEFORE initialize()
+    // because the seed step below runs during initialize and
+    // needs them.
+    this.actionLedger = new ActionLedgerService(
+      this.databaseService.getOgraDatabase(),
+      this.durableRuntime,
+    );
+    this.progressGuard = new ProgressGuard(
+      this.databaseService.getOgraDatabase(),
+      this.durableRuntime,
+      config.progressGuardConfig,
+    );
+    this.toolRegistry = new ToolRegistry(
+      this.databaseService.getOgraDatabase(),
+      this.durableRuntime,
+    );
+    this.leaseHolderId = `ogracore-tool-broker-${crypto.randomBytes(4).toString('hex')}`;
+    this.capabilityGateway = new CapabilityGateway({
+      odb: this.databaseService.getOgraDatabase(),
+      runtime: this.durableRuntime,
+      effectProtocol: this.effectProtocol,
+      capsuleStore: this.capsuleStore,
+      ingressReviewer: this.independentIngressReviewer,
+      actionLedger: this.actionLedger,
+      terminalProjection: this.toolTerminalProjection,
+      toolRegistry: this.toolRegistry,
+      // Lazy resolve with per-workspace keying (P0#1). The
+      // resolver returns the ToolHost bound to the workspace
+      // the caller is operating in. A workspace without a
+      // bound ToolHost gets a fresh fail-closed host — the
+      // dispatch() call then raises PERMISSION_DENIED with a
+      // specific "not bound to this workspace" diagnostic.
+      resolveToolHost: (workspaceId?: string) => this.getOrBuildToolHost(workspaceId),
+      getLeaseHolderId: () => this.leaseHolderId,
+      // P0#2 — Real policy / route evaluation in production.
+      // The gateway persists a real `policy_evaluations` row
+      // (computed from workspace default + tool effect_class +
+      // binding policy), not a literal `decision: 'allow'`
+      // stub. Production wires the real services; legacy
+      // fixtures that omit these fields keep the legacy
+      // semantics, so the M1 broker fixture stays green.
+      policyService: this.policyService,
+      routeService: this.routeService,
+      // P0#4 — ProgressGuard threading. Every tool call
+      // observes against the guard; an `ok=false` decision
+      // aborts the dispatch fail-closed.
+      progressGuard: this.progressGuard,
+    });
+    this.internalAgent.bindToolBroker(this.capabilityGateway);
+  }
+
+  /**
+   * Get-or-build a ToolHost for one workspaceId. Per-workspace
+   * keying (P0#1) means each binding lives in its own slot of
+   * `_toolHostsByWorkspace`. A workspaceId not yet present gets
+   * a placeholder host whose `dispatch()` raises PERMISSION_DENIED
+   * with the canonical "not bound to this workspace" message;
+   * the production path always pairs this with `ensureKnowledgeSearchBinding`
+   * before `invokePrepared`, so the placeholder is the
+   * contract-violation diagnostic surface.
+   */
+  private getOrBuildToolHost(workspaceId?: string): ToolHost {
+   // Fall back to a shared placeholder host if a caller
+   // didn't supply a workspaceId; production paths always
+   // supply one.
+   const wsid = workspaceId ?? '__t1_unbound__';
+   const cached = this._toolHostsByWorkspace.get(wsid);
+   if (cached) return cached.host;
+   const placeholder = new ToolHost(
+     new RagKnowledgeQueryAdapter({
+       ragEngine: this.ragEngine,
+       databaseService: this.databaseService,
+     }),
+     { knowledgeSearch: {
+       workspaceId: wsid,
+       enabledKnowledgeBaseIds: [],
+       maxSnippetBytes: 4096,
+     } },
+   );
+   this._toolHostsByWorkspace.set(wsid, {
+     host: placeholder,
+     workspaceId: wsid,
+     enabledKnowledgeBaseIds: [],
+   });
+   return placeholder;
+ }
+
+  /**
+   * Sequence 1C Milestone 1 — Seed the canonical built-in
+   * read-only tool (knowledge.search v1) once per workspace. The
+   * seed runs inside the durable runtime so a binding change is
+   * a versioned event. Runs the first time OgraCore is asked for
+   * a tool-broker operation, so test fixtures without any
+   * workspace are unaffected.
+   */
+  async ensureKnowledgeSearchBinding(workspaceId: string, opts?: {
+    enabledKnowledgeBaseIds?: string[];
+    maxSnippetBytes?: number;
+    approvalMode?: 'none' | 'allowlist' | 'each_call' | 'workflow_step' | 'administrative';
+    policyId?: string | null;
+  }): Promise<{
+    descriptorId: string;
+    toolVersionId: string;
+    bindingId: string;
+    toolId: string;
+  }> {
+    // Verify the workspace actually exists — fail closed on a
+    // bogus caller.
+    const row = this.databaseService.getRawDB().prepare(
+      'SELECT id FROM workspaces WHERE id = ?',
+    ).get(workspaceId) as { id: string } | undefined;
+    if (!row) {
+      throw new OgraError(OgraErrorCode.WORKSPACE_NOT_FOUND,
+        `ensureKnowledgeSearchBinding: workspace ${workspaceId} not found`);
+    }
+    const existing = this.databaseService.getRawDB().prepare(`
+      SELECT b.tool_version_id AS tool_version_id,
+             b.id AS binding_id,
+             b.binding_hash_version AS binding_hash_version,
+             b.constraints_json AS constraints_json,
+             b.approval_mode AS approval_mode,
+             b.policy_id AS policy_id,
+             v.descriptor_id AS descriptor_id,
+             v.status AS version_status,
+             d.lifecycle_state AS descriptor_lifecycle
+        FROM workspace_tool_bindings b
+        JOIN tool_versions v ON v.id = b.tool_version_id
+        JOIN tool_descriptors d ON d.id = v.descriptor_id
+       WHERE b.workspace_id = ?
+         AND b.logical_binding_id = ?
+         AND b.enabled = 1
+         AND d.logical_name = ?
+       ORDER BY b.revision DESC
+       LIMIT 1
+    `).get(
+      workspaceId,
+      `tbind_knowledge_search_${workspaceId}`,
+      KNOWLEDGE_SEARCH_LOGICAL_NAME,
+    ) as
+      { tool_version_id: string; binding_id: string; descriptor_id: string;
+        binding_hash_version: number; version_status: string;
+        descriptor_lifecycle: string; constraints_json: string;
+        approval_mode: 'none' | 'allowlist' | 'each_call' | 'workflow_step' | 'administrative';
+        policy_id: string | null; } | undefined;
+    let existingAuthority: {
+      enabledKnowledgeBaseIds: string[];
+      maxSnippetBytes: number;
+    } | null = null;
+    if (existing
+        && existing.binding_hash_version === 2
+        && existing.version_status === 'enabled'
+        && existing.descriptor_lifecycle === 'enabled') {
+      try {
+        const constraints = JSON.parse(existing.constraints_json) as {
+          enabledKnowledgeBaseIds?: unknown;
+          maxSnippetBytes?: unknown;
+        };
+        if (!Array.isArray(constraints.enabledKnowledgeBaseIds)
+            || constraints.enabledKnowledgeBaseIds.length > MAX_KNOWLEDGE_SEARCH_KB_IDS
+            || constraints.enabledKnowledgeBaseIds.some((id) => typeof id !== 'string' || !id)
+            || new Set(constraints.enabledKnowledgeBaseIds).size
+              !== constraints.enabledKnowledgeBaseIds.length
+            || !Number.isInteger(constraints.maxSnippetBytes)
+            || (constraints.maxSnippetBytes as number) < 1
+            || (constraints.maxSnippetBytes as number) > 4096) {
+          throw new Error('invalid knowledge.search constraints');
+        }
+        existingAuthority = {
+          enabledKnowledgeBaseIds: [...constraints.enabledKnowledgeBaseIds],
+          maxSnippetBytes: constraints.maxSnippetBytes as number,
+        };
+      } catch {
+        throw new OgraError(OgraErrorCode.DATABASE_ERROR,
+          `ensureKnowledgeSearchBinding: persisted binding ${existing.binding_id} has invalid constraints`);
+      }
+    }
+
+    if (opts?.maxSnippetBytes !== undefined
+        && (!Number.isInteger(opts.maxSnippetBytes)
+          || opts.maxSnippetBytes < 1 || opts.maxSnippetBytes > 4096)) {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        'ensureKnowledgeSearchBinding: maxSnippetBytes must be an integer from 1 to 4096');
+    }
+    if (opts?.enabledKnowledgeBaseIds
+        && (opts.enabledKnowledgeBaseIds.length > MAX_KNOWLEDGE_SEARCH_KB_IDS
+          || opts.enabledKnowledgeBaseIds.some(
+      (id) => typeof id !== 'string' || id.length === 0,
+    ))) {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        'ensureKnowledgeSearchBinding: enabledKnowledgeBaseIds must contain 1 to 32 non-empty strings');
+    }
+
+    const enabledKBs = [...new Set(
+      opts?.enabledKnowledgeBaseIds
+        ?? existingAuthority?.enabledKnowledgeBaseIds
+        ?? [],
+    )];
+    const maxSnippetBytes = opts?.maxSnippetBytes
+      ?? existingAuthority?.maxSnippetBytes
+      ?? 4096;
+    const approvalMode = opts?.approvalMode ?? existing?.approval_mode ?? 'none';
+    const policyId = opts?.policyId !== undefined
+      ? opts.policyId
+      : existing?.policy_id ?? null;
+    const sameKnowledgeBaseScope = existingAuthority !== null
+      && existingAuthority.enabledKnowledgeBaseIds.length === enabledKBs.length
+      && existingAuthority.enabledKnowledgeBaseIds.every((id) => enabledKBs.includes(id));
+    const canReuseExisting = existing !== undefined
+      && existingAuthority !== null
+      && sameKnowledgeBaseScope
+      && existingAuthority.maxSnippetBytes === maxSnippetBytes
+      && existing.approval_mode === approvalMode
+      && existing.policy_id === policyId;
+
+    if (canReuseExisting && existing && existingAuthority) {
+      const tuple = this.toolRegistry.getDescriptorAndVersion(existing.tool_version_id)!;
+      this.installKnowledgeSearchHost(
+        workspaceId,
+        existingAuthority.enabledKnowledgeBaseIds,
+        existingAuthority.maxSnippetBytes,
+      );
+      return {
+        descriptorId: existing.descriptor_id,
+        toolVersionId: existing.tool_version_id,
+        bindingId: existing.binding_id,
+        toolId: canonicalToolIdFor(tuple.descriptor, tuple.version),
+      };
+    }
+
+    let descriptorId: string;
+    let toolVersionId: string;
+    if (existing && existingAuthority) {
+      descriptorId = existing.descriptor_id;
+      toolVersionId = existing.tool_version_id;
+    } else {
+      const desc = buildKnowledgeSearchDescriptor();
+      const upsert = await this.toolRegistry.upsertToolVersion(desc);
+      this.toolRegistry.setVersionStatus(upsert.toolVersionId, 'enabled');
+      descriptorId = upsert.descriptorId;
+      toolVersionId = upsert.toolVersionId;
+    }
+    const binding = this.toolRegistry.bindWorkspaceVersion({
+      workspaceId,
+      toolVersionId,
+      approvalMode,
+      constraints: {
+        enabledKnowledgeBaseIds: enabledKBs,
+        maxSnippetBytes,
+      },
+      policyId,
+      logicalBindingId: `tbind_knowledge_search_${workspaceId}`,
+      supersedePriorRevisions: true,
+    });
+    // Bind (or rebind) the ToolHost for THIS workspace to the
+    // KBs so dispatch() becomes legitimate. Tests that drive the
+    // broker through Core.run path will fail-closed
+    // PERMISSION_DENIED until this is called. P0#1 fix: each
+    // workspace gets its own ToolHost entry; no global rebind.
+    this.installKnowledgeSearchHost(workspaceId, enabledKBs, maxSnippetBytes);
+    const tuple = this.toolRegistry.getDescriptorAndVersion(toolVersionId)!;
+    return {
+      descriptorId,
+      toolVersionId,
+      bindingId: binding.id,
+      toolId: canonicalToolIdFor(tuple.descriptor, tuple.version),
+    };
+  }
+
+  private installKnowledgeSearchHost(
+    workspaceId: string,
+    enabledKnowledgeBaseIds: string[],
+    maxSnippetBytes: number,
+  ): void {
+    const host = new ToolHost(
+      new RagKnowledgeQueryAdapter({
+        ragEngine: this.ragEngine,
+        databaseService: this.databaseService,
+      }),
+      { knowledgeSearch: {
+        workspaceId,
+        enabledKnowledgeBaseIds: [...enabledKnowledgeBaseIds],
+        maxSnippetBytes,
+      } },
+    );
+    this._toolHostsByWorkspace.set(workspaceId, {
+      host, workspaceId,
+      enabledKnowledgeBaseIds: [...enabledKnowledgeBaseIds],
+    });
   }
 
   async initialize(): Promise<void> {
@@ -465,6 +816,94 @@ export class OgraCore {
             sanitizedReason: null }
         : null,
     }));
+  }
+
+  /**
+   * Plan 11 T2 renderer/governance projection for one run's Tool Broker
+   * evidence. The requested workspace is verified against `agent_runs`
+   * before any invocation row is read. This query deliberately projects
+   * immutable refs and closed-set outcomes only: raw tool arguments,
+   * results, payload digests, secret material, and capsule references do not
+   * cross this Core boundary.
+   */
+  toolTraceForRun(args: { workspaceId: string; runId: string }): ToolTraceResponse {
+    if (!args.workspaceId || !args.runId) {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        'toolTraceForRun: workspaceId and runId are required');
+    }
+    const db = this.databaseService.getRawDB();
+    const run = db.prepare(
+      'SELECT workspace_id FROM agent_runs WHERE id = ?',
+    ).get(args.runId) as { workspace_id: string } | undefined;
+    if (!run) {
+      throw new OgraError(OgraErrorCode.RUN_NOT_FOUND,
+        `toolTraceForRun: run ${args.runId} was not found`);
+    }
+    if (run.workspace_id !== args.workspaceId) {
+      throw new OgraError(OgraErrorCode.WORKSPACE_MISMATCH,
+        `toolTraceForRun: run ${args.runId} does not belong to workspace ${args.workspaceId}`);
+    }
+
+    const rows = db.prepare(`
+      SELECT e.id AS effect_id, e.state AS effect_state, e.created_at AS created_at,
+             v.id AS tool_version_id, v.source_version AS source_version,
+             b.id AS workspace_binding_id, b.revision AS binding_revision,
+             r.id AS receipt_id,
+             ti.ingress_finding_id AS ingress_finding_id,
+             ird.outcome AS ingress_outcome,
+             o.id AS observation_id, o.created_event_id AS observation_event_id,
+             al.id AS action_ledger_id, al.l1_event_id AS action_ledger_event_id,
+             al.sequence_no AS action_sequence_no
+        FROM tool_invocations ti
+        JOIN run_effects e ON e.id = ti.effect_id AND e.run_id = ?
+        JOIN tool_versions v ON v.id = ti.tool_version_id
+        JOIN workspace_tool_bindings b
+          ON b.id = ti.workspace_binding_id AND b.workspace_id = ?
+        LEFT JOIN effect_receipts r
+          ON r.id = e.authoritative_receipt_id AND r.effect_id = e.id
+        LEFT JOIN ingress_findings iff ON iff.id = ti.ingress_finding_id
+        LEFT JOIN ingress_review_decisions ird
+          ON ird.ingress_finding_id = iff.id
+        LEFT JOIN tool_observations o ON o.effect_id = e.id AND o.run_id = e.run_id
+        LEFT JOIN action_ledger al ON al.id = (
+          SELECT id FROM action_ledger
+           WHERE effect_id = e.id AND run_id = e.run_id
+           ORDER BY sequence_no DESC LIMIT 1
+        )
+       ORDER BY e.created_at ASC
+    `).all(args.runId, args.workspaceId) as Array<{
+      effect_id: string; effect_state: string; created_at: string;
+      tool_version_id: string; source_version: string;
+      workspace_binding_id: string; binding_revision: number;
+      receipt_id: string | null; ingress_finding_id: string | null;
+      ingress_outcome: string | null; observation_id: string | null;
+      observation_event_id: string | null; action_ledger_id: string | null;
+      action_ledger_event_id: string | null; action_sequence_no: number | null;
+    }>;
+    const allowedOutcomes = new Set(['accepted', 'quarantined', 'rejected']);
+    return {
+      workspaceId: args.workspaceId,
+      runId: args.runId,
+      invocations: rows.map((row) => ({
+        effectId: row.effect_id,
+        effectState: row.effect_state,
+        toolVersionId: row.tool_version_id,
+        sourceVersion: row.source_version,
+        workspaceBindingId: row.workspace_binding_id,
+        bindingRevision: row.binding_revision,
+        receiptId: row.receipt_id,
+        ingressOutcome: allowedOutcomes.has(row.ingress_outcome ?? '')
+          ? row.ingress_outcome as 'accepted' | 'quarantined' | 'rejected'
+          : 'unknown',
+        ingressFindingId: row.ingress_finding_id,
+        observationId: row.observation_id,
+        observationEventId: row.observation_event_id,
+        actionLedgerId: row.action_ledger_id,
+        actionLedgerEventId: row.action_ledger_event_id,
+        actionSequenceNo: row.action_sequence_no,
+        createdAt: row.created_at,
+      })),
+    };
   }
 
   /**

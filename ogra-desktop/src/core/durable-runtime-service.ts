@@ -138,6 +138,14 @@ export class DurableRuntimeService {
     return this.getRedactionRuleVersion();
   }
 
+  /** Current policy authority. Exposed for Sequence 1C CapabilityGateway
+   *  so the action-ledger writes carry the same policy revision the
+   *  durability envelope hash binds. The runtime never invents a value;
+   *  it asks the provider passed in at construction (Plan 03 §5). */
+  getCurrentPolicyVersionHash(): string {
+    return this.getPolicyVersionHash();
+  }
+
   attachCapsuleStore(capsuleStore: EncryptedCapsuleStore): void {
     this.capsuleStore = capsuleStore;
   }
@@ -1212,6 +1220,12 @@ export class DurableRuntimeService {
         if (!existing['released_at']) {
           const isExpired = new Date(existing['expires_at'] as string).getTime() <= Date.now();
           if (!isExpired) {
+            // Same holder re-acquiring before TTL: a no-op
+            // idempotent renewal. Different holder: refuse.
+            if (existing['holder_id'] === req.holderId) {
+              const out = this.rowToLease(existing);
+              return out;
+            }
             throw new OgraError(OgraErrorCode.LEASE_VERSION_CONFLICT,
               `lease for run ${req.runId} is held by ${existing['holder_id']}`);
           }
@@ -1499,26 +1513,36 @@ export class DurableRuntimeService {
     meta: StateTransitionEventMeta;
     body: (eventId: string) => T;
   }): T {
-    if (!args.meta.runId) {
+    // Run-scoped events MUST name a run_id. Admin events
+    // (descriptor / version / binding / recovery-leases) are
+    // explicitly allowed to leave runId empty; the audit chain
+    // is per-run, so admin events get their own per-name chain
+    // keyed on runId = '__admin__:<eventType>'.
+    const isAdminEvent = !args.meta.runId;
+    const adminRunKey = isAdminEvent
+      ? `__admin__:${args.meta.eventType}` : args.meta.runId;
+    if (!args.meta.runId && !isAdminEvent) {
       throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
         'transactionalAppend requires runId');
     }
     return this.db.getDB().transaction(() => {
-      // Find last event hash for this run.
+      // Find last event hash for this run. Admin events get a
+      // dedicated per-event-type chain so admin writes do not
+      // collide with run-scoped chains.
       const prevRow = this.db.getDB().prepare(
         'SELECT event_hash, hash_envelope_version FROM run_events WHERE run_id = ? ORDER BY sequence DESC LIMIT 1',
-      ).get(args.meta.runId) as { event_hash: string; hash_envelope_version: string | null } | undefined;
+      ).get(adminRunKey) as { event_hash: string; hash_envelope_version: string | null } | undefined;
       const previousHash = prevRow?.event_hash ?? GENESIS_HASH;
       const sequence = (this.db.getDB().prepare(
         'SELECT MAX(sequence) as s FROM run_events WHERE run_id = ?',
-      ).get(args.meta.runId) as { s: number | null }).s ?? 0;
+      ).get(adminRunKey) as { s: number | null }).s ?? 0;
       const id = `evt_${Date.now()}_${sequence + 1}_${crypto.randomBytes(4).toString('hex')}`;
       // Generate createdAt ONCE and use it both for the envelope
       // hash and for the SQL row, so the verifier's recomputed
       // hash matches the producer's.
       const createdAt = new Date().toISOString();
       const composed = composeV2Envelope({
-        id, runId: args.meta.runId, workspaceId: args.meta.workspaceId,
+        id, runId: adminRunKey, workspaceId: args.meta.workspaceId,
         sequence: sequence + 1, eventType: args.meta.eventType,
         eventPayload: args.meta.eventPayload,
         policyVersionHash: args.meta.policyVersionHash ?? this.getPolicyVersionHash(),
@@ -1534,7 +1558,7 @@ export class DurableRuntimeService {
           target_subtree_revision, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
-        id, args.meta.runId, args.meta.workspaceId,
+        id, adminRunKey, args.meta.workspaceId,
         sequence + 1, args.meta.eventType,
         composed.eventPayloadJson, composed.payloadHash,
         previousHash, composed.eventHash,

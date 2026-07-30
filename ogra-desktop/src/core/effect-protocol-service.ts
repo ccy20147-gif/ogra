@@ -100,6 +100,13 @@ export interface PrepareEffectInput {
   supportsOutcomeQuery?: boolean;
   /** @deprecated Test-fixture compatibility only; sealed at prepare time. */
   supportsCompensation?: boolean;
+  /**
+   * Optional Core-owned projection write which runs inside the prepare
+   * transaction after the effect id exists.  Consumers that need a durable
+   * projection keyed by effect id (for example Tool Broker) must use this
+   * hook rather than issuing a second SQL transaction after prepare returns.
+   */
+  postPrepareBody?: (prepared: PreparedEffect) => void;
 }
 
 export interface PreparedEffect {
@@ -293,7 +300,7 @@ export class EffectProtocolService {
             throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
               `effect ${existing.id} marked idempotent but callback capsule missing`);
           }
-          return {
+          const prepared = {
             effectId: existing.id,
             attemptNo: 1,
             callbackCapsuleRef: callback.ref,
@@ -301,6 +308,8 @@ export class EffectProtocolService {
             callbackCapsuleFormatVersion: callback.formatVersion,
             idempotencyKeyHash,
           };
+          input.postPrepareBody?.(prepared);
+          return prepared;
         }
 
         // 4. Create the planned effect (revision = 1).
@@ -397,13 +406,15 @@ export class EffectProtocolService {
           fromId: input.ownerFrameId, relation: 'owns_effect',
           toKind: 'effect', toId: effectId, sourceEventId: eventId,
         });
-        return {
+        const prepared = {
           effectId, attemptNo: 1,
           callbackCapsuleRef: callbackCapsule.ref,
           callbackCapsuleHash: callbackCapsule.hash,
           callbackCapsuleFormatVersion: callbackCapsule.formatVersion,
           idempotencyKeyHash,
         };
+        input.postPrepareBody?.(prepared);
+        return prepared;
       },
     });
   }
@@ -432,27 +443,33 @@ export class EffectProtocolService {
       throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
         'casToInFlight: recovery retry must use a new attempt_no');
     }
-    // Callback capsule must be intact + decryptable before we
-    // permit the callback.
-    const callback = this.capsuleStore.fetchByBinding({
-      effectId: effect.id, capsuleKind: 'callback', attemptNo: 1,
+    const callbackAttemptNo = input.expectedAttemptNo;
+    const expectedFingerprint = effect.capsuleFingerprint ?? effect.payloadFingerprint;
+    // A controlled retry gets its own AEAD binding. The previous attempt is
+    // opened only as the authority source; the physical callback and its
+    // audit intent reference the freshly sealed attempt-scoped capsule.
+    let sourceCallback = this.capsuleStore.fetchByBinding({
+      effectId: effect.id, capsuleKind: 'callback', attemptNo: callbackAttemptNo,
     });
-    if (!callback) {
+    let sourceAttemptNo = callbackAttemptNo;
+    if (!sourceCallback && expectedState === 'unknown') {
+      sourceAttemptNo = callbackAttemptNo - 1;
+      sourceCallback = this.capsuleStore.fetchByBinding({
+        effectId: effect.id, capsuleKind: 'callback', attemptNo: sourceAttemptNo,
+      });
+    }
+    if (!sourceCallback) {
       this.capsuleStore.recordFailure({
-        effectId: effect.id, workspaceId: effect.runId ? '' : '',
-        capsuleRef: '(missing)', attemptNo: 1,
+        effectId: effect.id,
+        capsuleRef: '(missing)', attemptNo: callbackAttemptNo,
         failureKind: 'missing',
-        detail: 'pre-callback CAS: callback capsule missing',
+        detail: 'pre-callback CAS: attempt-scoped callback capsule missing',
       });
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
         `pre-callback CAS: callback capsule missing for ${input.effectId}`);
     }
-    // Open the capsule to verify decryptability. This catches
-    // workspace-tag drift, expiry, hash drift before we ever
-    // hand the adapter the payload.
-    const verifiedCallback = this.capsuleStore.openVerifiedCallbackForEffect({
-      effectId: effect.id, attemptNo: 1,
-      expectedFingerprint: effect.capsuleFingerprint ?? effect.payloadFingerprint,
+    const sourceVerifiedCallback = this.capsuleStore.openVerifiedCallbackForEffect({
+      effectId: effect.id, attemptNo: sourceAttemptNo, expectedFingerprint,
     });
     // Lease gate: a callback intent is only legal while the caller owns the
     // active run lease. For unknown -> in_flight this is also enforced by the
@@ -465,88 +482,114 @@ export class EffectProtocolService {
         `pre-callback CAS: lease not held by ${input.leaseHolder}`);
     }
     const expectedLeaseVersion = input.expectedLeaseVersion ?? lease.leaseVersion;
-    return this.runtime.transactionalAppend({
-      meta: {
-        runId: effect.runId,
-        workspaceId: null,
-        eventType: 'effect_callback_intent',
-        eventPayload: {
+    return this.odb.getDB().transaction(() => {
+      let callback = sourceCallback!;
+      if (sourceAttemptNo !== callbackAttemptNo) {
+        callback = this.capsuleStore.seal({
+          ...sourceVerifiedCallback.binding,
+          attemptNo: callbackAttemptNo,
+          createdEventId: null,
+        }, sourceVerifiedCallback.payload);
+      }
+      const verifiedCallback = this.capsuleStore.openVerifiedCallbackForEffect({
+        effectId: effect.id, attemptNo: callbackAttemptNo, expectedFingerprint,
+      });
+      return this.runtime.transactionalAppend({
+        meta: {
+          runId: effect.runId,
+          workspaceId: null,
+          eventType: 'effect_callback_intent',
+          eventPayload: {
+            effectId: effect.id,
+            attemptNo: callbackAttemptNo,
+            bindingKind: expectedState === 'planned' ? 'initial' : 'recovery_retry',
+            approvalId: input.approvalId ?? null,
+            callbackCapsuleRef: callback.ref,
+            callbackCapsuleHash: callback.hash,
+          },
+          frameId: effect.ownerFrameId,
           effectId: effect.id,
-          attemptNo: input.expectedAttemptNo,
-          bindingKind: expectedState === 'planned' ? 'initial' : 'recovery_retry',
-          approvalId: input.approvalId ?? null,
-          callbackCapsuleRef: callback.ref,
-          callbackCapsuleHash: callback.hash,
+          idempotencyKeyHash: effect.idempotencyKeyHash ?? null,
+          externalReceiptHash: null,
         },
-        frameId: effect.ownerFrameId,
-        effectId: effect.id,
-        idempotencyKeyHash: effect.idempotencyKeyHash ?? null,
-        externalReceiptHash: null,
-      },
-      body: (eventId) => {
-        // Re-check ownership, active expiry, and version INSIDE the same
-        // transaction that consumes approval authority and moves the effect.
-        // A stale holder therefore rolls back the run_event, binding,
-        // consumption, and effect update as one unit.
-        const activeLease = this.odb.getDB().prepare(`
+        body: (eventId) => {
+          if (sourceAttemptNo !== callbackAttemptNo) {
+            const capsuleEventBinding = this.odb.getDB().prepare(
+              'UPDATE capsules SET created_event_id = ? WHERE id = ? AND created_event_id IS NULL',
+            ).run(eventId, callback.id);
+            if (capsuleEventBinding.changes !== 1) {
+              throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
+                'pre-callback CAS: retry capsule event binding failed');
+            }
+          }
+          // Re-check ownership, active expiry, and version INSIDE the same
+          // transaction that consumes approval authority and moves the effect.
+          // A stale holder therefore rolls back the run_event, binding,
+          // consumption, and effect update as one unit.
+          const activeLease = this.odb.getDB().prepare(`
           SELECT 1 FROM recovery_leases
            WHERE run_id = ? AND holder_id = ? AND lease_version = ?
              AND released_at IS NULL AND expires_at > ?
         `).get(effect.runId, input.leaseHolder, expectedLeaseVersion,
-          new Date().toISOString());
-        if (!activeLease) {
-          throw new OgraError(OgraErrorCode.LEASE_NOT_HELD,
-            `pre-callback CAS: lease ownership changed for ${input.leaseHolder}`);
-        }
-        const requiresApproval = effect.currentApprovalId !== null
-          || this.routeRequiresApproval(effect.routeDecisionId);
-        if (requiresApproval && !input.approvalId) {
-          throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
-            `pre-callback CAS: effect ${effect.id} requires scoped approval authority`);
-        }
-        if (expectedState === 'planned' && effect.currentApprovalId
+            new Date().toISOString());
+          if (!activeLease) {
+            throw new OgraError(OgraErrorCode.LEASE_NOT_HELD,
+              `pre-callback CAS: lease ownership changed for ${input.leaseHolder}`);
+          }
+          const requiresApproval = effect.currentApprovalId !== null
+            || this.routeRequiresApproval(effect.routeDecisionId);
+          if (requiresApproval && !input.approvalId) {
+            throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+              `pre-callback CAS: effect ${effect.id} requires scoped approval authority`);
+          }
+          if (expectedState === 'planned' && effect.currentApprovalId
             && input.approvalId !== effect.currentApprovalId) {
-          throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
-            `pre-callback CAS: initial attempt must use effect's current approval`);
-        }
-        if (expectedState === 'unknown' && effect.currentApprovalId
+            throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+              `pre-callback CAS: initial attempt must use effect's current approval`);
+          }
+          if (expectedState === 'unknown' && effect.currentApprovalId
             && input.approvalId === effect.currentApprovalId) {
-          throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
-            `pre-callback CAS: recovery retry requires a new approval`);
-        }
-        if (input.approvalId) {
-          this.consumeApprovalForCallback({
-            effect,
-            approvalId: input.approvalId,
-            attemptNo: input.expectedAttemptNo,
-            bindingKind: expectedState === 'planned' ? 'initial' : 'recovery_retry',
-            eventId,
-          });
-        }
-        const casRes = this.odb.getDB().prepare(`
+            throw new OgraError(OgraErrorCode.APPROVAL_REQUIRED,
+              `pre-callback CAS: recovery retry requires a new approval`);
+          }
+          if (input.approvalId) {
+            this.consumeApprovalForCallback({
+              effect,
+              approvalId: input.approvalId,
+              attemptNo: input.expectedAttemptNo,
+              bindingKind: expectedState === 'planned' ? 'initial' : 'recovery_retry',
+              eventId,
+            });
+          }
+          const casRes = this.odb.getDB().prepare(`
           UPDATE run_effects SET state = 'in_flight',
             effect_revision = effect_revision + 1,
             current_approval_id = COALESCE(?, current_approval_id),
+            callback_capsule_ref = ?, callback_capsule_hash = ?,
+            callback_capsule_format_version = ?,
+            idempotency_key_ref = ?,
             updated_at = ?
             WHERE id = ? AND effect_revision = ? AND state = ?
-        `).run(input.approvalId ?? null, new Date().toISOString(), effect.id,
-          input.expectedRevision, expectedState);
-        if (casRes.changes === 0) {
-          throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
-            `pre-callback CAS lost race for effect ${effect.id}`);
-        }
-        const refreshed = this.runtime.readEffect(effect.id);
-        return {
-          effectId: refreshed.id,
-          attemptNo: input.expectedAttemptNo,
-          effectRevision: refreshed.effectRevision,
-          state: 'in_flight' as const,
-          callbackIntentEventId: eventId,
-          leaseVersion: expectedLeaseVersion,
-          callbackPayload: verifiedCallback.payload,
-        };
-      },
-    });
+          `).run(input.approvalId ?? null, callback.ref, callback.hash,
+            callback.formatVersion, callback.ref, new Date().toISOString(),
+            effect.id, input.expectedRevision, expectedState);
+          if (casRes.changes === 0) {
+            throw new OgraError(OgraErrorCode.REVISION_CONFLICT,
+              `pre-callback CAS lost race for effect ${effect.id}`);
+          }
+          const refreshed = this.runtime.readEffect(effect.id);
+          return {
+            effectId: refreshed.id,
+            attemptNo: input.expectedAttemptNo,
+            effectRevision: refreshed.effectRevision,
+            state: 'in_flight' as const,
+            callbackIntentEventId: eventId,
+            leaseVersion: expectedLeaseVersion,
+            callbackPayload: verifiedCallback.payload,
+          };
+        },
+      });
+    })();
   }
 
   /** True only when the persisted route explicitly requires approval. */
@@ -994,6 +1037,13 @@ export class EffectProtocolService {
 
   commitToTerminal(input: CommitTerminalInput): CommitTerminalOutput {
     const effect = this.runtime.readEffect(input.effectId);
+    const isToolEffect = this.odb.getDB().prepare(
+      'SELECT 1 FROM tool_invocations WHERE effect_id = ?',
+    ).get(input.effectId);
+    if (isToolEffect) {
+      throw new OgraError(OgraErrorCode.EFFECT_INVALID_TRANSITION,
+        'commitToTerminal: tool effects require independent ingress finalization');
+    }
     if (effect.state !== 'received') {
       throw new OgraError(OgraErrorCode.EFFECT_INVALID_TRANSITION,
         `commitToTerminal: effect ${input.effectId} not received (was ${effect.state})`);

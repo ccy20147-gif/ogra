@@ -894,7 +894,461 @@ export class OgraDatabase {
         name: 'm2-ingress-quarantine-ledger',
         sql: this.getV35Schema(),
       },
+      // v36 — Sequence 1C Milestone 1: append-only Action Ledger.
+      // One row per executable action; pairs 1:1 with a v2 audit
+      // event written in the same SQLite transaction. Stores ONLY
+      // digests, refs, sanitized outcome reasons and version
+      // snapshots — never raw payload / secret / idempotency key /
+      // response body. Re-runnable: every column is additive and
+      // every index is `IF NOT EXISTS`.
+      {
+        version: 36,
+        name: 'm1c-action-ledger',
+        sql: this.getV36Schema(),
+      },
+      // v37 — Sequence 1C Milestone 1: ProgressGuard durability.
+      // `progress_ledger` records every observe() decision; the
+      // `progress_run_state` snapshot row is the source of truth
+      // for crash/restart recovery and is checked by every observe
+      // call before mutating. Fail-closed: a terminated run
+      // refuses further observe() without extra mutation.
+      {
+        version: 37,
+        name: 'm1c-progress-guard',
+        sql: this.getV37Schema(),
+      },
+      // v38 — Sequence 1C Milestone 1: Tool Broker T2 tool_invocations.
+      // One row per invocation, UNIQUE(effect_id). effect_id →
+      // run_effects, tool_version_id → tool_versions, workspace_binding_id
+      // → workspace_tool_bindings. State is read from run_effects
+      // (this table is a tool-side projection only).
+      {
+        version: 38,
+        name: 'm1c-tool-invocations',
+        sql: this.getV38Schema(),
+      },
+      // v39 — Sequence 1C Milestone 1: Tool Broker transport + risk tier.
+      // The 1B schema (v34) created tool_versions without
+      // transport / risk_tier columns; tool-registry.upsertToolVersion
+      // (T2) needs both. Adds via `ALTER TABLE … ADD COLUMN` with
+      // safe defaults so existing rows are not NULL-tainted.
+      {
+        version: 39,
+        name: 'm1c-tool-version-transport-risk',
+        sql: this.getV39Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_versions'",
+          ).get();
+          if (!table) return;
+          const cols = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('tool_versions')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          if (!cols.has('transport')) {
+            db.exec(`ALTER TABLE tool_versions
+                       ADD COLUMN transport TEXT NOT NULL DEFAULT 'in_process';`);
+          }
+          if (!cols.has('risk_tier')) {
+            db.exec(`ALTER TABLE tool_versions
+                       ADD COLUMN risk_tier TEXT NOT NULL DEFAULT 'low';`);
+          }
+        },
+      },
+      // v40 — Sequence 1C Milestone 1: tool_invocations FK
+      // hardening (P1). v38 created the table with
+      // `effect_id ... ON DELETE CASCADE` — silently
+      // destroying the join path when a run_effects row is
+      // deleted. Plan 11 §6 calls tool_invocations a
+      // rebuildable projection; production must fail closed
+      // rather than cascading. SQLite doesn't support
+      // `ALTER TABLE … ON DELETE RESTRICT`, so the v40
+      // migration rebuilds the table via the canonical
+      // rename → recreate → copy pattern.
+      //
+      // Gating: a fresh DB (just-built at v40+) already has
+      // the right FK behavior via `CREATE TABLE IF NOT
+      // EXISTS tool_invocations` below; the preflight detects
+      // an upgrade scenario (existing v38 table missing
+      // the RESTRICT behavior) and rewrites it.
+      {
+        version: 40,
+        name: 'm1c-tool-invocations-restrict',
+        sql: this.getV40Schema(),
+        preflight: (db: any) => {
+          // Idempotent guard: only attempt the rewrite when
+          // the table actually exists AND carries the legacy
+          // v38 FK shape. Migrations on simulated old DBs
+          // (sequence-0 tests seed partial schemas) must not
+          // crash the runner when v40 hits a foreign-table
+          // reference that has not yet materialised.
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_invocations'",
+          ).get();
+          if (!table) return;
+          const fkRow = db.prepare(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tool_invocations'",
+          ).get() as { sql: string } | undefined;
+          const legacySql = fkRow?.sql ?? '';
+          if (!legacySql.includes('ON DELETE CASCADE')
+              && legacySql.includes('REFERENCES run_effects')) {
+            // Already on the v40 shape — nothing to do.
+            return;
+          }
+          if (!legacySql.includes('REFERENCES run_effects')) {
+            // Tool_invocations table is a stub or a
+            // simulated partial schema; do not attempt a
+            // rewrite that would invalidate the test.
+            return;
+          }
+          // Defensive: confirm every FK target table exists
+          // before the rebuild runs. If any target is
+          // missing, fall back to a no-op (test-only path)
+          // — production upgrades that hit this branch
+          // should fail loudly via the v40 schema body
+          // (which redeclares the canonical table).
+          const required: string[] = [
+            'run_effects', 'tool_versions',
+            'workspace_tool_bindings', 'policy_evaluations',
+            'approvals', 'ingress_findings',
+          ];
+          for (const tbl of required) {
+            const exists = db.prepare(
+              "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ).get(tbl);
+            if (!exists) return;
+          }
+          // Wrap the whole rebuild in a single SQLite
+          // transaction so the four DDL/DML steps
+          // (rename → recreate → copy → drop) are atomic on
+          // the same better-sqlite3 connection.
+          db.transaction(() => {
+            db.exec(`
+              ALTER TABLE tool_invocations
+                RENAME TO _tool_invocations_legacy_v38;
+              CREATE TABLE tool_invocations (
+                id TEXT PRIMARY KEY,
+                effect_id TEXT NOT NULL UNIQUE
+                  REFERENCES run_effects(id) ON DELETE RESTRICT,
+                tool_version_id TEXT NOT NULL
+                  REFERENCES tool_versions(id),
+                workspace_binding_id TEXT NOT NULL
+                  REFERENCES workspace_tool_bindings(id),
+                input_hash TEXT NOT NULL,
+                policy_evaluation_id TEXT
+                  REFERENCES policy_evaluations(id),
+                current_approval_id TEXT
+                  REFERENCES approvals(id),
+                ingress_finding_id TEXT
+                  REFERENCES ingress_findings(id),
+                started_at TEXT NOT NULL,
+                completed_at TEXT
+              );
+              CREATE INDEX IF NOT EXISTS idx_tool_invocations_version
+                ON tool_invocations(tool_version_id);
+              CREATE INDEX IF NOT EXISTS idx_tool_invocations_binding
+                ON tool_invocations(workspace_binding_id);
+              CREATE INDEX IF NOT EXISTS idx_tool_invocations_ingress
+                ON tool_invocations(ingress_finding_id);
+              INSERT INTO tool_invocations
+                (id, effect_id, tool_version_id, workspace_binding_id,
+                 input_hash, policy_evaluation_id, current_approval_id,
+                 ingress_finding_id, started_at, completed_at)
+              SELECT id, effect_id, tool_version_id, workspace_binding_id,
+                     input_hash, policy_evaluation_id, current_approval_id,
+                     ingress_finding_id, started_at, completed_at
+                FROM _tool_invocations_legacy_v38;
+              DROP TABLE _tool_invocations_legacy_v38;
+            `);
+          })();
+        },
+      },
+      // v41 — registry immutability hardening. Existing v1 binding hashes
+      // omitted policy_id. Preserve those historical concrete rows exactly,
+      // mark them legacy, and require an append-only v2 revision before they
+      // can authorize a new callback. Rehashing in place would rewrite the
+      // evidence that old effects pinned.
+      {
+        version: 41,
+        name: 'm1c-tool-binding-hash-version',
+        sql: this.getV41Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'workspace_tool_bindings'",
+          ).get();
+          if (!table) return;
+          const cols = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('workspace_tool_bindings')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          if (!cols.has('binding_hash_version')) {
+            db.exec(`ALTER TABLE workspace_tool_bindings
+                       ADD COLUMN binding_hash_version INTEGER NOT NULL DEFAULT 1;`);
+          }
+        },
+      },
+      // v42 — snapshot the immutable descriptor/schema/binding identity at
+      // prepare time. The callback compares this evidence to the live
+      // registry immediately before dispatch and fails closed on drift.
+      {
+        version: 42,
+        name: 'm1c-tool-invocation-contract-snapshots',
+        sql: this.getV42Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_invocations'",
+          ).get();
+          if (!table) return;
+          const cols = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('tool_invocations')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          const additions: Array<[string, string]> = [
+            ['prepared_descriptor_hash', 'TEXT'],
+            ['prepared_input_schema_hash', 'TEXT'],
+            ['prepared_binding_hash', 'TEXT'],
+            ['prepared_canonical_tool_id', 'TEXT'],
+          ];
+          for (const [name, type] of additions) {
+            if (!cols.has(name)) {
+              db.exec(`ALTER TABLE tool_invocations ADD COLUMN ${name} ${type};`);
+            }
+          }
+        },
+      },
+      // v43 — accepted tool output becomes an explicit, rebuildable
+      // Observation projection. It contains only capsule refs/hashes and a
+      // digest; raw tool output remains exclusively in the sealed capsule.
+      {
+        version: 43,
+        name: 'm1c-tool-observations',
+        sql: this.getV43Schema(),
+      },
+      // v44 — output schema is execution authority, so pin its canonical
+      // bytes and digest with the invocation rather than re-reading mutable
+      // tool_versions evidence during dispatch or recovery.
+      {
+        version: 44,
+        name: 'm1c-tool-invocation-output-schema-snapshot',
+        sql: this.getV44Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tool_invocations'",
+          ).get();
+          if (!table) return;
+          const cols = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('tool_invocations')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          for (const [name, type] of [
+            ['prepared_output_schema_json', 'TEXT'],
+            ['prepared_output_schema_hash', 'TEXT'],
+          ] as Array<[string, string]>) {
+            if (!cols.has(name)) db.exec(`ALTER TABLE tool_invocations ADD COLUMN ${name} ${type};`);
+          }
+        },
+      },
+      // v45 — every broker-capable run is bound to an immutable Core-owned
+      // agent manifest snapshot. Existing runs intentionally remain NULL and
+      // therefore fail closed at the Tool Broker boundary.
+      {
+        version: 45,
+        name: 'm1c-run-agent-manifest-snapshots',
+        sql: this.getV45Schema(),
+        preflight: (db: any) => {
+          const table = db.prepare(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'agent_runs'",
+          ).get();
+          if (!table) return;
+          const columns = new Set((db.prepare(
+            "SELECT name FROM pragma_table_info('agent_runs')",
+          ).all() as Array<{ name: string }>).map(c => c.name));
+          for (const [name, type] of [
+            ['agent_id', 'TEXT'],
+            ['agent_manifest_json', 'TEXT'],
+            ['agent_manifest_hash', 'TEXT'],
+          ] as Array<[string, string]>) {
+            if (!columns.has(name)) db.exec(`ALTER TABLE agent_runs ADD COLUMN ${name} ${type};`);
+          }
+          db.exec(`CREATE INDEX IF NOT EXISTS idx_agent_runs_agent_workspace
+            ON agent_runs(agent_id, workspace_id);`);
+        },
+      },
     ];
+  }
+
+  private getV39Schema(): string {
+    return `SELECT 1;`;
+  }
+
+  private getV40Schema(): string {
+    // Fresh-DB path: the canonical tool_invocations schema
+    // has `effect_id ... ON DELETE RESTRICT` from the start.
+    return `
+      CREATE TABLE IF NOT EXISTS tool_invocations (
+        id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL UNIQUE REFERENCES run_effects(id) ON DELETE RESTRICT,
+        tool_version_id TEXT NOT NULL REFERENCES tool_versions(id),
+        workspace_binding_id TEXT NOT NULL REFERENCES workspace_tool_bindings(id),
+        input_hash TEXT NOT NULL,
+        policy_evaluation_id TEXT REFERENCES policy_evaluations(id),
+        current_approval_id TEXT REFERENCES approvals(id),
+        ingress_finding_id TEXT REFERENCES ingress_findings(id),
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_invocations_version
+        ON tool_invocations(tool_version_id);
+      CREATE INDEX IF NOT EXISTS idx_tool_invocations_binding
+        ON tool_invocations(workspace_binding_id);
+      CREATE INDEX IF NOT EXISTS idx_tool_invocations_ingress
+        ON tool_invocations(ingress_finding_id);
+    `;
+  }
+
+  private getV41Schema(): string {
+    return `SELECT 1;`;
+  }
+
+  private getV42Schema(): string {
+    return `SELECT 1;`;
+  }
+
+  private getV43Schema(): string {
+    return `
+      CREATE TABLE IF NOT EXISTS tool_observations (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        effect_id TEXT NOT NULL UNIQUE REFERENCES run_effects(id) ON DELETE RESTRICT,
+        receipt_id TEXT NOT NULL REFERENCES effect_receipts(id) ON DELETE RESTRICT,
+        ingress_finding_id TEXT NOT NULL UNIQUE REFERENCES ingress_findings(id) ON DELETE RESTRICT,
+        result_capsule_ref TEXT NOT NULL,
+        result_capsule_hash TEXT NOT NULL,
+        payload_digest TEXT NOT NULL,
+        created_event_id TEXT NOT NULL REFERENCES run_events(id),
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_observations_run
+        ON tool_observations(run_id);
+      CREATE INDEX IF NOT EXISTS idx_tool_observations_effect
+        ON tool_observations(effect_id);
+    `;
+  }
+
+  private getV44Schema(): string {
+    return `SELECT 1;`;
+  }
+
+  private getV45Schema(): string {
+    return `SELECT 1;`;
+  }
+
+  private getV36Schema(): string {
+    return `
+      CREATE TABLE IF NOT EXISTS action_ledger (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        frame_id TEXT NOT NULL REFERENCES run_frames(id),
+        effect_id TEXT REFERENCES run_effects(id),
+        attempt_no INTEGER,
+        sequence_no INTEGER NOT NULL,
+        action_type TEXT NOT NULL CHECK(action_type IN (
+          'tool_call','agent_step','ingress_review','approval_record',
+          'recovery_decision','guard_decision','ledger_record'
+        )),
+        action_target TEXT NOT NULL,
+        source_kind TEXT NOT NULL CHECK(source_kind IN (
+          'production','recovery','admin','system'
+        )),
+        payload_digest TEXT NOT NULL,
+        policy_version_hash TEXT,
+        scope_hash TEXT,
+        approval_id TEXT REFERENCES approvals(id),
+        recovery_approval_id TEXT REFERENCES recovery_approvals(id),
+        lease_holder_id TEXT,
+        lease_version INTEGER,
+        rule_version TEXT NOT NULL,
+        outcome_summary TEXT,
+        l1_event_id TEXT NOT NULL REFERENCES run_events(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(run_id, sequence_no)
+      );
+      CREATE INDEX IF NOT EXISTS idx_action_ledger_run
+        ON action_ledger(run_id);
+      CREATE INDEX IF NOT EXISTS idx_action_ledger_frame
+        ON action_ledger(frame_id);
+      CREATE INDEX IF NOT EXISTS idx_action_ledger_effect
+        ON action_ledger(effect_id);
+      CREATE INDEX IF NOT EXISTS idx_action_ledger_outcome
+        ON action_ledger(action_type, outcome_summary);
+      CREATE INDEX IF NOT EXISTS idx_action_ledger_l1_event
+        ON action_ledger(l1_event_id);
+    `;
+  }
+
+  private getV37Schema(): string {
+    return `
+      CREATE TABLE IF NOT EXISTS progress_ledger (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+        frame_id TEXT REFERENCES run_frames(id),
+        sequence_no INTEGER NOT NULL,
+        budget_kind TEXT NOT NULL CHECK(budget_kind IN (
+          'action_count','unique_actions','total_steps',
+          'wall_clock_ms','repeat_window'
+        )),
+        observed_value INTEGER NOT NULL,
+        budget_value INTEGER NOT NULL,
+        target TEXT,
+        decision_reason_code TEXT CHECK(decision_reason_code IN (
+          'guard_budget_exhausted_action_count',
+          'guard_budget_exhausted_steps',
+          'guard_loop_detected',
+          'guard_stagnation_detected',
+          'guard_unknown_action'
+        )),
+        l1_event_id TEXT NOT NULL REFERENCES run_events(id),
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        UNIQUE(run_id, sequence_no)
+      );
+      CREATE INDEX IF NOT EXISTS idx_progress_ledger_run
+        ON progress_ledger(run_id);
+      CREATE INDEX IF NOT EXISTS idx_progress_ledger_outcome
+        ON progress_ledger(decision_reason_code);
+
+      CREATE TABLE IF NOT EXISTS progress_run_state (
+        run_id TEXT PRIMARY KEY REFERENCES agent_runs(id) ON DELETE CASCADE,
+        action_count INTEGER NOT NULL DEFAULT 0,
+        unique_actions INTEGER NOT NULL DEFAULT 0,
+        total_steps INTEGER NOT NULL DEFAULT 0,
+        last_progress_at TEXT,
+        last_repeat_target TEXT,
+        last_repeat_count INTEGER NOT NULL DEFAULT 0,
+        guard_terminated INTEGER NOT NULL DEFAULT 0 CHECK(guard_terminated IN (0,1)),
+        termination_reason_code TEXT,
+        started_at TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+    `;
+  }
+
+  private getV38Schema(): string {
+    return `
+      CREATE TABLE IF NOT EXISTS tool_invocations (
+        id TEXT PRIMARY KEY,
+        effect_id TEXT NOT NULL UNIQUE REFERENCES run_effects(id) ON DELETE CASCADE,
+        tool_version_id TEXT NOT NULL REFERENCES tool_versions(id),
+        workspace_binding_id TEXT NOT NULL REFERENCES workspace_tool_bindings(id),
+        input_hash TEXT NOT NULL,
+        policy_evaluation_id TEXT REFERENCES policy_evaluations(id),
+        current_approval_id TEXT REFERENCES approvals(id),
+        ingress_finding_id TEXT REFERENCES ingress_findings(id),
+        started_at TEXT NOT NULL,
+        completed_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_tool_invocations_version
+        ON tool_invocations(tool_version_id);
+      CREATE INDEX IF NOT EXISTS idx_tool_invocations_binding
+        ON tool_invocations(workspace_binding_id);
+      CREATE INDEX IF NOT EXISTS idx_tool_invocations_ingress
+        ON tool_invocations(ingress_finding_id);
+    `;
   }
 
 

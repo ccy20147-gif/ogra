@@ -79,6 +79,8 @@ contextBridge.exposeInMainWorld('ogra', {
     // Sequence 1B Milestone 2 — sanitized per-effect status
     // snapshot (refs / hashes / state names only).
     effectStatusList: (runId: string) => ipcRenderer.invoke(IpcChannel.EffectStatusList, runId),
+    toolTrace: (workspaceId: string, runId: string) =>
+      ipcRenderer.invoke(IpcChannel.ToolTraceRead, { workspaceId, runId }),
     quarantineRead: (quarantineId: string) => ipcRenderer.invoke(IpcChannel.QuarantineRead, quarantineId),
   },
   // Approval API (Sequence 0 Plan 03 §3.6)
@@ -161,6 +163,7 @@ export interface OgraAPI {
     // Sequence 1B Milestone 2 — sanitized per-effect status
     // snapshot (refs / hashes / state names only).
     effectStatusList: (runId: string) => Promise<IpcResult>;
+    toolTrace: (workspaceId: string, runId: string) => Promise<IpcResult>;
     quarantineRead: (quarantineId: string) => Promise<IpcResult>;
   };
   approval: {

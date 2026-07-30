@@ -26,6 +26,13 @@ describe('IPC Channel Allowlist', () => {
     expect(ALLOWED_IPC_CHANNELS).not.toContain('invoke');
   });
 
+  it('exposes a read-only Tool Broker trace channel, never a generic tool invoke channel', () => {
+    expect(ALLOWED_IPC_CHANNELS).toContain(IpcChannel.ToolTraceRead);
+    expect(IpcChannel.ToolTraceRead).toBe('tool:trace-read');
+    expect(ALLOWED_IPC_CHANNELS).not.toContain('tool:invoke');
+    expect(ALLOWED_IPC_CHANNELS).not.toContain('tool:execute');
+  });
+
   it('should have stable channel names', () => {
     const channels = Object.values(IpcChannel);
     for (const ch of channels) {

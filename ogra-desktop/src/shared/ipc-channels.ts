@@ -30,6 +30,9 @@ export enum IpcChannel {
   EffectStatusList = 'effect:status-list',
   // Ingress quarantine metadata only. Raw result capsules never cross IPC.
   QuarantineRead = 'quarantine:read',
+  // Sequence 1C Milestone 1 — read-only Tool Broker evidence projection.
+  // This is deliberately a trace reader, never an invocation endpoint.
+  ToolTraceRead = 'tool:trace-read',
   // Approvals — Sequence 0 Plan 03 §3.6 / plan 02 §3.4
   ApprovalRequest = 'approval:request',
   ApprovalList = 'approval:list',
@@ -256,6 +259,35 @@ export interface RunRiskSummary {
   requiredApprovals: string[];
   approvalStatus: string;
   createdAt: string;
+}
+
+/**
+ * Renderer-safe Tool Broker lineage. These are durable identifiers and
+ * terminal statuses only; tool arguments, tool output, secrets, payload
+ * digests, and capsule references are intentionally absent.
+ */
+export interface ToolTraceEntry {
+  effectId: string;
+  effectState: string;
+  toolVersionId: string;
+  sourceVersion: string;
+  workspaceBindingId: string;
+  bindingRevision: number;
+  receiptId: string | null;
+  ingressOutcome: 'accepted' | 'quarantined' | 'rejected' | 'unknown';
+  ingressFindingId: string | null;
+  observationId: string | null;
+  observationEventId: string | null;
+  actionLedgerId: string | null;
+  actionLedgerEventId: string | null;
+  actionSequenceNo: number | null;
+  createdAt: string;
+}
+
+export interface ToolTraceResponse {
+  workspaceId: string;
+  runId: string;
+  invocations: ToolTraceEntry[];
 }
 
 export interface ProviderConfig {

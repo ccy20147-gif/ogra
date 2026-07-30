@@ -66,6 +66,17 @@ interface RunWorkspaceTabProps {
     awaitingApproval?: boolean;
     recoveryDecision?: { decisionCode: string; sanitizedReason?: string | null };
   }>;
+  /** Plan 11 T2 Core-owned Tool Broker evidence projection. */
+  toolTrace?: Array<{
+    effectId: string; effectState: string; toolVersionId: string;
+    sourceVersion: string; workspaceBindingId: string; bindingRevision: number;
+    receiptId: string | null;
+    ingressOutcome: 'accepted' | 'quarantined' | 'rejected' | 'unknown';
+    ingressFindingId: string | null; observationId: string | null;
+    observationEventId: string | null; actionLedgerId: string | null;
+    actionLedgerEventId: string | null; actionSequenceNo: number | null;
+    createdAt: string;
+  }>;
 
   onTaskInputChange: (value: string) => void;
   onRunDemo: () => void;
@@ -418,6 +429,42 @@ const ContextSourcesPanel: React.FC<{
 };
 
 /**
+ * Run-level Tool Broker invocation drilldown. All values are Core-owned
+ * status/ref fields; arguments, results, payloads, secrets and capsules are
+ * excluded by the IPC projection and never rendered here.
+ */
+const ToolTracePanel: React.FC<{ invocations?: RunWorkspaceTabProps['toolTrace'] }> = ({ invocations }) => {
+  if (!invocations?.length) return null;
+  return (
+    <details style={{ marginTop: '16px' }}>
+      <summary style={{ fontSize: '13px', fontWeight: 600, color: '#58a6ff', cursor: 'pointer' }}>
+        Tool Trace and Governance Evidence ({invocations.length})
+      </summary>
+      <div style={{ marginTop: '8px', display: 'grid', gap: '8px' }}>
+        {invocations.map((item) => (
+          <div key={item.effectId} style={{ border: '1px solid #30363d', borderRadius: '6px', padding: '10px', background: '#0d1117' }}>
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center', fontSize: '11px' }}>
+              <EffectStateBadge state={item.effectState} />
+              <span style={{ color: '#8b949e' }}>ingress: <code style={{ color: '#c9d1d9' }}>{item.ingressOutcome}</code></span>
+              <span style={{ color: '#8b949e' }}>tool v<code style={{ color: '#c9d1d9' }}>{item.sourceVersion}</code></span>
+            </div>
+            <div style={{ marginTop: '8px', display: 'grid', gap: '3px', fontFamily: 'monospace', fontSize: '10px', color: '#8b949e', overflowWrap: 'anywhere' }}>
+              <span>effect: {item.effectId}</span>
+              <span>version: {item.toolVersionId}</span>
+              <span>binding: {item.workspaceBindingId} rev {item.bindingRevision}</span>
+              <span>receipt: {item.receiptId ?? 'pending'}</span>
+              <span>ingress finding: {item.ingressFindingId ?? 'pending'}</span>
+              <span>observation: {item.observationId ?? 'not created'}{item.observationEventId ? ` (${item.observationEventId})` : ''}</span>
+              <span>ledger: {item.actionLedgerId ?? 'pending'}{item.actionLedgerEventId ? ` (${item.actionLedgerEventId})` : ''}{item.actionSequenceNo !== null ? ` #${item.actionSequenceNo}` : ''}</span>
+            </div>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+};
+
+/**
  * Spec §8 — Privacy-conscious display of a citation file path. Reveals the
  * basename and the immediate parent directory only, replacing the rest with a
  * privacy ellipse. The full path is only shown after the user explicitly
@@ -584,6 +631,7 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
   contextSources,
   citations,
   effectStatuses: effectStatusesProp,
+  toolTrace,
   onTaskInputChange,
   onRunDemo,
   onModelChange,
@@ -799,6 +847,8 @@ const RunWorkspaceTab: React.FC<RunWorkspaceTabProps> = ({
 
       {/* 5. Context Sources Panel */}
       <ContextSourcesPanel sources={contextSources} />
+
+      <ToolTracePanel invocations={toolTrace} />
 
       {/* 6. Improved Citation Display */}
       <CitationList citations={citations} routeDecision={routeDecision} />

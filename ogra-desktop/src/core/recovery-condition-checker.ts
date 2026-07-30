@@ -346,9 +346,9 @@ export class DefaultRecoveryConditionChecker
         return fail('route_policy_drift',
           `persisted route=${route.route} but current policy/route resolves ${reEvaluated.route}`);
       }
-    } catch (err) {
+    } catch {
       return fail('route_policy_drift',
-        `current route evaluation failed: ${(err as Error)?.message ?? 'unknown'}`);
+        'current route evaluation failed');
     }
 
     return { ok: true };

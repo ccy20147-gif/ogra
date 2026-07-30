@@ -12,6 +12,9 @@ import { OgraError, OgraErrorCode } from '../shared/errors';
 import { EffectProtocolService } from '../core/effect-protocol-service';
 import { DurableRuntimeService } from '../core/durable-runtime-service';
 import { IndependentIngressReviewer } from '../core/independent-ingress-reviewer';
+import type { CapabilityGateway, InvokePreparedResult } from '../core/capability-gateway';
+import type { KnowledgeSearchHit } from '../core/knowledge-search-adapter';
+import type { RetrievalResult } from './rag-engine';
 import * as crypto from 'crypto';
 
 export interface AgentRunInput {
@@ -63,6 +66,15 @@ export interface AgentRunResult {
   riskSummary: any;
   modelCall: any;
   auditEventIds: string[];
+}
+
+/** A deterministic, Core-owned plan step for the T2 read-only slice. */
+export interface DeterministicKnowledgeSearchPlanInput {
+  runId: string;
+  workspaceId: string;
+  ownerFrameId: string;
+  toolId: string;
+  arguments: { query: string; topK?: number; knowledgeBaseIds?: string[]; maxClassification?: 'public' | 'internal' | 'confidential'; maxBytes?: number };
 }
 
 /**
@@ -131,6 +143,43 @@ export class InternalAgentAdapter {
   // production finalize path. The agent CANNOT choose the
   // outcome itself — only canonical inputs are passed in.
   private independentIngressReviewer: IndependentIngressReviewer | null = null;
+  private capabilityGateway: CapabilityGateway | null = null;
+
+  /** Core injects the sole tool invocation authority after its construction. */
+  bindToolBroker(capabilityGateway: CapabilityGateway): void {
+    this.capabilityGateway = capabilityGateway;
+  }
+
+  /**
+   * Execute the one deterministic T2 tool plan. This is intentionally not a
+   * general adapter invocation API: the agent can propose only an opaque
+   * canonical ToolId plus arguments; CapabilityGateway derives and validates
+   * workspace binding, policy, route, lease, effect, receipt and ingress.
+   */
+  async runDeterministicKnowledgeSearchPlan(
+    input: DeterministicKnowledgeSearchPlanInput,
+  ): Promise<InvokePreparedResult> {
+    if (!this.capabilityGateway) {
+      throw new OgraError(OgraErrorCode.NOT_IMPLEMENTED,
+        'deterministic knowledge-search plan is not bound to CapabilityGateway');
+    }
+    const prepared = await this.capabilityGateway.prepareInvocation({
+      runId: input.runId,
+      workspaceId: input.workspaceId,
+      ownerFrameId: input.ownerFrameId,
+      toolId: input.toolId,
+      arguments: input.arguments,
+    });
+    return this.capabilityGateway.invokePrepared({
+      workspaceId: input.workspaceId,
+      effectId: prepared.effectId,
+      holderId: prepared.holderId,
+      arguments: input.arguments,
+      // The gateway seals only its hash; the raw key is stable for one
+      // prepared effect and never crosses an audit or UI boundary.
+      idempotencyKey: `agent-tool-${prepared.effectId}`,
+    });
+  }
 
   /** Wire the canonical RunService after both services are constructed
    *  (breaks the constructor cycle). Idempotent; only the first call
@@ -233,7 +282,7 @@ export class InternalAgentAdapter {
 
     // Step 4: Retrieval (skip when preliminary route is blocked).
     const retrievedChunks = preliminaryRouteDecision.route !== RouteDecisionType.Blocked
-      ? this.runRetrieval(runId, workspaceId, task, knowledgeBaseIds, classification)
+      ? await this.runRetrieval(runId, workspaceId, task, knowledgeBaseIds, classification)
       : [];
 
     // Step 4b: Resolve the canonical approval row BEFORE the final
@@ -1089,13 +1138,13 @@ export class InternalAgentAdapter {
     };
   }
 
-  private runRetrieval(
+  private async runRetrieval(
     runId: string,
     workspaceId: string,
     task: string,
     knowledgeBaseIds: string[],
     classification: DataClassification,
-  ): any[] {
+  ): Promise<RetrievalResult[]> {
     // P1 fix: RetrievalStarted MUST NOT carry the raw task or the
     // raw query into the audit chain. The chain records a taskHash
     // + queryHash + queryLength so an auditor can verify a query
@@ -1113,13 +1162,60 @@ export class InternalAgentAdapter {
       knowledgeBaseIdsCount: knowledgeBaseIds?.length ?? 0,
       classification,
     });
-    // P1 fix: maxResults MUST match RunService.prepareExecutionSnapshot
-    // (used at park time). Otherwise retrieval results differ
-    // between park and resume, and assembleContext() builds a
-    // different contextBlock on each path, breaking hash equality.
-    const chunks = this.ragEngine.retrieve(
-      task, workspaceId, InternalAgentAdapter.MAX_RETRIEVAL_RESULTS, classification,
-    );
+    let chunks: RetrievalResult[];
+    if (this.capabilityGateway && knowledgeBaseIds.length > 0) {
+      // A broker-bound production run may retrieve only through the T2
+      // deterministic plan. The gateway, not the agent, derives the pinned
+      // ToolId and workspace binding. Missing/ambiguous bindings fail closed.
+      if (!this.runtime) {
+        throw new OgraError(OgraErrorCode.NOT_IMPLEMENTED,
+          'deterministic knowledge-search plan requires the durable runtime');
+      }
+      let rootFrame = this.runtime.rootFrameForRun(runId);
+      if (!rootFrame) rootFrame = this.runtime.createRootFrame({ runId });
+      const retrievalFrame = this.runtime.createChildFrame({
+        runId,
+        parentFrameId: rootFrame.id,
+        frameKind: 'plan_step',
+      });
+      this.runtime.transitionFrame({
+        frameId: retrievalFrame.id,
+        expectedStatus: 'pending',
+        nextStatus: 'running',
+      });
+      try {
+        const execution = await this.capabilityGateway.executeDeterministicKnowledgeSearch({
+          runId,
+          workspaceId,
+          ownerFrameId: retrievalFrame.id,
+          query: task,
+          topK: InternalAgentAdapter.MAX_RETRIEVAL_RESULTS,
+          knowledgeBaseIds,
+        });
+        chunks = this.materializeBrokerHits(execution.result.hits);
+        this.runtime.transitionFrame({
+          frameId: retrievalFrame.id,
+          expectedStatus: 'running',
+          nextStatus: 'completed',
+          outputHash: execution.invocation.resultPayloadDigest,
+        });
+      } catch (err) {
+        try {
+          this.runtime.transitionFrame({
+            frameId: retrievalFrame.id,
+            expectedStatus: 'running',
+            nextStatus: 'failed',
+          });
+        } catch { /* preserve the broker failure */ }
+        throw err;
+      }
+    } else {
+      // Compatibility for pre-broker direct-agent tests and for runs with no
+      // selected knowledge base. Broker-bound retrieval never takes this path.
+      chunks = this.ragEngine.retrieve(
+        task, workspaceId, InternalAgentAdapter.MAX_RETRIEVAL_RESULTS, classification,
+      );
+    }
     this.db.appendRunEvent(runId, workspaceId, RunEventType.RetrievalCompleted, {
       chunkCount: chunks.length,
       chunkIds: chunks.map((c: any) => c.chunkId ?? c.id ?? '').slice(0, 10),
@@ -1128,6 +1224,28 @@ export class InternalAgentAdapter {
       // present in RetrievalStarted — do not repeat it here.
     });
     return chunks;
+  }
+
+  /** Convert the accepted bounded Tool Host result to the existing RAG context
+   * shape without issuing a second FTS retrieval. The broker already checked
+   * hit ownership/classification before sealing its receipt. */
+  private materializeBrokerHits(hits: readonly KnowledgeSearchHit[]): RetrievalResult[] {
+    return hits.map((hit) => ({
+      chunkId: hit.chunkId,
+      documentId: hit.documentId,
+      fileName: `knowledge:${hit.documentId}`,
+      snippet: hit.snippet,
+      sourceStartOffset: 0,
+      sourceEndOffset: 0,
+      sourceStartLine: 0,
+      sourceEndLine: 0,
+      classification: hit.classification,
+      retrievalMethod: 'fts',
+      score: hit.score,
+      allowedForLocalContext: true,
+      allowedForCloudContext: hit.classification === DataClassification.Public,
+      instructionalContentDetected: false,
+    }));
   }
 
   /**

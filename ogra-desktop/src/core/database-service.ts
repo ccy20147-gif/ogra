@@ -11,6 +11,8 @@ import {
   HASH_ENVELOPE_VERSION_V1,
   HASH_ENVELOPE_VERSION_V2,
 } from './audit-envelope';
+import { buildInternalAgentManifest } from './agent-manifest-authorization';
+import { canonicalToolId } from './tool-broker-types';
 
 export interface WorkspaceRow {
   id: string;
@@ -591,10 +593,57 @@ export class DatabaseService {
     startedAt: string;
     completedAt?: string;
   }): void {
-    this.db.getDB().prepare(`
-      INSERT INTO agent_runs (id, workspace_id, task, status, started_at, completed_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(run.id, run.workspaceId, run.task, run.status, run.startedAt, run.completedAt || null);
+    const db = this.db.getDB();
+    // In M1 the only broker-capable executor is Core's InternalAgent. Its
+    // per-run manifest snapshot is created here, from current enabled pinned
+    // bindings, so a renderer/agent can never inject a manifest at invocation.
+    const toolRows = db.prepare(`
+      SELECT d.source_kind, d.source_ref, d.id AS descriptor_id,
+             v.source_version
+        FROM workspace_tool_bindings b
+        JOIN tool_versions v ON v.id = b.tool_version_id
+        JOIN tool_descriptors d ON d.id = v.descriptor_id
+       WHERE b.workspace_id = ? AND b.enabled = 1
+         AND b.binding_hash_version = 2
+         AND v.status = 'enabled' AND d.lifecycle_state = 'enabled'
+         AND d.source_kind = 'builtin' AND d.source_ref = 'core:knowledge'
+         AND v.effect_class = 'read_only' AND v.transport = 'in_process'
+       ORDER BY d.id, v.source_version
+    `).all(run.workspaceId) as Array<{
+      source_kind: 'builtin'; source_ref: string; descriptor_id: string;
+      source_version: string;
+    }>;
+    const snapshot = buildInternalAgentManifest(toolRows.map((row) => canonicalToolId(
+      row.source_kind, row.source_ref, row.descriptor_id, row.source_version,
+    )));
+    const agentId = `internal_agent_${crypto.createHash('sha256')
+      .update(run.workspaceId).digest('hex').slice(0, 24)}`;
+    const now = new Date().toISOString();
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO agents
+          (id, workspace_id, name, adapter_kind, manifest_json,
+           capability_matrix_json, audit_level, enabled, created_at, updated_at)
+        VALUES (?, ?, 'InternalAgent', 'internal', ?, ?, 3, 1, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          manifest_json = excluded.manifest_json,
+          capability_matrix_json = excluded.capability_matrix_json,
+          updated_at = excluded.updated_at
+      `).run(
+        agentId, run.workspaceId, snapshot.manifestJson,
+        JSON.stringify({ tools: toolRows.length }), now, now,
+      );
+      db.prepare(`
+        INSERT INTO agent_runs
+          (id, workspace_id, agent_id, agent_manifest_json, agent_manifest_hash,
+           task, status, started_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        run.id, run.workspaceId, agentId, snapshot.manifestJson,
+        snapshot.manifestHash, run.task, run.status, run.startedAt,
+        run.completedAt || null,
+      );
+    })();
   }
 
   updateRunStatus(id: string, status: string, completedAt?: string): void {

@@ -91,10 +91,10 @@ try {
       ? { outcome: 'quarantined', reviewer: 'default-policy', sanitizedReasonCode: 'prompt_injection_detected', structuredFindings: findings }
       : { outcome: 'accepted', reviewer: 'default-policy', sanitizedReasonCode: request.source === 'agent' ? 'no_anomalies_detected' : 'recovery_replay_validated', structuredFindings: [] };
   }
-} catch (error) {
+} catch {
   // The worker never fabricates acceptance when its independently-read
   // evidence cannot be verified. Its nonzero exit is fail-closed in Core.
-  deny(`ingress review failed: ${error instanceof Error ? error.message : 'unknown'}`);
+  deny('ingress_review_failed');
 }
 
 process.stdout.write(JSON.stringify({

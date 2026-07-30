@@ -96,6 +96,18 @@ const App: React.FC = () => {
     awaitingApproval?: boolean;
     recoveryDecision?: { decisionCode: string; sanitizedReason?: string | null };
   }>>([]);
+  // Plan 11 T2: Core-owned Tool Broker lineage for the selected run.
+  // This projection contains durable refs/statuses only.
+  const [toolTrace, setToolTrace] = useState<Array<{
+    effectId: string; effectState: string; toolVersionId: string;
+    sourceVersion: string; workspaceBindingId: string; bindingRevision: number;
+    receiptId: string | null;
+    ingressOutcome: 'accepted' | 'quarantined' | 'rejected' | 'unknown';
+    ingressFindingId: string | null; observationId: string | null;
+    observationEventId: string | null; actionLedgerId: string | null;
+    actionLedgerEventId: string | null; actionSequenceNo: number | null;
+    createdAt: string;
+  }>>([]);
   const [safetySummary, setSafetySummary] = useState<any>(null);
   const [governanceData, setGovernanceData] = useState<any>({ runs: [], incidents: [], policies: [] });
   const [providers, setProviders] = useState<any[]>([]);
@@ -417,6 +429,28 @@ const App: React.FC = () => {
       () => { void refreshEffectStatuses(); }, 1000);
     return () => window.clearInterval(interval);
   }, [currentRunId]);
+
+  const refreshToolTrace = async (): Promise<void> => {
+    if (!currentRunId || !currentWorkspace) {
+      setToolTrace([]);
+      return;
+    }
+    try {
+      const result = await window.ogra.run.toolTrace(currentWorkspace.id, currentRunId);
+      const invocations = result?.success && Array.isArray((result.data as any)?.invocations)
+        ? (result.data as { invocations: typeof toolTrace }).invocations
+        : [];
+      setToolTrace(invocations);
+    } catch {
+      // Do not retain a prior run's trace after a failed Core read.
+      setToolTrace([]);
+    }
+  };
+  useEffect(() => {
+    void refreshToolTrace();
+    const interval = window.setInterval(() => { void refreshToolTrace(); }, 1000);
+    return () => window.clearInterval(interval);
+  }, [currentRunId, currentWorkspace?.id]);
 
   const runDemo = async () => {
     if (!currentWorkspace) {
@@ -942,6 +976,7 @@ const App: React.FC = () => {
               riskLevel={riskLevel}
               contextSources={contextSources}
               effectStatuses={effectStatuses}
+              toolTrace={toolTrace}
               onTaskInputChange={setTaskInput}
               onRunDemo={runDemo}
               onModelChange={setModelId}

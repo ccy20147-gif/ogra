@@ -1,5 +1,9 @@
 import { DatabaseService } from '../core/database-service';
-import { DocumentParser, RetrievalResult, CitationOutput, ParsedDocument } from './document-parser';
+import { DocumentParser, RetrievalResult as _RetrievalResult, CitationOutput, ParsedDocument } from './document-parser';
+// Re-export so callers (e.g. sequence1c RagKnowledgeQueryAdapter) can
+// use the RetrievalResult type without reaching into the parser module.
+export type RetrievalResult = _RetrievalResult;
+export type { CitationOutput, ParsedDocument };
 import { DataClassification } from '../shared/types';
 import { RunEventType } from '../shared/types';
 import { scanDirectory } from '../shared/dir-scanner';
@@ -276,7 +280,10 @@ export class RagEngine {
 
       return mapped;
     } catch (err) {
-      console.error(`[RagEngine] FTS5 query failed: query="${ftsQuery}", error=${(err as Error).message}`);
+      // The FTS query originates from untrusted retrieval input. Do not put it
+      // (or a driver exception that may echo it) on stdout/stderr.
+      console.error('[RagEngine] FTS5 query failed:',
+        (err as { code?: unknown })?.code === 'SQLITE_ERROR' ? 'SQLITE_ERROR' : 'QUERY_FAILED');
       return [];
     }
   }

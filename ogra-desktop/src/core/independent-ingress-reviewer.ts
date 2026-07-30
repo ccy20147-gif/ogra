@@ -16,12 +16,20 @@ import { EncryptedCapsuleStore } from './capsule-store';
 import { OgraError, OgraErrorCode } from '../shared/errors';
 import { canonicalJSON } from './audit-envelope';
 import { IngressOutcome, IngressReviewDecision, IngressReviewDecisionInput, IngressReviewResult, StructuredIngressFinding } from './ingress-review-service';
+import {
+  ToolTerminalProjectionResult, ToolTerminalProjectionService,
+} from './tool-terminal-projection';
 
 export type ReviewerSource = 'agent' | 'recovery';
 
 const PROTOCOL_NAMESPACE = 'ogra.ingress-review.v1';
 const SUPERVISOR_CONTEXT = 'core-ingress-supervisor';
 const WORKER_CONTEXT = 'ingress-review-worker';
+// A cold Node process can exceed two seconds when the desktop application is
+// under load (or when the test runner starts several isolated workers). Keep
+// the reviewer bounded, but give a local, one-shot security review enough
+// time to start and verify the sealed payload. Timeout remains fail-closed.
+const DEFAULT_REVIEW_TIMEOUT_MS = 30_000;
 const CLOSED_OUTCOMES = new Set<IngressOutcome>(['accepted', 'quarantined', 'rejected']);
 const CLOSED_REASON_CODES = new Set([
   'no_anomalies_detected',
@@ -30,6 +38,7 @@ const CLOSED_REASON_CODES = new Set([
   'receipt_binding_invalid',
   'prompt_injection_detected',
 ]);
+const INVALID_REVIEW_RESPONSE = 'ingress reviewer returned an invalid or untrusted verdict';
 
 interface ReviewRequest extends IngressReviewDecisionInput {
   namespace: typeof PROTOCOL_NAMESPACE;
@@ -39,24 +48,15 @@ interface ReviewRequest extends IngressReviewDecisionInput {
   sealedPayload?: string;
 }
 
-interface ReviewResponse {
-  namespace: string;
-  callerContext: string;
-  requestId: string;
-  pid: number;
-  verdict: {
-    outcome: unknown;
-    reviewer: unknown;
-    sanitizedReasonCode?: unknown;
-    structuredFindings?: unknown;
-  };
-}
-
 export interface IndependentIngressReviewerOptions {
   /** Test-only worker override for crash/timeout/malformed IPC cases. */
   workerPath?: string;
   /** Bounded subprocess execution. A timeout is an ingress denial. */
   timeoutMs?: number;
+}
+
+export interface IndependentIngressReviewResult extends IngressReviewResult {
+  toolProjection: ToolTerminalProjectionResult | null;
 }
 
 /**
@@ -87,6 +87,7 @@ export class DefaultReviewerPolicy {
 export class IndependentIngressReviewer {
   private readonly workerPath: string;
   private readonly timeoutMs: number;
+  private readonly terminalProjection?: ToolTerminalProjectionService;
   public lastWorkerPid: number | null = null;
 
   constructor(
@@ -102,6 +103,14 @@ export class IndependentIngressReviewer {
         structuredFindings?: StructuredIngressFinding[];
         reviewerPayloadDigest: string; leaseHolderId: string; leaseVersion: number;
         ruleVersion: string; asOf?: string;
+        postCommitBody?: (args: {
+          outcomeEventId: string;
+          review: { effectId: string; findingId: string; reviewDecisionId: string;
+            outcome: IngressOutcome; stateBefore: string; stateAfter: string;
+            payloadDigest: string; outcomeEventId: string;
+            sanitizedReasonCode?: string; sanitizedReasonDetail?: string;
+          };
+        }) => unknown;
       }): {
         effectId: string; findingId: string; reviewDecisionId: string;
         outcome: IngressOutcome; stateBefore: string; stateAfter: string;
@@ -109,10 +118,17 @@ export class IndependentIngressReviewer {
         sanitizedReasonCode?: string; sanitizedReasonDetail?: string;
       };
     },
+    terminalProjectionOrOptions?: ToolTerminalProjectionService | IndependentIngressReviewerOptions,
     options: IndependentIngressReviewerOptions = {},
   ) {
-    this.workerPath = options.workerPath ?? this.resolveWorkerPath();
-    this.timeoutMs = options.timeoutMs ?? 2_000;
+    this.terminalProjection = terminalProjectionOrOptions instanceof ToolTerminalProjectionService
+      ? terminalProjectionOrOptions
+      : undefined;
+    const resolvedOptions = terminalProjectionOrOptions instanceof ToolTerminalProjectionService
+      ? options
+      : terminalProjectionOrOptions ?? options;
+    this.workerPath = resolvedOptions.workerPath ?? this.resolveWorkerPath();
+    this.timeoutMs = resolvedOptions.timeoutMs ?? DEFAULT_REVIEW_TIMEOUT_MS;
   }
 
   /** Runs the isolated policy only; useful for boundary-focused tests. */
@@ -144,9 +160,10 @@ export class IndependentIngressReviewer {
       request.sealedPayload = Buffer.concat([nonce, ciphertext, cipher.getAuthTag()])
         .toString('base64');
     }
-    const workerScratch = fs.mkdtempSync(path.join(process.cwd(), '.ogra-ingress-review-'));
-    let execution: ReturnType<typeof spawnSync>;
+    let workerScratch: string | null = null;
+    let execution: ReturnType<typeof spawnSync> | null = null;
     try {
+      workerScratch = fs.mkdtempSync(path.join(process.cwd(), '.ogra-ingress-review-'));
       execution = spawnSync(process.execPath, [
         this.workerPath,
       ], {
@@ -167,12 +184,22 @@ export class IndependentIngressReviewer {
         maxBuffer: 16 * 1024,
         windowsHide: true,
       });
-    } finally {
-      fs.rmSync(workerScratch, { recursive: true, force: true });
-    }
-    if (execution.error || execution.signal || execution.status !== 0) {
+    } catch {
       throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
-        `ingress reviewer unavailable (${execution.error?.message ?? execution.signal ?? execution.status ?? 'unknown'}): ${String(execution.stderr).slice(0, 160)}`);
+        'ingress reviewer is unavailable');
+    } finally {
+      if (workerScratch) {
+        try {
+          fs.rmSync(workerScratch, { recursive: true, force: true });
+        } catch {
+          // Cleanup failure is non-authoritative and must not expose a system
+          // exception or replace the stable reviewer outcome.
+        }
+      }
+    }
+    if (!execution || execution.error || execution.signal || execution.status !== 0) {
+      throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+        'ingress reviewer is unavailable');
     }
     return this.validateResponse(String(execution.stdout), requestId);
   }
@@ -180,29 +207,64 @@ export class IndependentIngressReviewer {
   reviewAndFinalize(input: {
     effectId: string; runId: string; workspaceId: string; receiptId: string;
     attemptNo: number; payloadDigest: string; source: ReviewerSource;
-    ruleVersion: string; leaseHolderId: string; leaseVersion: number; asOf?: string;
-  }): IngressReviewResult {
-    // Core remains the authority for receipt ownership and AEAD verification.
-    // Do this before spawning the detector so capsule faults preserve their
-    // durable CAPSULE_* semantics instead of being confused with worker loss.
-    const payload = this.verifyAuthoritativeResult(input);
-    const verdict = this.review({
-      effectId: input.effectId, runId: input.runId, workspaceId: input.workspaceId,
-      receiptId: input.receiptId, attemptNo: input.attemptNo,
-      payloadDigest: input.payloadDigest, source: input.source,
-    }, payload);
-    return this.ingressReview.finalizeIngressDecision({
-      effectId: input.effectId,
-      outcome: verdict.outcome,
-      reviewer: verdict.reviewer,
-      sanitizedReasonCode: verdict.sanitizedReasonCode,
-      structuredFindings: verdict.structuredFindings,
-      reviewerPayloadDigest: input.payloadDigest,
-      leaseHolderId: input.leaseHolderId,
-      leaseVersion: input.leaseVersion,
-      ruleVersion: input.ruleVersion,
-      asOf: input.asOf,
-    });
+    ruleVersion: string; leaseHolderId: string; leaseVersion: number;
+    asOf?: string;
+  }): IndependentIngressReviewResult {
+    try {
+      // Core remains the authority for receipt ownership and AEAD verification.
+      // Do this before spawning the detector so capsule faults preserve their
+      // durable CAPSULE_* semantics instead of being confused with worker loss.
+      const payload = this.verifyAuthoritativeResult(input);
+      const isToolEffect = Boolean(this._odb.getDB().prepare(
+        'SELECT 1 FROM tool_invocations WHERE effect_id = ?',
+      ).get(input.effectId));
+      if (isToolEffect && !(this.terminalProjection instanceof ToolTerminalProjectionService)) {
+        throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+          'tool ingress terminal projection is unavailable');
+      }
+      const projection = this.terminalProjection?.forVerifiedResult({
+        effectId: input.effectId,
+        receiptId: input.receiptId,
+        attemptNo: input.attemptNo,
+        workspaceId: input.workspaceId,
+        verifiedPayload: payload,
+        leaseHolderId: input.leaseHolderId,
+        leaseVersion: input.leaseVersion,
+        sourceKind: input.source === 'agent' ? 'production' : 'recovery',
+        ruleVersion: input.ruleVersion,
+      }) ?? null;
+      if (isToolEffect && !projection) {
+        throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+          'tool ingress terminal projection is unavailable');
+      }
+      const verdict = this.review({
+        effectId: input.effectId, runId: input.runId, workspaceId: input.workspaceId,
+        receiptId: input.receiptId, attemptNo: input.attemptNo,
+        payloadDigest: input.payloadDigest, source: input.source,
+      }, payload);
+      const finalized = this.ingressReview.finalizeIngressDecision({
+        effectId: input.effectId,
+        outcome: verdict.outcome,
+        reviewer: verdict.reviewer,
+        sanitizedReasonCode: verdict.sanitizedReasonCode,
+        structuredFindings: verdict.structuredFindings,
+        reviewerPayloadDigest: input.payloadDigest,
+        leaseHolderId: input.leaseHolderId,
+        leaseVersion: input.leaseVersion,
+        ruleVersion: input.ruleVersion,
+        asOf: input.asOf,
+        postCommitBody: projection?.postCommitBody,
+      });
+      if (projection && !projection.result) {
+        throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+          'tool ingress terminal projection did not complete');
+      }
+      return { ...finalized, toolProjection: projection?.result ?? null };
+    } catch (err) {
+      if (err instanceof OgraError) throw err;
+      throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+        'ingress review finalization failed');
+    }
   }
 
   private verifyAuthoritativeResult(input: {
@@ -249,34 +311,45 @@ export class IndependentIngressReviewer {
   }
 
   private validateResponse(raw: string, requestId: string): IngressReviewDecision {
-    let response: ReviewResponse;
+    let parsed: unknown;
     try {
-      response = JSON.parse(raw) as ReviewResponse;
+      parsed = JSON.parse(raw) as unknown;
     } catch {
       throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
-        'ingress reviewer returned malformed IPC response');
+        INVALID_REVIEW_RESPONSE);
     }
-    const structuredFindings = this.validateStructuredFindings(response.verdict.structuredFindings);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+        INVALID_REVIEW_RESPONSE);
+    }
+    const response = parsed as Record<string, unknown>;
+    const rawVerdict = response.verdict;
+    if (!rawVerdict || typeof rawVerdict !== 'object' || Array.isArray(rawVerdict)) {
+      throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
+        INVALID_REVIEW_RESPONSE);
+    }
+    const verdict = rawVerdict as Record<string, unknown>;
+    const structuredFindings = this.validateStructuredFindings(verdict.structuredFindings);
     if (response.namespace !== PROTOCOL_NAMESPACE
       || response.callerContext !== WORKER_CONTEXT
       || response.requestId !== requestId
+      || typeof response.pid !== 'number'
       || !Number.isInteger(response.pid)
       || response.pid === process.pid
-      || !response.verdict
-      || !CLOSED_OUTCOMES.has(response.verdict.outcome as IngressOutcome)
-      || typeof response.verdict.reviewer !== 'string'
-      || response.verdict.reviewer !== 'default-policy'
-      || (response.verdict.sanitizedReasonCode !== undefined
-        && (!CLOSED_REASON_CODES.has(response.verdict.sanitizedReasonCode as string)))
+      || !CLOSED_OUTCOMES.has(verdict.outcome as IngressOutcome)
+      || typeof verdict.reviewer !== 'string'
+      || verdict.reviewer !== 'default-policy'
+      || (verdict.sanitizedReasonCode !== undefined
+        && (!CLOSED_REASON_CODES.has(verdict.sanitizedReasonCode as string)))
       || structuredFindings === null) {
       throw new OgraError(OgraErrorCode.INGRESS_REVIEW_DENIED,
-        'ingress reviewer returned an invalid or untrusted verdict');
+        INVALID_REVIEW_RESPONSE);
     }
-    this.lastWorkerPid = response.pid;
+    this.lastWorkerPid = response.pid as number;
     return {
-      outcome: response.verdict.outcome as IngressOutcome,
-      reviewer: response.verdict.reviewer,
-      sanitizedReasonCode: response.verdict.sanitizedReasonCode as string | undefined,
+      outcome: verdict.outcome as IngressOutcome,
+      reviewer: verdict.reviewer,
+      sanitizedReasonCode: verdict.sanitizedReasonCode as string | undefined,
       structuredFindings,
     };
   }

@@ -65,6 +65,16 @@ import { EffectProtocolService } from './effect-protocol-service';
 import type { VerifiedCallbackRecoveryCapabilities } from './capsule-store';
 import { IngressReviewService } from './ingress-review-service';
 import { IndependentIngressReviewer } from './independent-ingress-reviewer';
+import { ToolTerminalProjectionService } from './tool-terminal-projection';
+import { cloneJsonData } from './capability-gateway';
+import { validateToolOutput } from './tool-schema-validation';
+import { DataClassification } from '../shared/types';
+import {
+  verifyKnowledgeSearchResultAuthority,
+} from './knowledge-search-adapter';
+import type {
+  KnowledgeSearchInput, KnowledgeSearchResult,
+} from './knowledge-search-adapter';
 export interface RecoveryConditionChecker {
   /**
    * Series 1B M1 Round 6: re-verify before any recovery retry.
@@ -184,7 +194,10 @@ export interface RecoveryReport {
       | 'route_policy_drift'
       | 'redaction_rule_version_mismatch'
       | 'no_reviewer_wired'
-      | 'no_recovery_approval';
+      | 'no_recovery_approval'
+      | 'invalid_tool_output'
+      | 'tool_projection_unavailable'
+      | 'recovery_finalize_failed';
     detail: string;
   }>;
 }
@@ -214,6 +227,8 @@ export class RecoveryService {
      * it through OgraCore.
      */
     independentIngressReviewer?: IndependentIngressReviewer,
+    /** Optional because historical non-tool fixtures have no tool registry. */
+    private readonly toolTerminalProjection?: ToolTerminalProjectionService,
   ) {
     // No legacy direct-commit fallback. Even hermetic recovery instances use
     // the concrete reviewer, which verifies the result capsule before its
@@ -222,6 +237,7 @@ export class RecoveryService {
       ?? new IndependentIngressReviewer(
         odb, runtime, capsuleStore,
         new IngressReviewService(odb, runtime, capsuleStore),
+        toolTerminalProjection,
       );
   }
 
@@ -275,12 +291,11 @@ export class RecoveryService {
       asOf: input.asOf,
     });
     if (result.ok) return null;
-    const detail = `recovery gate failed (${result.reason ?? 'unknown'}): ` +
-      `${result.detail ?? ''}`;
+    const reason = result.reason ?? 'route_policy_drift';
+    const detail = `recovery gate blocked: ${reason}`;
     // Map checker reason → incidentKind union (any new
     // reason must be added to the union above).
-    const incidentKind = (result.reason ??
-      'capsule_payload_mismatch') as
+    const incidentKind = reason as
       | 'capsule_payload_mismatch'
       | 'capsule_corrupt'
       | 'capsule_expired'
@@ -431,25 +446,25 @@ export class RecoveryService {
   private verifiedCallbackCapabilities(
     effect: RunEffect,
     decision: RecoveryReport['effects'][number],
+    attemptNo: number,
   ): VerifiedCallbackRecoveryCapabilities | null {
     try {
       return this.capsuleStore.readVerifiedCallbackRecoveryCapabilities({
         effectId: effect.id,
-        attemptNo: 1,
+        attemptNo,
         expectedAdapterKind: effect.adapterKind,
       });
-    } catch (err) {
+    } catch {
       decision.decision = 'incident_blocked';
       decision.incidentKind = 'capsule_corrupt';
-      decision.detail = `effect ${effect.id} recovery capability evidence failed verification: ` +
-        `${(err as Error)?.message ?? 'unknown'}`;
+      decision.detail = `effect ${effect.id} recovery capability evidence verification failed`;
       this.capsuleStore.recordFailure({
         effectId: effect.id,
         runId: effect.runId,
         capsuleRef: effect.callbackCapsuleRef ?? '(missing)',
-        attemptNo: 1,
+        attemptNo,
         failureKind: 'decrypt_failed',
-        detail: decision.detail,
+        detail: 'recovery_capability_evidence_invalid',
       });
       return null;
     }
@@ -498,7 +513,7 @@ export class RecoveryService {
       this.capsuleStore.openByEffect({
         effectId: effect.id, capsuleKind: 'callback', attemptNo: 1,
       });
-    } catch (err) {
+    } catch {
       decision.decision = 'incident_blocked';
       decision.incidentKind = 'capsule_corrupt';
       decision.detail = `planned effect ${effect.id} callback capsule failed verification`;
@@ -506,7 +521,7 @@ export class RecoveryService {
         effectId: effect.id, runId: effect.runId,
         capsuleRef: callback.ref, attemptNo: 1,
         failureKind: 'decrypt_failed',
-        detail: (err as Error)?.message ?? 'unknown',
+        detail: 'callback_capsule_verification_failed',
       });
       return decision;
     }
@@ -531,18 +546,17 @@ export class RecoveryService {
       decision.decision = 'incident_blocked';
       decision.incidentKind = verifyFp.outcome === 'capsule_failure'
         ? 'capsule_corrupt' : 'capsule_payload_mismatch';
-      decision.detail = `planned effect ${effect.id} callback capsule ` +
-        `${verifyFp.outcome}: ${verifyFp.detail ?? ''}`;
+      decision.detail = `planned effect ${effect.id} callback capsule fingerprint verification failed`;
       this.capsuleStore.recordFailure({
         effectId: effect.id, runId: effect.runId,
         capsuleRef: callback.ref, attemptNo: 1,
         failureKind: verifyFp.outcome === 'mismatch'
           ? 'decrypt_failed' : 'decrypt_failed',
-        detail: verifyFp.detail ?? 'canonical hash mismatch',
+        detail: 'callback_capsule_fingerprint_mismatch',
       });
       return decision;
     }
-    const capabilities = this.verifiedCallbackCapabilities(effect, decision);
+    const capabilities = this.verifiedCallbackCapabilities(effect, decision, 1);
     if (!capabilities) return decision;
     if (!capabilities.supportsIdempotencyKey) {
       decision.decision = 'incident_blocked';
@@ -566,10 +580,10 @@ export class RecoveryService {
       decision.decision = 'controlled_retry';
       decision.attemptNo = 1;
       decision.detail = `planned effect ${effect.id} resumed as in_flight`;
-    } catch (err) {
+    } catch {
       decision.decision = 'incident_blocked';
       decision.incidentKind = 'capsule_corrupt';
-      decision.detail = `planned effect ${effect.id} could not CAS to in_flight: ${(err as Error)?.message ?? ''}`;
+      decision.detail = `planned effect ${effect.id} callback transition failed`;
     }
     return decision;
   }
@@ -610,6 +624,9 @@ export class RecoveryService {
       return decision;
     }
     try {
+      this.validatePinnedToolResultForRecovery({
+        effect, receiptId: receipts.id, attemptNo: receipts.attempt_no,
+      });
       const reviewed = this.independentIngressReviewer.reviewAndFinalize({
         effectId: effect.id,
         runId: effect.runId,
@@ -634,6 +651,18 @@ export class RecoveryService {
         decision.detail = `effect ${effect.id} was already finalized`;
         return decision;
       }
+      if (this.isInvalidToolOutputError(err)) {
+        decision.decision = 'incident_blocked';
+        decision.incidentKind = 'invalid_tool_output';
+        decision.detail = `received tool effect ${effect.id} result rejected by pinned output schema`;
+        return decision;
+      }
+      if (this.isToolProjectionUnavailableError(err)) {
+        decision.decision = 'incident_blocked';
+        decision.incidentKind = 'tool_projection_unavailable';
+        decision.detail = `received tool effect ${effect.id} cannot finalize without its terminal projection`;
+        return decision;
+      }
       throw err;
     }
   }
@@ -651,6 +680,7 @@ export class RecoveryService {
       decision.incidentKind = gate.incidentKind;
       return decision;
     }
+    const callbackAttemptNo = this.latestCallbackAttemptNo(effect.id);
     // in_flight / unknown => either the adapter applied with no
     // local receipt, or it never applied. Distinguish via:
     //   (a) a receipt row exists => we know applied-or-not;
@@ -671,6 +701,9 @@ export class RecoveryService {
         return decision;
       }
       try {
+        this.validatePinnedToolResultForRecovery({
+          effect, receiptId: existingReceipt.id, attemptNo: existingReceipt.attempt_no,
+        });
         const reviewed = this.independentIngressReviewer.reviewAndFinalize({
           effectId: effect.id,
           runId: effect.runId,
@@ -694,6 +727,18 @@ export class RecoveryService {
           decision.decision = 'noop_already_terminal';
           return decision;
         }
+        if (this.isInvalidToolOutputError(err)) {
+          decision.decision = 'incident_blocked';
+          decision.incidentKind = 'invalid_tool_output';
+          decision.detail = `in_flight/unknown tool effect ${effect.id} result rejected by pinned output schema`;
+          return decision;
+        }
+        if (this.isToolProjectionUnavailableError(err)) {
+          decision.decision = 'incident_blocked';
+          decision.incidentKind = 'tool_projection_unavailable';
+          decision.detail = `in_flight/unknown tool effect ${effect.id} cannot finalize without its terminal projection`;
+          return decision;
+        }
         throw err;
       }
     }
@@ -707,12 +752,23 @@ export class RecoveryService {
     // re-invoked.
     // The outcome-query callback is supplied by the host, but whether it may
     // influence recovery comes only from AEAD-verified capability evidence.
-    const capabilities = this.verifiedCallbackCapabilities(effect, decision);
+    const capabilities = this.verifiedCallbackCapabilities(
+      effect, decision, callbackAttemptNo,
+    );
     if (!capabilities) return decision;
     if (capabilities.supportsOutcomeQuery && input.queryOutcome) {
-      const out = await input.queryOutcome(effect.id, 1);
+      const out = await input.queryOutcome(effect.id, callbackAttemptNo);
       if (out && out.applied) {
         try {
+          // Outcome-query output is untrusted until it satisfies the pinned
+          // tool contract. Validate before phase 1 so invalid bytes never
+          // become a sealed result capsule or durable receipt.
+          const authoritativeResult = cloneJsonData(
+            out.payload ?? {}, '$', 0, 'recovery output',
+          );
+          this.validatePinnedToolOutputForRecovery(
+            effect, callbackAttemptNo, authoritativeResult,
+          );
           const now = new Date().toISOString();
           // The mock fixture's `payload` is whatever it
           // returned — we seal it as the result body. The
@@ -736,7 +792,7 @@ export class RecoveryService {
               eventType: 'effect_received',
               eventPayload: {
                 effectId: effect.id,
-                attemptNo: 1,
+                attemptNo: callbackAttemptNo,
                 applicationStatus: 'applied',
                 providerStatus: 'ok',
                 source: 'outcome_query',
@@ -755,12 +811,12 @@ export class RecoveryService {
               // audit envelope.
               const receiptId = `rcp_${crypto.randomBytes(6).toString('hex')}`;
               const resultPayload = {
-                attemptNo: 1,
+                attemptNo: callbackAttemptNo,
                 applicationStatus: 'applied',
                 providerStatus: 'ok',
                 requestId: `recovered_${effect.id}`,
                 requestHash: effect.payloadFingerprint,
-                result: out.payload ?? {},
+                result: authoritativeResult,
                 source: 'outcome_query',
               };
               const responseHash = crypto.createHash('sha256')
@@ -772,7 +828,7 @@ export class RecoveryService {
                 runId: effect.runId,
                 effectId: effect.id,
                 receiptId,
-                attemptNo: 1,
+                attemptNo: callbackAttemptNo,
                 adapterKind: effect.adapterKind,
                 adapterVersion: 'M1-fixture',
                 payloadFingerprint: responseHash,
@@ -786,7 +842,7 @@ export class RecoveryService {
               const receiptHash = crypto.createHash('sha256')
                 .update(canonicalJSON({
                   effectId: effect.id,
-                  attemptNo: 1,
+                  attemptNo: callbackAttemptNo,
                   requestHash: effect.payloadFingerprint,
                   responseHash,
                   applicationStatus: 'applied',
@@ -803,7 +859,7 @@ export class RecoveryService {
                     receipt_hash, event_id, received_at)
                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 `).run(
-                  receiptId, effect.id, 1,
+                  receiptId, effect.id, callbackAttemptNo,
                   `recovered_${effect.id}`, effect.payloadFingerprint,
                   responseHash, sealed.ref, sealed.hash,
                   sealed.formatVersion,
@@ -812,7 +868,7 @@ export class RecoveryService {
               } catch (err) {
                 if (String((err as Error)?.message).includes('UNIQUE')) {
                   throw new OgraError(OgraErrorCode.RECEIPT_DUPLICATE,
-                    `recovery: effect ${effect.id} already has a receipt for attempt 1`);
+                    `recovery: effect ${effect.id} already has a receipt for attempt ${callbackAttemptNo}`);
                 }
                 throw err;
               }
@@ -853,12 +909,15 @@ export class RecoveryService {
               'recovery: IndependentIngressReviewer is not wired; M2 fail-closed');
           }
           this.assertActiveRecoveryLease(effect.runId, input.holderId, input.recoveryLeaseVersion);
+          this.validatePinnedToolResultForRecovery({
+            effect, receiptId: phase1.receiptId, attemptNo: callbackAttemptNo,
+          });
           const reviewed = this.independentIngressReviewer.reviewAndFinalize({
             effectId: effect.id,
             runId: effect.runId,
             workspaceId: this.resolveWorkspaceId(effect.runId),
             receiptId: phase1.receiptId,
-            attemptNo: 1,
+            attemptNo: callbackAttemptNo,
             payloadDigest: phase1.resultPayloadDigest,
             source: 'recovery',
             ruleVersion: 'm2',
@@ -867,6 +926,7 @@ export class RecoveryService {
           });
           decision.decision = reviewed.outcome === 'accepted'
             ? 'committed' : 'incident_blocked';
+          decision.attemptNo = callbackAttemptNo;
           decision.receiptId = phase1.receiptId;
           decision.detail = `effect ${effect.id} reconciled by ` +
             `independent ingress review (${reviewed.outcome}) via ` +
@@ -876,10 +936,24 @@ export class RecoveryService {
             `finding ${reviewed.findingId.slice(0, 16)}…`;
           return decision;
         } catch (err) {
-          decision.decision = 'noop_already_terminal';
-          decision.detail = `effect ${effect.id} outcome-query reconcile failed: ${(err as Error)?.message ?? ''} (${String((err as { code?: string })?.code ?? '')})`;
+          if (err && (err as { code?: string }).code === OgraErrorCode.REVISION_CONFLICT) {
+            decision.decision = 'noop_already_terminal';
+            decision.detail = `effect ${effect.id} was already finalized during outcome-query recovery`;
+            return decision;
+          }
+          decision.decision = 'incident_blocked';
+          decision.incidentKind = this.isInvalidToolOutputError(err)
+            ? 'invalid_tool_output'
+            : this.isToolProjectionUnavailableError(err)
+              ? 'tool_projection_unavailable'
+              : 'recovery_finalize_failed';
+          decision.detail = `effect ${effect.id} outcome-query recovery finalization failed`;
+          // Never print a capsule/schema exception: validator messages can
+          // include attacker-controlled object keys. Recovery evidence keeps
+          // only the stable code and sanitized decision above.
           // eslint-disable-next-line no-console
-          console.error('outcome-query reconcile failed:', err);
+          console.error('outcome-query recovery finalization failed:',
+            String((err as { code?: string })?.code ?? OgraErrorCode.UNKNOWN));
           return decision;
         }
       }
@@ -888,7 +962,7 @@ export class RecoveryService {
     }
     // Fallback: support idempotent retry IF the adapter
     // supports idempotency AND the callback capsule is intact.
-    if (capabilities.supportsIdempotencyKey) {
+    if (capabilities.supportsIdempotencyKey && callbackAttemptNo === 1) {
       const callback = this.capsuleStore.fetchByBinding({
         effectId: effect.id, capsuleKind: 'callback', attemptNo: 1,
       });
@@ -917,13 +991,12 @@ export class RecoveryService {
           decision.decision = 'incident_blocked';
           decision.incidentKind = verifyFp.outcome === 'capsule_failure'
             ? 'capsule_corrupt' : 'capsule_payload_mismatch';
-          decision.detail = `effect ${effect.id} callback capsule ` +
-            `${verifyFp.outcome}: ${verifyFp.detail ?? ''}`;
+          decision.detail = `effect ${effect.id} callback capsule fingerprint verification failed`;
           this.capsuleStore.recordFailure({
             effectId: effect.id, runId: effect.runId,
             capsuleRef: callback.ref, attemptNo: 1,
             failureKind: 'decrypt_failed',
-            detail: verifyFp.detail ?? 'canonical hash mismatch',
+            detail: 'callback_capsule_fingerprint_mismatch',
           });
           return decision;
         }
@@ -962,9 +1035,11 @@ export class RecoveryService {
           decision.detail = `unknown effect ${effect.id} driven to in_flight for controlled retry (attempt 2)`;
           return decision;
         } catch (err) {
+          const failureCode = err instanceof OgraError
+            ? err.code : OgraErrorCode.INTERNAL_ERROR;
           decision.decision = 'incident_blocked';
           decision.incidentKind = 'no_idempotency';
-          decision.detail = `unknown effect ${effect.id} callback intent blocked: ${(err as Error)?.message ?? ''}`;
+          decision.detail = `unknown effect ${effect.id} callback transition failed (${failureCode})`;
           return decision;
         }
       }
@@ -1112,6 +1187,175 @@ export class RecoveryService {
       throw new OgraError(OgraErrorCode.CAPSULE_INVALID,
         `recovery: result capsule does not match receipt ${receiptId}`);
     }
+  }
+
+  /**
+   * Tool receipts are not eligible for ingress merely because their result
+   * capsule decrypts. The pinned tool invocation owns the output contract;
+   * recovery must reapply it before the reviewer can emit a terminal finding
+   * or the terminal projection can create an Observation/action ledger row.
+   * Non-tool effects intentionally retain the generic M1/M2 recovery path.
+   */
+  private validatePinnedToolResultForRecovery(input: {
+    effect: RunEffect;
+    receiptId: string;
+    attemptNo: number;
+  }): void {
+    const schema = this.getPinnedToolOutputSchema(input.effect.id);
+    if (schema === null) return;
+    const receipt = this.odb.getDB().prepare(`
+      SELECT result_capsule_ref, result_capsule_hash,
+             result_capsule_format_version
+        FROM effect_receipts
+       WHERE id = ? AND effect_id = ? AND attempt_no = ?
+    `).get(input.receiptId, input.effect.id, input.attemptNo) as {
+      result_capsule_ref: string | null;
+      result_capsule_hash: string | null;
+      result_capsule_format_version: string | null;
+    } | undefined;
+    if (!receipt) {
+      throw new OgraError(OgraErrorCode.RECEIPT_NOT_FOUND,
+        `recovery: tool receipt ${input.receiptId} does not match effect ${input.effect.id}`);
+    }
+
+    const opened = this.capsuleStore.openResultForReceipt<{
+      result?: unknown;
+    }>({
+      workspaceId: this.resolveWorkspaceId(input.effect.runId),
+      effectId: input.effect.id,
+      receiptId: input.receiptId,
+      attemptNo: input.attemptNo,
+      resultCapsuleRef: receipt.result_capsule_ref,
+      resultCapsuleHash: receipt.result_capsule_hash,
+      resultCapsuleFormatVersion: receipt.result_capsule_format_version,
+    });
+    validateToolOutput(schema, opened.payload.result);
+    this.validateToolResultContext(input.effect, input.attemptNo,
+      opened.payload.result as KnowledgeSearchResult);
+  }
+
+  /** Validate unsealed outcome-query output before receipt creation. */
+  private validatePinnedToolOutputForRecovery(
+    effect: RunEffect, attemptNo: number, result: unknown,
+  ): void {
+    const schema = this.getPinnedToolOutputSchema(effect.id);
+    if (schema !== null) {
+      validateToolOutput(schema, result);
+      this.validateToolResultContext(effect, attemptNo, result as KnowledgeSearchResult);
+    }
+  }
+
+  private latestCallbackAttemptNo(effectId: string): number {
+    const row = this.odb.getDB().prepare(`
+      SELECT MAX(attempt_no) AS attempt_no FROM capsules
+       WHERE effect_id = ? AND capsule_kind = 'callback'
+    `).get(effectId) as { attempt_no: number | null };
+    return row.attempt_no ?? 1;
+  }
+
+  /** Reapply the same sealed invocation authority verifier used live. */
+  private validateToolResultContext(effect: RunEffect, attemptNo: number,
+    result: KnowledgeSearchResult): void {
+    const row = this.odb.getDB().prepare(`
+      SELECT ti.tool_version_id, ti.prepared_binding_hash,
+             b.workspace_id, b.tool_version_id AS binding_tool_version_id,
+             b.binding_hash, b.policy_id, b.approval_mode, b.constraints_json
+        FROM tool_invocations ti
+        JOIN workspace_tool_bindings b ON b.id = ti.workspace_binding_id
+       WHERE ti.effect_id = ?
+    `).get(effect.id) as {
+      tool_version_id: string; prepared_binding_hash: string;
+      workspace_id: string; binding_tool_version_id: string;
+      binding_hash: string; policy_id: string | null;
+      approval_mode: string; constraints_json: string;
+    } | undefined;
+    if (!row || !effect.capsuleFingerprint) throw new OgraError(
+      OgraErrorCode.CAPSULE_INVALID, 'recovery: tool result context authority is missing');
+    const callback = this.capsuleStore.openVerifiedCallbackForEffect<{
+      payload?: KnowledgeSearchInput;
+    }>({ effectId: effect.id, attemptNo, expectedFingerprint: effect.capsuleFingerprint });
+    const args = callback.payload.payload;
+    if (!args || typeof args.query !== 'string') throw new OgraError(
+      OgraErrorCode.INVALID_ARGUMENT, 'recovery: tool result context is invalid');
+    let constraints: unknown;
+    try { constraints = JSON.parse(row.constraints_json); } catch { constraints = null; }
+    const expectedWorkspaceId = this.resolveWorkspaceId(effect.runId);
+    verifyKnowledgeSearchResultAuthority({
+      result,
+      arguments: args,
+      expectedWorkspaceId,
+      binding: {
+        workspaceId: row.workspace_id,
+        toolVersionId: row.binding_tool_version_id,
+        preparedToolVersionId: row.tool_version_id,
+        bindingHash: row.binding_hash,
+        preparedBindingHash: row.prepared_binding_hash,
+        policyId: row.policy_id,
+        approvalMode: row.approval_mode,
+        constraints,
+      },
+      lookupHitAuthority: (hit) => (this.odb.getDB().prepare(`
+        SELECT c.classification_snapshot AS classification
+          FROM document_chunks c
+          JOIN documents d ON d.id = c.document_id
+          JOIN knowledge_bases kb ON kb.id = d.knowledge_base_id
+         WHERE c.id = ? AND d.id = ? AND c.workspace_id = ?
+           AND d.workspace_id = ? AND kb.workspace_id = ? AND kb.id = ?
+      `).get(
+        hit.chunkId, hit.documentId, expectedWorkspaceId, expectedWorkspaceId,
+        expectedWorkspaceId, hit.knowledgeBaseId,
+      ) as { classification: DataClassification } | undefined) ?? null,
+    });
+  }
+
+  /**
+   * Null means this is not a tool effect. A tool invocation with a missing or
+   * malformed immutable output schema is a contract failure, never a reason
+   * to skip validation.
+   */
+  private getPinnedToolOutputSchema(effectId: string): unknown | null {
+    const invocation = this.odb.getDB().prepare(`
+      SELECT ti.tool_version_id, ti.prepared_output_schema_json,
+             ti.prepared_output_schema_hash, v.output_schema_json
+        FROM tool_invocations ti
+        JOIN tool_versions v ON v.id = ti.tool_version_id
+       WHERE ti.effect_id = ?
+    `).get(effectId) as {
+      tool_version_id: string;
+      prepared_output_schema_json: string | null;
+      prepared_output_schema_hash: string | null;
+      output_schema_json: string | null;
+    } | undefined;
+    if (!invocation) return null;
+
+    try {
+      if (!invocation.prepared_output_schema_json
+          || !invocation.prepared_output_schema_hash) throw new Error('missing output schema snapshot');
+      const snapshot = JSON.parse(invocation.prepared_output_schema_json) as unknown;
+      const snapshotCanonical = canonicalJSON(snapshot);
+      const snapshotHash = crypto.createHash('sha256').update(snapshotCanonical).digest('hex');
+      if (snapshotCanonical !== invocation.prepared_output_schema_json
+          || snapshotHash !== invocation.prepared_output_schema_hash
+          || !invocation.output_schema_json
+          || canonicalJSON(JSON.parse(invocation.output_schema_json)) !== snapshotCanonical) {
+        throw new Error('output schema snapshot drift');
+      }
+      return snapshot;
+    } catch {
+      throw new OgraError(OgraErrorCode.INVALID_ARGUMENT,
+        `recovery: pinned tool version ${invocation.tool_version_id} output schema snapshot is invalid or drifted`);
+    }
+  }
+
+  private isInvalidToolOutputError(err: unknown): boolean {
+    return err instanceof OgraError
+      && err.code === OgraErrorCode.INVALID_ARGUMENT;
+  }
+
+  private isToolProjectionUnavailableError(err: unknown): boolean {
+    return err instanceof OgraError
+      && err.code === OgraErrorCode.INGRESS_REVIEW_DENIED
+      && String(err.message).includes('tool ingress terminal projection');
   }
 
   /* ============================================================
