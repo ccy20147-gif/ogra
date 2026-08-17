@@ -12,32 +12,36 @@ When an agent starts work here, follow this initialization sequence before makin
    - This is the highest-priority product and technical guidance document.
    - Treat it as the source of truth for product positioning, scope, architecture, MVP, and non-goals.
 
-3. Use `archive/` only as historical context.
+3. Read [docs/plans/01-python-first-action-runtime-quickstart.md](docs/plans/01-python-first-action-runtime-quickstart.md) before changing the public developer experience.
+   - It defines the few-line LangChain integration, Ogra Edge discovery, capability levels, and acceptance contract.
+
+4. Use `archive/` only as historical context.
    - Archived files contain earlier assumptions and broader SaaS/platform plans.
    - Do not treat archived documents as current guidance when they conflict with the handbook.
 
-4. Preserve the current naming.
+5. Preserve the current naming.
    - Current active name: `Ogra`.
    - Current active edge/runtime name: `Ogra Edge`.
    - Archived files may use `Orga`; do not reintroduce that spelling unless the user explicitly requests a rename.
 
-5. Before editing documents, check current files:
+6. Before editing documents, check current files:
    - `ls -la`
    - `find . -maxdepth 2 -type f | sort`
    - `git status --short --branch`
 
-6. If asked to update direction, update both:
+7. If asked to update direction, update both:
    - [ogra-product-handbook.md](ogra-product-handbook.md) for full guidance.
    - [README.md](README.md) for navigation and current summary.
 
-7. Do not move archived files back to the root unless explicitly requested.
+8. Do not move archived files back to the root unless explicitly requested.
 
-8. Keep new planning docs concise and clearly linked from [README.md](README.md).
+9. Keep new planning docs concise and clearly linked from [README.md](README.md).
 
 ## Git Notes
 
 - This directory has been initialized as a git repository.
-- Current branch: `main`, tracking `origin/main`.
+- Current direction branch: `ogra-action-runtime-v0.2`, branched from `main`.
+- The branch is local until the user explicitly requests a push or upstream configuration.
 - The repository has commit history; do not rely on the original initialization state described by archived documents.
 - Do not assume a clean worktree. Always inspect `git status --short --branch` before edits.
 - Do not rename branches, stage files, commit, or push unless the user explicitly asks.

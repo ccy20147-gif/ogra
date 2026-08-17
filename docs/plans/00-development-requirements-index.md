@@ -1,324 +1,143 @@
 # Ogra Development Requirements Index
 
-> Status: active planning document
+> Direction: language-neutral Agent Action Runtime
 >
-> Source of truth: [../../ogra-product-handbook.md](../../ogra-product-handbook.md)
+> First stack: Python
 >
-> Purpose: define layered development requirements through Alpha, Beta, and v1.0.
+> First integrations: LangChain and LangGraph
+>
+> Status: active
 
 ## 1. Product Contract
 
-All development plans in this directory must preserve the handbook definition:
-
-> Ogra Desktop is a local-first, hybrid edge/cloud, transparent-routing, auditable AI Agent workspace for individuals and small teams.
-
-The first implementation target is not a generic chat app and not a SaaS platform. The product must make these facts visible to the user:
-
-- Which data stayed local.
-- Which data went to an Ogra-controlled cloud adapter.
-- Why the route was selected, including which egress mode (approve / log / auto-filter) applied.
-- Whether redaction, approval, or re-sanitization cycles were required.
-- Which model, agent, and skill executed each step.
-- Whether cloud response passed independent ingress review.
-- Which local audit evidence was produced.
-
-## 2. Document Set
-
-The development requirements are split by responsibility layer:
-
-1. [01 Desktop Runtime Foundation](01-desktop-runtime-foundation.md)
-   - Electron shell, process boundaries, typed IPC, workers, app lifecycle, local permissions, ingress review isolation.
-
-2. [02 Local Data, Audit, and Governance Store](02-local-data-audit-governance-store.md)
-   - SQLite schema, migrations, workspace isolation, hash-chain run events, route decisions, model/provider/policy registries, ingress findings, quarantine, redaction rule sets, skills registry, scheduled runs.
-
-3. [03 Policy, Routing, and Safety Engine](03-policy-routing-safety-engine.md)
-   - deterministic policy evaluation, three-tier egress (approve / log / auto-filter), route decision schema, approval rules, re-sanitize loop, prompt-injection warnings, egress modeling, ingress review policy.
-
-4. [04 RAG and Knowledge Engine](04-rag-knowledge-engine.md)
-   - local file import, classification inheritance, FTS5 retrieval, citations, indexing status, source trust, future vector search.
-
-5. [05 Model and Agent Orchestration](05-model-agent-orchestration.md)
-   - model adapters, InternalAgentAdapter as PlanExecute + ReAct + strong persistence engine, integrated middleware chain, agent manifests, bounded runs, Agent Group with interval/continuous scheduling, Skills Market, Local Agent Control Plane, A2A/MCP.
-
-6. [06 Application UI and UX](06-application-ui-ux.md)
-   - workspace UX, knowledge import, chat/run experience, route trace viewer, Data Safety Center, AI Governance Center, redaction preview, ingress review UI, quarantine sandbox.
-
-7. [07 Verification, Packaging, and Release Gates](07-verification-packaging-release-gates.md)
-   - unit/integration/e2e tests, security checks, demo scripts, packaging, acceptance gates by phase.
-
-8. [08 Memory, Agent Group, Recipes, and Interop Requirements](08-memory-agentgroup-recipes-v1-requirements.md)
-   - M3 memory, Agent Group, recipes, Local Agent Control Plane, A2A/MCP, and v1 completion gates.
-
-9. [09 vNext Strategic Direction](09-vNext-strategic-direction.md)
-   - Strategic direction for hybrid-default routing, three-tier egress/ingress, ReAct engine, Skills Market, scheduling, cloud agent transparency boundary. Items explicitly subsumed into Alpha are marked there.
-
-10. [10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md)
-   - Ogra-native TypeScript/SQLite task frames, effect ownership, revisions, idempotency, typed repair verification, recovery capsules, local recovery leases, audit packets, and the authority boundary between runtime state and M3 Memory.
-
-11. [11 Tool Broker and MCP Integration Runtime](11-tool-broker-mcp-integration-runtime.md)
-   - Capability Gateway boundary, immutable Tool descriptors and workspace bindings, policy/approval/effect/receipt/ingress invocation protocol, MCP transport hardening, and phased tool/Skill/MCP delivery.
-
-## 3. Phase Definitions
-
-### 3.1 Alpha: Hybrid-Default Trustable Core
-
-Alpha is no longer a pure-local demo. After [09 vNext Strategic Direction](09-vNext-strategic-direction.md) was accepted as the source of product intent, Alpha's product promise becomes:
-
-> A local-first, hybrid edge/cloud, transparent-routing, auditable AI Agent workspace, in which data leaves the machine only through a deterministic three-tier egress policy (Approve / Log / Auto-Filter), every cloud response is reviewed by an independent ingress agent, and every Ogra-managed boundary crossing has auditable bounded metadata, hashes, and receipts without persisting raw secrets or sensitive payloads in audit.
-
-Alpha proves the hybrid-default core loop:
+Ogra turns every Ogra-controlled model or tool call into a governed,
+recoverable, and verifiable Action.
 
 ```text
-Import sensitive folder
-  -> mark Confidential
-  -> user task: "summarize Q2 anomalies"
-  -> local RAG retrieval
-  -> policy classifies data classification (high-water mark)
-  -> egress policy selects mode:
-       Public / Internal(standard) -> Auto-Filter-then-Egress
-       Internal(high-sensitivity) -> Log-then-Egress
-       Confidential                 -> Approve-then-Egress (preview required)
-       Restricted                   -> Blocked
-  -> redaction engine sanitizes payload (when applicable)
-  -> user approves sanitized payload (Approve mode)
-  -> cloud reasoning
-  -> cloud response arrives
-  -> independent Ingress Review Agent scans for prompt injection
-  -> ingress policy applies (approve / log / auto-filter)
-  -> local synthesis and final answer
-  -> run events, route decision, redaction preview, approval, ingress findings, payload hashes, and audit chain all recorded
+classify
+  -> policy and route
+  -> redact or block
+  -> bind exact approval
+  -> persist intent
+  -> invoke
+  -> receipt or unknown outcome
+  -> ingress review
+  -> commit, quarantine, reconcile, or escalate
+  -> verifiable evidence
 ```
 
-Alpha MUST include:
+The first release must make this value available through a two-to-five-line
+change to an ordinary LangChain Agent.
 
-- Electron desktop shell with safe renderer/main/core boundaries.
-- Local workspace, Markdown/TXT/code folder import, manual reindex with visible status.
-- SQLite FTS5 retrieval and a v0 vector retrieval path (sqlite-vss or equivalent) behind a feature flag.
-- Ollama adapter (local).
-- OpenAI-compatible adapter (cloud or local) with policy-gated use.
-- InternalAgentAdapter as a PlanExecute + ReAct + strong-persistence engine with an integrated sanitize/policy/route/audit middleware chain.
-- SHD-inspired durable execution semantics implemented natively in TypeScript/SQLite: persistent task frames, effect ownership, separate effect/payload/idempotency identities, branch-local revisions, typed repair verification, unknown-outcome reconciliation, local recovery lease/CAS, and frame/effect audit packets. See [10 SHD-Inspired Durable Execution Runtime](10-shd-inspired-durable-execution-runtime.md).
-- Three-tier egress policy: `auto_redact`, `log_and_proceed`, `approve_then_egress`, plus the existing `allow / require_approval / redact / local_only / blocked` decisions.
-- Redaction engine with deterministic rules (email, phone, address, API keys, private keys, ID numbers, account numbers, user-defined keywords), before/after diff preview, irreversible replacement or tokenization, payload hash, redaction rule version stamp.
-- Independent Ingress Review Agent running in a separate process boundary, with its own prompt-injection detector and structured findings `{ patternId, evidence, evidenceHash, severity, layer }`. The review agent must NOT be the same InternalAgentAdapter that assembled the prompt.
-- Quarantine table for suspicious/malicious ingress content with restricted sandbox view, sanitize-summary user notification, and full evidence hash chain.
-- Re-sanitize loop on user rejection: each iteration is audited, stricter rules or user-specified exclusions can be applied, loop continues until approve or abort.
-- Tool Broker contract and one deterministic, read-only `knowledge.search` vertical slice through policy, owned effect, receipt, ingress review, and audit. This does not enable MCP in Alpha.
-- Basic deterministic policy engine, route decision for every run, append-only local audit trail with hash-chain fields, Data Safety Center v0, AI Governance Center v0 run risk summary.
-- Audit export endpoint (NDJSON or CSV) with policy-gated access.
+## 2. Active Documents
 
-Alpha MUST NOT include:
+1. [Ogra Product Handbook](../../ogra-product-handbook.md)
+   - product positioning, Action semantics, capability levels, scope, safety,
+     roadmap, and external messaging.
 
-- SaaS multi-tenancy, SSO/RBAC.
-- Commercial template / skill marketplace (marketplace skills are v1.0).
-- Automatic self-organizing agent recruitment (capability taxonomy and Coordinator are reserved as Alpha data structures; the recruitment decision itself is deferred).
-- Auto-download of unknown plugins or auto-pulling of GitHub repos for execution.
-- Silent cloud upload of any data.
-- Source-less long-term memory.
+2. [Python-First Action Runtime Quickstart](01-python-first-action-runtime-quickstart.md)
+   - public integration contract, runtime discovery, observable behavior,
+     protocol objects, recovery levels, conformance, and release gates.
 
-### 3.2 Beta: Personal Workspace
+Earlier Desktop-first implementation plans are superseded and are not active
+requirements for the new product direction.
 
-Beta turns the Alpha loop into a usable personal workspace and adds:
+## 3. Non-Negotiable Invariants
 
-- Richer local model management and provider metadata UI.
-- PDF import and automatic incremental indexing evaluation.
-- Audit export UX (search, filter, segmented download).
-- Quarantine sandbox view, ingress review detail panel.
-- Full re-sanitize iteration UI in the Approve-then-Egress flow.
-- Skills Market UX: discover, pin version, first-use approval, opt-in auto-update.
-- M3 Memory Center and source-linked memory projection.
-- Pipeline, Parallel, and Debate Agent Groups with bounded interval/continuous scheduling.
-- built-in and declarative local-recipe Skills lowered to pinned Tool Broker capabilities.
-- a genuinely restricted and tested LocalCommandAgentAdapter read-only profile.
+1. Python is the first stack, not the product boundary.
+2. The Ogra Protocol is language- and framework-neutral.
+3. Default integration changes no more than two to five application lines.
+4. Every intercepted external call receives an Action ID.
+5. Policy and approval complete before external send.
+6. Approval binds the exact payload, destination, policy, scope, revision, and expiry.
+7. External intent is durable before callback.
+8. Timeout or crash after send produces `unknown_outcome` unless authoritative evidence exists.
+9. Unknown outcomes are never silently replayed.
+10. Recovery behavior follows conformance-tested adapter capability.
+11. External results are untrusted until ingress review accepts them.
+12. Audit evidence is append-only, hash-linked, and excludes raw secrets by default.
+13. Product claims cover Ogra-controlled paths only.
+14. Framework checkpoints never replace the Ogra Action ledger.
 
-### 3.3 v1.0: Trusted Desktop Product
+## 4. Current Development Sequence
 
-v1.0 expands Ogra into a daily workbench:
+### Sequence 0: Contract Extraction
 
-- Skills Market with community/vendor marketplace skills, content scanning, trust verification.
-- Self-building Agent Groups (Coordinator, dynamic group assembly, confirmation UI) — decision was deferred in Alpha; v1.0 is where the implementation approach gets chosen.
-- A2A-compatible bridge.
-- Safe MCP tool integration.
-- Multi-workspace policies.
-- Reliable background jobs.
-- App updates.
-- Evaluated external local agent adapter family (Codex / Claude Code / Aider / Open Interpreter / Hermes) with visible control limitations.
+- define versioned Action and evidence schemas;
+- map reusable invariants from the TypeScript implementation;
+- preserve current fault and recovery behavior as conformance fixtures;
+- decide package ownership, license, and release process.
 
-### 3.4 Post-v1
+Exit gate: schemas and state transitions can be implemented without importing
+Electron, LangChain, or TypeScript runtime types.
 
-Post-v1 capabilities remain out of first product execution:
+### Sequence 1: Python Local Runtime
 
-- cloud sync.
-- team collaboration.
-- centralized enterprise audit center.
-- SSO/RBAC.
-- template marketplace.
-- mobile apps.
-- full SaaS.
+- implement Ogra Edge local daemon and persistent store;
+- implement Action, attempt, receipt, approval, ingress, and audit services;
+- implement SDK discovery and development auto-start;
+- implement explicit production endpoint configuration.
 
-## 4. Cross-Document Invariants
+Exit gate: a framework-neutral client can submit and inspect an Action across a
+client-process restart.
 
-Every layer must preserve these invariants:
+### Sequence 2: Generic LangChain Integration
 
-- Private data residency defaults to local; compute strategy defaults to hybrid (local phase + cloud phase) with deterministic redaction and explicit user approval on the Approve-then-Egress tier.
-- No cloud call happens before (1) policy evaluation, (2) redaction engine output when in auto-filter or approve modes, and (3) user approval when in approve mode.
-- Internal private context may enter cloud only after policy, redaction, and (when required) explicit user approval.
-- Confidential data can leave local only through the Approve-then-Egress mode after user approval of the sanitized preview. The full preview, approval, payload hash, and redaction rule version must be recorded.
-- Restricted data cannot be moved to cloud through ordinary user approval; only an explicit, policy-scoped, approval-recorded, visibly high-risk exception is possible, and only outside Alpha.
-- Every run emits a route decision and audit events.
-- Every externally visible side effect has one owning frame, a payload fingerprint, a durable state, a linked pre/post audit event, and adapter-specific recovery metadata. A graph/action checkpoint without effect outcome, ownership, dependency, revision, and idempotency evidence is not sufficient recovery state.
-- Every tool invocation resolves through the Tool Broker to an immutable, workspace-bound tool version. Agents and renderer code cannot choose transports, servers, secrets, approvals, or invoke adapters directly.
-- A Tool/Skill/MCP schema or capability change creates a new pending version and invalidates approval for new calls; an in-flight effect keeps its pinned version.
-- Every cloud call emits an egress record with the egress mode (approve / log / auto-filter), payload hash, redaction rule version, and approval id when required.
-- Every cloud response is processed by the independent Ingress Review Agent before the local runtime ingests it; an ingress finding with severity and layer is always recorded.
-- Ogra Edge is the local execution, indexing, model, policy, routing, redaction, ingress review, and audit runtime inside Ogra Desktop; it is not an optional demo layer or a separate Alpha product line.
-- RAG content and any external content (cloud response, tool output, A2A message, MCP tool result) is untrusted context and cannot override policy or system instructions.
-- Renderer never directly reads database files or API keys.
-- Main process does not execute long-running RAG/model/agent jobs directly.
-- Memory entries are source-linked, editable, and deletable.
-- Runtime frames/effects and hash-chained audit evidence are authoritative for recovery. Episodic, semantic, and procedural memory may reference and summarize that evidence but cannot replace effect outcomes, approvals, idempotency records, revisions, or authorization.
-- External agent control is phased and adapter-dependent.
-- Policy must run before retrieval, context assembly, embedding, model invocation, tool invocation, agent delegation, local agent launch, file export, memory write, audit view, and audit export.
-- Data egress modeling must explain what Ogra controls and does not control, including model payloads, embeddings, exports, telemetry/crash reports, clipboard, screenshots, browser tools, MCP tools, remote A2A agents, local agent networking, stdout, stderr, and provider-side reasoning/telemetry after the request has been sent.
-- Agent Group, M3 Memory, recipes, self-building organization, Local Agent Control Plane, A2A, and MCP must use the same policy, route decision, audit, Data Safety, and Governance primitives as Alpha.
-- The Ingress Review Agent must run in a separate process boundary from the InternalAgentAdapter that assembled the original prompt; a single compromised response must never influence its own reviewer.
+- implement the drop-in Agent factory or equivalent middleware wrapper;
+- intercept model calls and client-side tool calls;
+- correlate LangChain run/thread/checkpoint IDs without making them authoritative;
+- preserve ordinary Agent return values;
+- emit a concise governance summary and evidence reference.
 
-## 5. Acceptance Vocabulary
+Exit gate: an existing LangChain Agent gains L2 governance through a
+two-to-five-line change.
 
-The requirement keywords are:
+### Sequence 3: Recovery and Crash Lab
 
-- **MUST**: required for the named phase.
-- **SHOULD**: required unless a documented tradeoff is accepted.
-- **MAY**: optional.
-- **MUST NOT**: prohibited.
+- implement adapter capability manifests;
+- implement idempotency and outcome-query reconciliation;
+- implement unknown-outcome blocking and manual escalation;
+- implement deterministic failure injection and recording sink;
+- verify concurrent recovery lease behavior.
 
-Each layer document includes phase-specific acceptance criteria. A feature is not complete when code compiles; it is complete when the product evidence is visible in UI, recorded in local data, and verifiable through tests or demo scripts.
+Exit gate: the Crash Lab proves exact request bytes, call count, unknown state,
+and no blind replay at every required failure window.
 
-## 6. Top-Level Alpha Gates
+### Sequence 4: Ecosystem Expansion
 
-Alpha MUST pass these product gates:
+- publish LangGraph-native mapping;
+- publish TypeScript SDK and a second framework integration;
+- add provider/scanner/reconciler interfaces and conformance suites;
+- evaluate Studio only after developer adoption proves a UI need.
 
-- E2E demo imports a fixture folder, marks it Confidential, performs local RAG, applies three-tier egress (auto-filter / log / approve), runs the redaction engine, requires user approval on the Approve tier, sends a sanitized payload to a cloud model, returns a cloud response, processes it through the independent Ingress Review Agent, synthesizes a local answer, and exposes route decision, redaction preview, approval record, ingress findings, payload hash, redaction rule version, and local audit trail.
-- The default routing for non-Public data is hybrid (local preprocessing/redaction + cloud reasoning + local synthesis) unless the workspace policy overrides; the UI must surface which mode applied and why.
-- RouteDecision includes run/task id, route, high-water classification, egress mode, reasons, local/cloud steps, approval state, policy evaluation link, provider/model references when applicable, cloud payload hash/summary when applicable, redaction rule version when applicable, and audit evidence link.
-- Audit events are append-only and verifiable through `previous_hash` / `event_hash`; payload hash, policy version hash, redaction rule version, and ingress review findings are recorded when relevant.
-- RAG citations show file, snippet, retrieval method, data classification, source offset/line range, and whether the chunk entered local context, cloud context (after redaction), or neither.
-- Data Safety Center v0 shows asset map, inheritance source, recent access, recent cloud inclusion with redaction rule version and payload hash, associated policy, accessible agents/models, provider policy, redaction rule sets, ingress review findings summary, scheduled and continuous Agent Group runs, and the explicit limitation of audit scope (Ogra-controlled boundary only; cloud-internal reasoning is outside Ogra's audit).
-- AI Governance Center v0 shows run risk level, risk reasons, required approvals, status, incidents, policy evaluations, egress approval queue, ingress incident records, scheduled run risk summaries, and per-agent ingress/egress statistics.
-- Renderer and agents cannot read API keys; secret use writes audit events; provider registry records data-retention/training/region/ZDR/file-upload/tool-calling/streaming-log risk metadata when known.
-- The redaction engine has version-stamped rule sets, deterministic before/after diff preview, irreversible replacement or tokenization, payload hash, and audit linkage.
-- The Ingress Review Agent produces structured findings `{ patternId, evidence, evidenceHash, severity, layer }`, runs in a process boundary separate from the InternalAgentAdapter, and writes findings to audit. Suspicious or malicious findings land in a quarantine table and surface in the UI as an incident with a restricted sandbox view.
-- The Approve-then-Egress tier exposes a re-sanitize loop on user rejection; each iteration is audited with a stricter rule version and a new preview until the user approves or aborts.
-- The InternalAgentAdapter executes a Plan + ReAct loop with strong persistence, an enforced sanitize/policy/route/audit middleware chain, and per-step recovery on crash or interruption.
-- Interrupted runs recover through the durable execution contract in plan 10: acquire a local lease, load a complete recovery capsule, reconcile unknown external outcomes, re-evaluate policy/approval/revisions, verify a typed recovery decision, and only then resume, retry, compensate, replan, or escalate.
-- The Tool Broker `knowledge.search` slice validates canonical arguments, derives workspace scope from Core, and records a pinned descriptor, policy decision, owned effect, receipt, ingress result, and accepted Observation.
-- OpenAI-compatible endpoint is callable only after policy allows it; Restricted cloud calls are blocked in Alpha; Confidential cloud calls are blocked in Alpha unless the workspace policy explicitly allows the Approve-then-Egress tier and the user has approved the sanitized preview.
-- Renderer does not directly access SQLite or privileged local resources; Main does not execute long-running RAG/model/agent jobs inline.
+Exit gate: a second language or framework uses the same protocol and passes the
+same Action conformance tests.
 
-## 7. Current Development Sequence
+## 5. Explicit Non-Goals for the First Release
 
-Development proceeds in dependency order. Later product surfaces MUST NOT be
-used to hide an incomplete earlier runtime layer.
+- custom Agent loop or graph runtime;
+- custom checkpointer;
+- Ogra Desktop as the primary distribution;
+- RAG and knowledge-base product;
+- M3 Memory;
+- Agent Groups;
+- Skills Market;
+- self-building organizations;
+- full MCP/A2A transport;
+- SaaS multi-tenancy;
+- custom prompt-injection model;
+- validator marketplace.
 
-### Sequence 0: Restore a Trustworthy Baseline
+## 6. Release Gates
 
-- install and lock the desktop dependencies in a writable/reproducible environment;
-- run typecheck, unit, integration, security, and current E2E suites;
-- align tests and implementation with the current hybrid-default contract, especially Confidential Approve-then-Egress behavior;
-- connect `OgraCore`, `RunService`, `InternalAgentAdapter`, and SQLite through one real run path;
-- remove simulated model completion and synthetic approval state from the production path.
-
-Exit gate: one real local run is persisted end to end and the baseline suite is green.
-
-### Sequence 1: Durable Data and Runtime Kernel
-
-- implement plan 10 Milestone 0 and Milestone 1;
-- add frame/effect/repair/lease migrations and transactional service APIs;
-- upgrade new audit events to the versioned canonical envelope hash in plan 02,
-  retain legacy verification, and test tampering of event id, hash-envelope
-  version, and all other non-payload envelope fields;
-- add adapter recovery capability declarations;
-- define the plan 11 Tool Broker boundary, immutable descriptor/version/binding
-  contract, and a mocked effect adapter; do not enable MCP;
-- add crash injection, unknown-outcome reconciliation, and audit-index consistency tests.
-
-Exit gate: a fresh process resumes an idempotent mocked effect without duplicate
-physical application and blocks stale, dependency-invalid, or sibling-owned repair.
-
-### Sequence 2: Alpha Hybrid Trust Loop
-
-- implement deterministic redaction rule versions and payload fingerprints;
-- implement real approval persistence and bind approval to payload/rule revision;
-- implement three-tier egress and re-sanitize iterations;
-- execute a policy-gated cloud adapter call through the durable effect protocol;
-- implement the independent ingress review process and quarantine path;
-- implement the read-only `knowledge.search` Tool Broker vertical slice and route
-  its result through the same independent ingress boundary;
-- synthesize locally only after accepted ingress review.
-
-Exit gate: the Confidential Alpha fixture completes the full hybrid loop and
-survives crash points before egress, after external response, and before local commit.
-
-### Sequence 3: Evidence and Governance UI
-
-- replace demo approval and placeholder overview data with real read models;
-- surface frame/effect state, interrupted/unknown state, recovery decision, and audit packet;
-- complete Data Safety and AI Governance views for egress, ingress, incidents, approvals, and recovery;
-- add policy-gated audit export and UI E2E coverage.
-
-Exit gate: every important runtime claim is visible in UI and traceable to local evidence.
-
-### Sequence 4: Memory Projection
-
-- implement the L0-L4 authority model in plan 10;
-- generate episodic memories from terminal audit packets;
-- propose semantic/procedural memories with user confirmation and frame/effect/event provenance;
-- add stale-source indicators and prohibit memory from authorizing recovery or effects.
-
-Exit gate: a later run can use source-linked memory while current runtime state,
-policy, approval, and revisions remain authoritative.
-
-### Sequence 5: Agent Group, Skills, and Scheduling
-
-- map Pipeline, Parallel, and Debate branches to frame subtrees;
-- add deterministic merge/Judge steps and sibling-effect isolation;
-- implement built-in/declarative local-recipe Skill manifests by lowering them
-  to pinned Tool Broker versions and linking invocation audit to owned effects;
-- add interval/continuous scheduling with lifetime bounds and recovery leases.
-
-Exit gate: branch failure can be repaired without touching safe sibling effects,
-and every scheduled iteration remains bounded, recoverable, and auditable.
-
-### Sequence 6: External Interoperability
-
-- grade LocalCommand and future external adapters by recovery and audit capability;
-- add one fixed local stdio MCP tools-only fixture, then hardened Streamable
-  HTTP/OAuth, through the plan 11 policy, binding, effect, ingress, and audit contract;
-- keep A2A in the AgentAdapter/delegation path while reusing the same execution envelope;
-- evaluate external durable workflow substrates only when the native runtime has measured scaling or reliability limits.
-
-Exit gate: no external adapter weakens Ogra's policy, effect, recovery, or audit contract.
-
-## 8. Top-Level Beta/v1 Gates
-
-Beta MUST pass these product gates:
-
-- Audit export UX supports search, filter, segmented download, and policy-gated access.
-- Quarantine sandbox view, ingress review detail panel, and full re-sanitize iteration UI in the Approve-then-Egress flow.
-- Skills Market UX: discover, pin version, first-use approval, opt-in auto-update.
-- Memory Center supports source-linked episodic memory, confirmed semantic/procedural memory, edit/delete/tombstone, memory policy, and memory audit events.
-- Pipeline Agent Group is bounded, cancellable, policy-aware, and auditable per step.
-- Local recipes can be saved and reused.
-- LocalCommandAgentAdapter read-only mode is supervised and audited.
-- Data Safety Center includes memory and embedding index assets.
-
-v1.0 MUST pass these product gates:
-
-- Skills Market supports community/vendor marketplace skills with content scanning, trust verification, and user approval gate.
-- Self-building Agent Groups end to end (Coordinator, dynamic group assembly, confirmation UI) — implementation approach decided at v1.0 kickoff.
-- A2A-compatible bridge and safe MCP tool access are implemented through policy, permissions, route decisions, and audit.
-- At least one external local agent adapter family is evaluated and graded with visible control limitations.
-- Agent Group is the main work surface with Pipeline, Parallel, and Debate modes, including the user-confirmed self-building flow.
-- Data Safety Center includes workspace, knowledge base, folder, file, memory, embedding index, recipe, agent group, artifact, MCP, A2A, local agent adapter, and skill assets.
-- AI Governance Center includes Agent Group runs, per-step risk, memory approvals, self-building approvals, local agent incidents, MCP/A2A incidents, adapter audit levels, scheduled and continuous run risk summaries.
+- under-five-minute time to first governed run;
+- two-to-five-line default integration;
+- sync and async compatibility;
+- visible coverage and bypass limitations;
+- deterministic approval-binding rejection tests;
+- ingress reviewer fail-closed tests;
+- crash-window and unknown-outcome tests;
+- audit-chain verification;
+- no raw secrets in evidence by default;
+- root license, contribution, security, and versioning policies;
+- trusted package publishing and compatibility matrix.
