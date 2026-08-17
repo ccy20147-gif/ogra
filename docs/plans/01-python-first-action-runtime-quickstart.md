@@ -56,9 +56,9 @@ Development auto-start must expose:
 - persistent data directory;
 - protocol version;
 - health and migration state;
-- actual capability level.
+- actual governance, execution, recovery, and isolation profiles.
 
-Auto-start is a convenience process boundary, not L4 security isolation.
+Auto-start is a development process boundary, not hardened security isolation.
 
 Production mode requires explicit endpoint, credentials, lifecycle ownership,
 and health policy. It must never silently fall back to an in-process runtime.
@@ -90,16 +90,21 @@ high-signal summary through logging, callback events, or the configured output
 channel:
 
 ```text
-OGRA governed | model_calls=1 | tool_actions=2 | redacted=3 |
-approvals=1 | ingress=clean | audit=verified | run=ogra://run_123
+OGRA governed | destination=openai:gpt-4.1-mini + tools:1 |
+classification=public | policy=allowed | execution=inline |
+recovery=unknown_if_interrupted | isolation=development |
+coverage=model+client_tools | ingress=clean |
+audit=chain_valid | anchor=none | run=run_123
+inspect: ogra run show run_123
 ```
 
-When no redaction or approval is needed, the summary reports the actual result
-rather than fabricating activity:
+When redaction or approval is needed, the summary reports the actual activity:
 
 ```text
-OGRA governed | model_calls=1 | tool_actions=0 | policy=allowed |
-ingress=clean | audit=verified | run=ogra://run_124
+OGRA governed | model_calls=1 | tool_actions=2 | redacted=3 |
+approvals=1 | execution=inline | ingress=clean |
+audit=chain_valid | anchor=none | run=run_124
+inspect: ogra run show run_124
 ```
 
 Expandable evidence includes:
@@ -133,11 +138,13 @@ For every intercepted external call, the runtime must:
 
 Reviewer unavailability fails closed in governed production mode.
 
-## 7. Recovery Capability Levels
+## 7. Recovery Capabilities
 
-### Read-Only or Pure
+### Conformance-Proven Replay Safe
 
-May be replayed under the current policy and revision.
+May be replayed under the current policy and revision. A `read_only` label alone
+is insufficient because calls can still incur cost, rate limits, telemetry, or
+nondeterministic results.
 
 ### Idempotent
 
@@ -177,9 +184,9 @@ Exact decorator names are not fixed by this contract. The requirements are:
 - a stable identity derived from canonical Action inputs;
 - an outcome query that returns authoritative evidence;
 - declared duplicate and retry risks;
-- conformance tests before advertising L3.
+- conformance tests before advertising recoverability.
 
-Tools without this declaration still receive L2 governance, durable intent,
+Tools without this declaration still receive governed handling, durable intent,
 explicit unknown state, and no blind replay.
 
 ## 9. Crash Lab
@@ -278,10 +285,11 @@ SDKs. Python objects and LangChain state are projections, not protocol authority
 
 ### Evidence
 
-- audit chain verifies from persisted events;
+- audit chain validates from persisted events, with anchor scope reported;
 - evidence is available across client-process restart;
 - raw secrets are absent by default;
-- Crash Lab call count agrees with Ogra attempts and receipts.
+- Crash Lab call count, Attempts, and receipts match the failure-window truth
+  table, including explicit unknown gaps.
 
 ## 13. Non-Goals
 

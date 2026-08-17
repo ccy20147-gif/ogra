@@ -125,27 +125,41 @@ An Action may represent:
 
 ## 2.2 Authoritative States
 
-The minimum external-effect state model is:
+Action, execution attempt, ingress, and recovery decision are separate state
+machines. The minimum Action lifecycle is:
 
 ```text
-planned
-  -> awaiting_approval
-  -> in_flight
-  -> received
-  -> committed
-
-in_flight
-  -> unknown_outcome
-
-received
-  -> quarantined
-
-unknown_outcome
-  -> reconciled
-  -> safe_retry
-  -> manual_review
-  -> failed
+proposed -> authorized -> executing -> result_received -> committed
+proposed -> blocked
+authorized -> cancelled
+executing -> failed_authoritative | unknown_outcome
+result_received -> quarantined | review_unavailable
+review_unavailable -> result_received
+quarantined -> committed | failed_authoritative
+unknown_outcome -> executing | committed | failed_authoritative
 ```
+
+Each execution attempt has its own lifecycle:
+
+```text
+prepared -> dispatch_authorized | cancelled | failed_local
+dispatch_authorized -> acknowledged | cancelled | unknown
+acknowledged -> response_received | failed_authoritative | unknown
+```
+
+`reconcile`, `retry_with_same_key`, `compensate`, `manual_review`, and `stop`
+are recovery decisions, not Action terminal states. An inline SDK that obtained a
+dispatch grant but did not persist an authoritative acknowledgement before its
+lease expired must be treated as unknown.
+
+An unknown Action may become committed or failed only after authoritative
+reconciliation. A retry creates a new Attempt and requires a verified recovery
+decision; uncertainty itself is never retry authority.
+
+Local exceptions, transport errors, HTTP success, or provider request IDs are
+not authoritative effect outcomes by default. Receipts identify their kind,
+authority, and external effect status; only authoritative completion or failure
+evidence may resolve the Action.
 
 Terminal names may evolve, but the following meanings may not:
 
@@ -165,6 +179,10 @@ supports_outcome_query
 supports_cancel
 supports_compensation
 compensation_is_lossless
+idempotency_scope
+idempotency_valid_until
+idempotency_conflict_behavior
+outcome_retention_until
 duplicate_effect_risk
 retry_cost_risk
 audit_level
@@ -172,6 +190,9 @@ audit_level
 
 Ogra derives recovery behavior from declared and conformance-tested capability,
 not from optimistic assumptions.
+
+Capability is operation-scoped. A provider may be outcome-queryable for one
+operation and non-idempotent and non-queryable for another.
 
 ---
 
@@ -280,12 +301,16 @@ configured. Production deployment remains explicit.
 Normal framework return values remain unchanged. Ogra adds a concise summary:
 
 ```text
-OGRA governed | model_calls=1 | tool_actions=2 | redacted=3 |
-approvals=1 | ingress=clean | audit=verified | run=ogra://run_123
+OGRA governed | destination=openai:gpt-4.1-mini + tools:1 |
+classification=public | policy=allowed | execution=inline |
+recovery=unknown_if_interrupted | isolation=development |
+coverage=model+client_tools | ingress=clean |
+audit=chain_valid | anchor=none | run=run_123
+inspect: ogra run show run_123
 ```
 
-The summary must link to expandable evidence rather than printing internal state
-machine detail into the main application output.
+The summary must provide a working CLI or API evidence reference rather than an
+undefined custom URI or internal state-machine dump.
 
 ## 4.3 Default Interception Scope
 
@@ -320,47 +345,46 @@ count so the user can verify redaction and replay behavior.
 
 ---
 
-# 5. Capability Levels
+# 5. Capability Profiles
 
-Ogra communicates capability in levels so few-line adoption does not imply
-guarantees the runtime cannot provide.
+Capability is reported across independent dimensions. Ogra must not compress
+these into a single maturity level.
 
-## L1: Observe
+## 5.1 Governance Profile
 
-- identify Ogra-controlled model and tool calls;
-- record timing, destination, hashes, and high-level results;
-- do not block or modify execution.
+- `observe`: record controlled boundary activity without enforcement;
+- `govern`: apply policy, redaction, approval, ingress review, and evidence.
 
-## L2: Govern
+The default few-line integration uses `govern` on intercepted paths.
 
-- deterministic policy and data classification;
-- redact, approve, allow, or block before egress;
-- review ingress before Agent observation;
-- bind evidence to policy and payload versions;
-- persist intent and terminal or unknown state.
+## 5.2 Execution Profile
 
-L2 is the default value available to ordinary model and tool integrations.
+- `inline`: the application SDK executes the provider or tool callback after an
+  Edge authorization; a crash after authorization may leave the outcome unknown;
+- `edge_mediated`: Edge or a supervised worker owns callback execution and
+  receipt persistence.
 
-## L3: Recover
+Edge-mediated execution improves supervision but does not create exactly-once
+semantics. Safe recovery still depends on provider capability.
 
-- reuse stable idempotency identity;
-- query provider outcome or authoritative receipt;
-- reconcile unknown outcomes;
-- safely retry, compensate, or escalate under verified conditions;
-- use recovery leases and revision checks.
+## 5.3 Recovery Capabilities
 
-L3 requires adapter-declared and conformance-tested recovery capability. When a
-provider lacks it, Ogra still persists `unknown_outcome` and blocks blind replay.
+Each operation declares and proves any combination of:
 
-## L4: Isolate
+- `replay_safe` proven by conformance;
+- `idempotent` with stable identity;
+- `outcome_query` with authoritative evidence;
+- `compensatable` with typed, scoped compensation.
 
-- supervised Edge process;
-- separate credentials and least privilege;
-- OS/container isolation appropriate to the threat model;
-- controlled network and filesystem boundaries;
-- hardened remote transport and secret handling.
+When none applies, Ogra persists `unknown_outcome` and blocks blind replay.
 
-An automatically started development daemon is not L4.
+## 5.4 Isolation Profile
+
+- `development`: automatically started local daemon;
+- `supervised`: explicit lifecycle, endpoint, credentials, and health policy;
+- `hardened`: appropriate OS/container, network, filesystem, and secret boundaries.
+
+A development daemon is a process convenience, not a security-isolation claim.
 
 ---
 
@@ -451,6 +475,10 @@ Approval must bind at least:
 A payload, destination, policy, scope, revision, or time change invalidates the
 approval and requires re-evaluation.
 
+An ordinary approval authorizes exactly one dispatch Attempt. A recovery retry
+requires a new recovery approval bound to the new Attempt, original sanctioned
+payload, stable identity, and verified recovery decision.
+
 ## 7.3 Ingress Review
 
 Every governed model response, tool result, Agent message, or remote result is
@@ -498,8 +526,13 @@ ledger.
 
 ## 8.2 Recovery Rules
 
-- Pure or read-only work may be replayed under current policy.
+- Work may be replayed automatically only when conformance proves it
+  `replay_safe`; a read-only label alone is insufficient because calls may incur
+  cost, rate limits, telemetry, or nondeterministic results.
 - Idempotent work may be retried only with the verified stable identity.
+- Idempotent retry also requires a valid provider/account/operation scope,
+  unexpired deduplication window, matching canonical payload, defined conflict
+  behavior, and sufficient outcome retention.
 - Queryable work must reconcile before retry.
 - Compensatable work requires explicit, scoped compensation authority.
 - Non-idempotent and non-queryable work remains `unknown_outcome` until a user or
@@ -508,6 +541,16 @@ ledger.
   recovery to fail closed.
 
 Ogra does not make a universal exactly-once claim.
+
+## 8.3 Payload Retention and Replay
+
+Audit evidence and replay material are separate. Evidence stores bounded metadata
+and hashes by default. When safe retry requires the exact sanctioned payload,
+Edge may retain it only as an explicitly replayable, authenticated-encrypted
+payload reference with a key identity, retention class, expiry, and audit trail.
+
+A hash-only payload proves identity but cannot be replayed. Expired, deleted, or
+undecryptable payload material automatically removes replay eligibility.
 
 ---
 
@@ -595,7 +638,9 @@ The first release does not require:
 
 ## 11.4 Evidence
 
-- Audit chain verification is deterministic.
+- Audit-chain validation is deterministic and reports external anchor status.
+- Without an expected or externally anchored head, a valid local chain does not
+  prove that tail events were never removed.
 - Evidence contains no raw secrets by default.
 - The recording sink can prove exact test bytes and call count.
 - Claims distinguish Ogra-controlled calls from system-wide behavior.
@@ -609,13 +654,16 @@ The first release does not require:
 Start with one Python distribution and optional extras:
 
 ```text
-ogra
-ogra[langchain]
-ogra[sqlite]
-ogra[server]
+ogra                 # SDK, CLI, local Edge, SQLite, protocol projection
+ogra[langchain]      # adds the LangChain integration
+ogra[conformance]    # adds Crash Lab and adapter authoring fixtures
+ogra[server]         # adds explicitly hosted production-server dependencies
 ```
 
-Do not fragment the first release into many packages. A discovery shim such as
+`ogra[langchain]` must include everything required for the development
+Quickstart, including local Edge and SQLite through the base distribution.
+
+Do not fragment the first release into many distributions. A discovery shim such as
 `langchain-ogra` may be considered after the public API stabilizes.
 
 ## 12.2 Extension Providers
@@ -682,12 +730,12 @@ redacted, approved, committed, quarantined, or held.
 ## 14.2 False Security
 
 Few-line integration can create the impression of universal interception. The
-runtime must expose coverage, bypass paths, reviewer mode, and capability level.
+runtime must expose coverage, bypass paths, reviewer mode, and capability profiles.
 
 ## 14.3 Recovery Overclaim
 
-Ogra cannot manufacture idempotency or outcome queries. Capability levels and
-fallback states must be visible in APIs and product copy.
+Ogra cannot manufacture idempotency or outcome queries. Execution ownership,
+recovery capabilities, and fallback states must be visible in APIs and product copy.
 
 ## 14.4 Framework Coupling
 
@@ -708,7 +756,7 @@ required to prove the generic Action contract.
 
 - freeze Action and evidence schemas;
 - map existing TypeScript invariants;
-- define capability levels and conformance fixtures;
+- define capability profiles and conformance fixtures;
 - decide license and package ownership.
 
 ## Alpha: Python-First Generic Integration
@@ -716,14 +764,14 @@ required to prove the generic Action contract.
 - local Edge runtime;
 - Python SDK;
 - LangChain integration;
-- L2 governance for model and tool calls;
+- governed handling for model and tool calls;
 - persistent unknown-outcome safety;
 - evidence verifier;
 - generic Crash Lab.
 
 ## Beta: Recovery Ecosystem
 
-- L3 adapter manifests and conformance;
+- recovery-capability manifests and conformance;
 - outcome query, idempotency, and compensation providers;
 - LangGraph-native mapping;
 - TypeScript SDK and a second framework integration;
@@ -731,7 +779,7 @@ required to prove the generic Action contract.
 
 ## v1: Hardened Multi-Stack Runtime
 
-- L4 deployment profile;
+- hardened deployment profile;
 - hardened remote Edge transport and secrets;
 - Ogra Studio;
 - managed Ogra Cloud option;
@@ -756,7 +804,7 @@ Recommended proof points:
 1. Generic LangChain Quickstart on an existing Agent.
 2. Expandable evidence from a normal model/tool run.
 3. Generic Crash Lab proving unknown-outcome and replay behavior.
-4. Capability matrix showing which adapters support L2/L3/L4.
+4. Capability matrix showing governance, execution, recovery, and isolation profiles.
 
 Do not lead with Desktop, RAG, Memory, Agent Group, governance centers, or a
 specific business scenario.

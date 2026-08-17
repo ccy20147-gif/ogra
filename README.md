@@ -8,6 +8,7 @@ for **Ogra / Ogra Edge**.
 - [Ogra Product Handbook](ogra-product-handbook.md)
 - [Development Requirements Index](docs/plans/00-development-requirements-index.md)
 - [Python-First Action Runtime Quickstart](docs/plans/01-python-first-action-runtime-quickstart.md)
+- [Action Runtime Implementation Roadmap](docs/plans/02-action-runtime-implementation-roadmap.md)
 
 The handbook is the highest-priority product and technical guidance. Earlier
 Desktop-first plans are superseded.
@@ -54,25 +55,32 @@ daemon. Production deployment uses an explicit endpoint and supervised runtime.
 A normal run keeps the framework return value and emits a concise summary:
 
 ```text
-OGRA governed | model_calls=1 | tool_actions=2 | redacted=3 |
-approvals=1 | ingress=clean | audit=verified | run=ogra://run_123
+OGRA governed | destination=openai:gpt-4.1-mini + tools:1 |
+classification=public | policy=allowed | execution=inline |
+recovery=unknown_if_interrupted | isolation=development |
+coverage=model+client_tools | ingress=clean |
+audit=chain_valid | anchor=none | run=run_123
+inspect: ogra run show run_123
 ```
 
 No business-specific scenario is required. A separate generic Crash Lab proves
 fault behavior and adapter recovery capability.
 
-## Capability Levels
+## Capability Profiles
 
-| Level | Meaning |
+Ogra reports independent profiles instead of one misleading capability ladder:
+
+| Dimension | Values |
 |---|---|
-| L1 Observe | Record controlled model/tool boundary activity without enforcement. |
-| L2 Govern | Apply policy, redaction, approval, ingress review, and evidence. |
-| L3 Recover | Reconcile or safely retry through verified adapter capabilities. |
-| L4 Isolate | Run with hardened process, credential, network, and filesystem boundaries. |
+| Governance | `observe` or `govern` |
+| Execution | `inline` or `edge_mediated` |
+| Recovery | operation-scoped `replay_safe`, `idempotent`, `outcome_query`, `compensatable` |
+| Isolation | `development`, `supervised`, or `hardened` |
 
-Ordinary integrations receive L2 value. L3 requires provider support for
-idempotency, outcome query, or compensation. When an outcome cannot be proven,
-Ogra persists `unknown_outcome` and blocks blind replay.
+The few-line integration defaults to governed handling on Ogra-controlled paths.
+Recovery depends on who executes the call and which provider capabilities have
+passed conformance tests. When an outcome cannot be proven, Ogra persists
+`unknown_outcome` and blocks blind replay.
 
 ## Product Surfaces
 
@@ -112,7 +120,9 @@ custom Agent loop, SaaS multi-tenancy, or a validator marketplace.
 ├── docs/
 │   └── plans/
 │       ├── 00-development-requirements-index.md
-│       └── 01-python-first-action-runtime-quickstart.md
+│       ├── 01-python-first-action-runtime-quickstart.md
+│       ├── 02-action-runtime-implementation-roadmap.md
+│       └── 03-09 milestone requirement documents
 ├── ogra-desktop/        # existing TypeScript semantic reference
 └── archive/             # historical context only
 ```

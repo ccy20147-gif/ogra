@@ -32,12 +32,25 @@ change to an ordinary LangChain Agent.
 ## 2. Active Documents
 
 1. [Ogra Product Handbook](../../ogra-product-handbook.md)
-   - product positioning, Action semantics, capability levels, scope, safety,
+   - product positioning, Action semantics, capability profiles, scope, safety,
      roadmap, and external messaging.
 
 2. [Python-First Action Runtime Quickstart](01-python-first-action-runtime-quickstart.md)
    - public integration contract, runtime discovery, observable behavior,
-     protocol objects, recovery levels, conformance, and release gates.
+     protocol objects, recovery capabilities, conformance, and release gates.
+
+3. [Action Runtime Implementation Roadmap](02-action-runtime-implementation-roadmap.md)
+   - milestone order, dependency graph, public release boundary, and requirement
+     document ownership.
+
+4. Milestone requirements:
+   - [Protocol and State Machine](03-protocol-and-state-machine-requirements.md)
+   - [Edge Durable Kernel](04-edge-durable-kernel-requirements.md)
+   - [Governance, Evidence, and Data Handling](05-governance-evidence-and-data-handling-requirements.md)
+   - [Python SDK and Runtime Discovery](06-python-sdk-runtime-discovery-requirements.md)
+   - [LangChain Integration](07-langchain-integration-requirements.md)
+   - [Recovery, Crash Lab, and Conformance](08-recovery-crash-lab-and-conformance-requirements.md)
+   - [Release and Cross-Language Ecosystem](09-release-and-cross-language-ecosystem-requirements.md)
 
 Earlier Desktop-first implementation plans are superseded and are not active
 requirements for the new product direction.
@@ -58,60 +71,20 @@ requirements for the new product direction.
 12. Audit evidence is append-only, hash-linked, and excludes raw secrets by default.
 13. Product claims cover Ogra-controlled paths only.
 14. Framework checkpoints never replace the Ogra Action ledger.
+15. Inline and Edge-mediated execution expose different guarantees.
+16. Recovery, execution, governance, and isolation are independent profiles.
+17. Replayable payload storage is encrypted and explicitly retained; hash-only
+    storage is never treated as replayable.
 
 ## 4. Current Development Sequence
 
-### Sequence 0: Contract Extraction
+The authoritative sequence and exit gates are maintained in the
+[Action Runtime Implementation Roadmap](02-action-runtime-implementation-roadmap.md).
 
-- define versioned Action and evidence schemas;
-- map reusable invariants from the TypeScript implementation;
-- preserve current fault and recovery behavior as conformance fixtures;
-- decide package ownership, license, and release process.
-
-Exit gate: schemas and state transitions can be implemented without importing
-Electron, LangChain, or TypeScript runtime types.
-
-### Sequence 1: Python Local Runtime
-
-- implement Ogra Edge local daemon and persistent store;
-- implement Action, attempt, receipt, approval, ingress, and audit services;
-- implement SDK discovery and development auto-start;
-- implement explicit production endpoint configuration.
-
-Exit gate: a framework-neutral client can submit and inspect an Action across a
-client-process restart.
-
-### Sequence 2: Generic LangChain Integration
-
-- implement the drop-in Agent factory or equivalent middleware wrapper;
-- intercept model calls and client-side tool calls;
-- correlate LangChain run/thread/checkpoint IDs without making them authoritative;
-- preserve ordinary Agent return values;
-- emit a concise governance summary and evidence reference.
-
-Exit gate: an existing LangChain Agent gains L2 governance through a
-two-to-five-line change.
-
-### Sequence 3: Recovery and Crash Lab
-
-- implement adapter capability manifests;
-- implement idempotency and outcome-query reconciliation;
-- implement unknown-outcome blocking and manual escalation;
-- implement deterministic failure injection and recording sink;
-- verify concurrent recovery lease behavior.
-
-Exit gate: the Crash Lab proves exact request bytes, call count, unknown state,
-and no blind replay at every required failure window.
-
-### Sequence 4: Ecosystem Expansion
-
-- publish LangGraph-native mapping;
-- publish TypeScript SDK and a second framework integration;
-- add provider/scanner/reconciler interfaces and conformance suites;
-- evaluate Studio only after developer adoption proves a UI need.
-
-Exit gate: a second language or framework uses the same protocol and passes the
-same Action conformance tests.
+The public Alpha gate requires both the generic governed Quickstart and the real
+Crash Lab recovery proof. Internal milestones may land separately, but neither
+data-egress governance nor recovery may be represented as the complete product
+while the other remains a mock.
 
 ## 5. Explicit Non-Goals for the First Release
 
