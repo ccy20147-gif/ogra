@@ -1,0 +1,79 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/capability-manifest.schema.json",
+  "title": "CapabilityManifest",
+  "description": "Operation-scoped declaration of recovery capabilities. A manifest claim never enables recovery until its conformance result is trusted by Edge (PROT-021).",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "manifest_id": { "type": "string", "pattern": "^mft_[0-9a-hjkmnp-tv-z]{26}$" },
+    "adapter_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "adapter_kind": { "enum": ["model", "tool", "delegation", "storage", "reconciler", "other"] },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "operation_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "recovery": {
+            "type": "object",
+            "properties": {
+              "capabilities": {
+                "type": "array",
+                "items": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/RecoveryCapability" },
+                "uniqueItems": true,
+                "minItems": 1
+              },
+              "idempotency_scope": { "type": "string", "minLength": 1, "maxLength": 256 },
+              "idempotency_valid_until": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+              "idempotency_conflict_behavior": { "enum": ["dedupe", "reject", "error"] },
+              "outcome_retention_until": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+              "duplicate_effect_risk": { "enum": ["none", "low", "medium", "high"] },
+              "retry_cost_risk": { "enum": ["none", "low", "medium", "high"] },
+              "audit_level": { "enum": ["metadata", "content_hash", "full"] },
+              "conformance_refs": {
+                "type": "array",
+                "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "capabilities", "duplicate_effect_risk", "retry_cost_risk", "audit_level"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": ["operation_id", "recovery"],
+        "additionalProperties": false
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "declared_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "conformance": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "conformance_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "status": { "enum": ["trusted", "untrusted", "pending"] },
+          "authority": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "result_ref": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "required": ["conformance_id", "status", "authority"],
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Extension point: preserved verbatim, never interpreted by core logic.",
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "protocol_version", "manifest_id", "adapter_id", "adapter_kind",
+    "operations", "declared_at", "conformance"
+  ],
+  "additionalProperties": false
+}

@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/external-receipt.schema.json",
+  "title": "ExternalReceipt",
+  "description": "What is known about the external effect of one Attempt. HTTP success and provider request IDs are advisory unless the adapter contract proves stronger semantics (PROT-028). Only authoritative completion or failure evidence may resolve an executing or unknown Action (PROT-029).",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "receipt_id": { "type": "string", "pattern": "^rec_[0-9a-hjkmnp-tv-z]{26}$" },
+    "attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "receipt_kind": {
+      "enum": ["transport_ack", "provider_acceptance", "effect_completion", "failure", "result"]
+    },
+    "authority": { "enum": ["advisory", "authoritative"] },
+    "effect_status": { "enum": ["unknown", "accepted", "completed", "failed"] },
+    "execution_profile": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ExecutionProfile" },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "account": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "operation": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "request_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+      },
+      "required": ["provider", "account", "operation", "request_id"],
+      "additionalProperties": false
+    },
+    "content_ref": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/payload-ref.schema.json" },
+    "received_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "retention_until": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "evidence_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "uniqueItems": true
+    },
+    "provider_details": {
+      "type": "object",
+      "description": "Extension point: preserved verbatim, never interpreted by core logic.",
+      "additionalProperties": true
+    }
+  },
+  "required": [
+    "protocol_version", "receipt_id", "attempt_id", "action_id", "receipt_kind",
+    "authority", "effect_status", "execution_profile", "provider", "received_at"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "properties": { "receipt_kind": { "const": "transport_ack" } } },
+      "then": {
+        "properties": {
+          "authority": { "const": "advisory" },
+          "effect_status": { "const": "unknown" }
+        },
+        "description": "A transport acknowledgement says nothing about the external effect; it can never be authoritative (PROT-028)."
+      }
+    },
+    {
+      "if": { "properties": { "receipt_kind": { "const": "provider_acceptance" } } },
+      "then": {
+        "properties": { "effect_status": { "enum": ["unknown", "accepted"] } },
+        "description": "Provider acceptance proves at most acceptance, never completion."
+      }
+    },
+    {
+      "if": { "properties": { "receipt_kind": { "const": "effect_completion" } } },
+      "then": {
+        "properties": {
+          "authority": { "const": "authoritative" },
+          "effect_status": { "const": "completed" }
+        },
+        "description": "Effect completion is by definition authoritative; advisory completion is meaningless."
+      }
+    },
+    {
+      "if": { "properties": { "receipt_kind": { "const": "failure" } } },
+      "then": {
+        "properties": {
+          "authority": { "const": "authoritative" },
+          "effect_status": { "const": "failed" }
+        },
+        "description": "A failure receipt is by definition authoritative."
+      }
+    },
+    {
+      "if": { "properties": { "receipt_kind": { "const": "result" } } },
+      "then": {
+        "properties": { "authority": { "const": "authoritative" } },
+        "description": "Result content is evidence only when authoritative."
+      }
+    }
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/recovery-decision.schema.json",
+  "title": "RecoveryDecision",
+  "description": "Governed recovery decision record. Recovery decisions are NOT Action terminal states. Every decision includes evidence, actor, revision, lease token, and reason.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "decision_id": { "type": "string", "pattern": "^dec_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "state": {
+      "enum": ["pending", "decided", "executed", "superseded", "expired", "cancelled"]
+    },
+    "decision": {
+      "enum": ["reconcile", "retry_with_same_key", "compensate", "manual_review", "stop"]
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "actor": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" },
+    "revision": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/RevisionRef" },
+    "lease_token": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/LeaseToken" },
+    "reason": { "type": "string", "minLength": 1, "maxLength": 512 },
+    "decided_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "expires_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "target_attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "supersedes": { "type": "string", "pattern": "^dec_[0-9a-hjkmnp-tv-z]{26}$" }
+  },
+  "required": [
+    "protocol_version", "decision_id", "action_id", "attempt_id", "state",
+    "decision", "evidence_refs", "actor", "revision", "lease_token", "reason",
+    "decided_at"
+  ],
+  "additionalProperties": false
+}

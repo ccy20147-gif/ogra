@@ -1,0 +1,84 @@
+{
+  "kind": "reattachment",
+  "description": "Caller-stable submission_key re-attachment (PROT-030, PROT-031): a repeated key with an identical canonical request returns the existing identity; a conflicting canonical request is rejected.",
+  "vectors": [
+    {
+      "id": "re-same-key-same-request-reattaches",
+      "existing": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "submission_key": "tool:weather:7f83b1657ff1fc53b92dc18148a1d65d",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": { "provider": "weather-api", "operation": "get_forecast" }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "new": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "submission_key": "tool:weather:7f83b1657ff1fc53b92dc18148a1d65d",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": { "provider": "weather-api", "operation": "get_forecast" }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": { "result": "same_identity" }
+    },
+    {
+      "id": "re-same-key-different-request-conflicts",
+      "existing": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "submission_key": "tool:weather:7f83b1657ff1fc53b92dc18148a1d65d",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": { "provider": "weather-api", "operation": "get_forecast" }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "new": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "submission_key": "tool:weather:7f83b1657ff1fc53b92dc18148a1d65d",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": { "provider": "weather-api", "operation": "get_forecast" },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": { "result": "conflict" }
+    },
+    {
+      "id": "re-json-key-order-insensitive",
+      "existing": { "b": 2, "a": 1 },
+      "new": { "a": 1, "b": 2 },
+      "expect": { "result": "same_identity" }
+    },
+    {
+      "id": "re-canonical-null-equivalence",
+      "existing": { "a": null, "b": 1 },
+      "new": { "b": 1 },
+      "expect": { "result": "same_identity" }
+    }
+  ]
+}

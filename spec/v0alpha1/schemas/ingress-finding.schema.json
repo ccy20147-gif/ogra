@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/ingress-finding.schema.json",
+  "title": "IngressFinding",
+  "description": "Review record for external content. Content is untrusted until accepted; external content MUST NOT become an Agent observation before accepted.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "ingress_id": { "type": "string", "pattern": "^ing_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "state": {
+      "enum": ["pending", "accepted", "quarantined", "review_unavailable", "rejected"]
+    },
+    "verdict": { "enum": ["clean", "suspicious", "malicious"] },
+    "content_ref": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/payload-ref.schema.json" },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "severity": { "enum": ["low", "medium", "high"] },
+          "rule_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "detail_ref": { "type": "string", "minLength": 1, "maxLength": 256 }
+        },
+        "required": ["type", "severity", "rule_version"],
+        "additionalProperties": false
+      },
+      "uniqueItems": true
+    },
+    "reviewer": {
+      "type": "object",
+      "properties": {
+        "mode": { "enum": ["in_process", "remote", "manual"] },
+        "reviewer_id": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" }
+      },
+      "required": ["mode"],
+      "additionalProperties": false
+    },
+    "created_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "reviewed_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "resolved_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" }
+  },
+  "required": [
+    "protocol_version", "ingress_id", "action_id", "attempt_id", "state",
+    "content_ref", "created_at"
+  ],
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": { "properties": { "state": { "const": "accepted" } } },
+      "then": {
+        "required": ["verdict", "reviewed_at"],
+        "properties": { "verdict": { "const": "clean" } }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "quarantined" } } },
+      "then": {
+        "required": ["verdict", "reviewed_at"],
+        "properties": { "verdict": { "enum": ["suspicious", "malicious"] } }
+      }
+    },
+    {
+      "if": { "properties": { "state": { "const": "rejected" } } },
+      "then": { "required": ["reviewed_at"] }
+    }
+  ]
+}

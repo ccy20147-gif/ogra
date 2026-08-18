@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/dispatch-grant.schema.json",
+  "title": "DispatchGrant",
+  "description": "Short-lived, single-use authority to dispatch one Attempt, bound to Action, Attempt, canonical payload, destination, policy version, redaction rule version, scope, revision, and expiry. An expired grant without an authoritative acknowledgement produces an unknown Attempt (PROT-013).",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "grant_id": { "type": "string", "pattern": "^grn_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "execution_profile": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ExecutionProfile" },
+    "payload_ref": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/payload-ref.schema.json" },
+    "destination": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Destination" },
+    "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "redaction_rule_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "scope": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ScopeRef" },
+    "revision": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/RevisionRef" },
+    "single_use": { "const": true },
+    "state": { "enum": ["active", "consumed", "expired", "revoked"] },
+    "issued_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "expires_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "consumed_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" }
+  },
+  "required": [
+    "protocol_version", "grant_id", "action_id", "attempt_id", "execution_profile",
+    "payload_ref", "destination", "policy_version", "redaction_rule_version",
+    "scope", "revision", "single_use", "state", "issued_at", "expires_at"
+  ],
+  "additionalProperties": false
+}

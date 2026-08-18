@@ -1,0 +1,44 @@
+{
+  "kind": "state_transition",
+  "description": "Legal state transitions across all four machines.",
+  "vectors": [
+    { "id": "tv-action-happy-path", "machine": "action", "state": "proposed", "event": "authorize", "expect": { "allowed": true, "to": "authorized" } },
+    { "id": "tv-action-begin-execution", "machine": "action", "state": "authorized", "event": "begin_execution", "expect": { "allowed": true, "to": "executing" } },
+    { "id": "tv-action-result-received", "machine": "action", "state": "executing", "event": "result_received", "expect": { "allowed": true, "to": "result_received" } },
+    { "id": "tv-action-commit", "machine": "action", "state": "result_received", "event": "commit", "expect": { "allowed": true, "to": "committed" } },
+    { "id": "tv-action-block", "machine": "action", "state": "proposed", "event": "block", "expect": { "allowed": true, "to": "blocked" } },
+    { "id": "tv-action-cancel", "machine": "action", "state": "authorized", "event": "cancel", "expect": { "allowed": true, "to": "cancelled" } },
+    { "id": "tv-action-quarantine", "machine": "action", "state": "result_received", "event": "quarantine", "expect": { "allowed": true, "to": "quarantined" } },
+    { "id": "tv-action-review-unavailable", "machine": "action", "state": "result_received", "event": "review_unavailable", "expect": { "allowed": true, "to": "review_unavailable" } },
+    { "id": "tv-action-retry-review", "machine": "action", "state": "review_unavailable", "event": "retry_review", "expect": { "allowed": true, "to": "result_received" } },
+    { "id": "tv-action-quarantine-commit", "machine": "action", "state": "quarantined", "event": "commit", "expect": { "allowed": true, "to": "committed" } },
+    { "id": "tv-action-quarantine-fail", "machine": "action", "state": "quarantined", "event": "fail_authoritative", "expect": { "allowed": true, "to": "failed_authoritative" } },
+    { "id": "tv-action-unknown-outcome", "machine": "action", "state": "executing", "event": "unknown_outcome", "expect": { "allowed": true, "to": "unknown_outcome" } },
+    { "id": "tv-action-reconcile-retry", "machine": "action", "state": "unknown_outcome", "event": "reconcile_retry", "expect": { "allowed": true, "to": "executing" } },
+    { "id": "tv-action-reconcile-committed", "machine": "action", "state": "unknown_outcome", "event": "reconcile_committed", "expect": { "allowed": true, "to": "committed" } },
+    { "id": "tv-action-reconcile-failed", "machine": "action", "state": "unknown_outcome", "event": "reconcile_failed", "expect": { "allowed": true, "to": "failed_authoritative" } },
+    { "id": "tv-action-fail-authoritative", "machine": "action", "state": "executing", "event": "fail_authoritative", "expect": { "allowed": true, "to": "failed_authoritative" } },
+
+    { "id": "tv-attempt-grant", "machine": "attempt", "state": "prepared", "event": "grant", "expect": { "allowed": true, "to": "dispatch_authorized" } },
+    { "id": "tv-attempt-ack", "machine": "attempt", "state": "dispatch_authorized", "event": "ack", "expect": { "allowed": true, "to": "acknowledged" } },
+    { "id": "tv-attempt-response", "machine": "attempt", "state": "acknowledged", "event": "response", "expect": { "allowed": true, "to": "response_received" } },
+    { "id": "tv-attempt-cancel-before-send", "machine": "attempt", "state": "prepared", "event": "cancel", "expect": { "allowed": true, "to": "cancelled" } },
+    { "id": "tv-attempt-local-error", "machine": "attempt", "state": "prepared", "event": "local_error", "expect": { "allowed": true, "to": "failed_local" } },
+    { "id": "tv-attempt-expiry-unknown", "machine": "attempt", "state": "dispatch_authorized", "event": "expiry", "expect": { "allowed": true, "to": "unknown" } },
+    { "id": "tv-attempt-authoritative-failure", "machine": "attempt", "state": "acknowledged", "event": "fail_authoritative", "expect": { "allowed": true, "to": "failed_authoritative" } },
+    { "id": "tv-attempt-unknown", "machine": "attempt", "state": "acknowledged", "event": "unknown", "expect": { "allowed": true, "to": "unknown" } },
+
+    { "id": "tv-ingress-accept", "machine": "ingress", "state": "pending", "event": "accept", "expect": { "allowed": true, "to": "accepted" } },
+    { "id": "tv-ingress-quarantine", "machine": "ingress", "state": "pending", "event": "quarantine", "expect": { "allowed": true, "to": "quarantined" } },
+    { "id": "tv-ingress-review-unavailable", "machine": "ingress", "state": "pending", "event": "review_unavailable", "expect": { "allowed": true, "to": "review_unavailable" } },
+    { "id": "tv-ingress-retry-review", "machine": "ingress", "state": "review_unavailable", "event": "retry_review", "expect": { "allowed": true, "to": "pending" } },
+    { "id": "tv-ingress-resolve-accept", "machine": "ingress", "state": "quarantined", "event": "resolve_accept", "expect": { "allowed": true, "to": "accepted" } },
+    { "id": "tv-ingress-resolve-reject", "machine": "ingress", "state": "quarantined", "event": "resolve_reject", "expect": { "allowed": true, "to": "rejected" } },
+
+    { "id": "tv-recovery-decide", "machine": "recovery_decision", "state": "pending", "event": "decide", "expect": { "allowed": true, "to": "decided" } },
+    { "id": "tv-recovery-apply", "machine": "recovery_decision", "state": "decided", "event": "apply", "expect": { "allowed": true, "to": "executed" } },
+    { "id": "tv-recovery-supersede", "machine": "recovery_decision", "state": "decided", "event": "supersede", "expect": { "allowed": true, "to": "superseded" } },
+    { "id": "tv-recovery-expiry", "machine": "recovery_decision", "state": "decided", "event": "expiry", "expect": { "allowed": true, "to": "expired" } },
+    { "id": "tv-recovery-withdraw", "machine": "recovery_decision", "state": "pending", "event": "withdraw", "expect": { "allowed": true, "to": "cancelled" } }
+  ]
+}

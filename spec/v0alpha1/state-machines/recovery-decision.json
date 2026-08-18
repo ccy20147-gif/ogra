@@ -1,0 +1,15 @@
+{
+  "machine": "recovery_decision",
+  "protocol_version": "0.1",
+  "description": "Recovery decisions are NOT Action terminal states. They are governed decision records.",
+  "states": ["pending", "decided", "executed", "superseded", "expired", "cancelled"],
+  "terminal": ["executed", "superseded", "expired", "cancelled"],
+  "decisions": ["reconcile", "retry_with_same_key", "compensate", "manual_review", "stop"],
+  "transitions": [
+    {"from": "pending", "event": "decide", "to": "decided", "guard": "decision, evidence refs, actor, revision, lease token, and reason present"},
+    {"from": "pending", "event": "withdraw", "to": "cancelled", "guard": "decision never applied"},
+    {"from": "decided", "event": "apply", "to": "executed", "guard": "decision applied against the referenced revision and lease"},
+    {"from": "decided", "event": "supersede", "to": "superseded", "guard": "a newer decision replaced this one"},
+    {"from": "decided", "event": "expiry", "to": "expired", "guard": "lease or decision validity expired before apply"}
+  ]
+}

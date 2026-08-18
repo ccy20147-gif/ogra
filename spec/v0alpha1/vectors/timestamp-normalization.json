@@ -1,0 +1,67 @@
+{
+  "kind": "timestamp_normalization",
+  "description": "RFC 3339 subset normalization: uppercase T/Z, exactly three fractional digits, truncation never rounding.",
+  "vectors": [
+    {
+      "id": "ts-pad-fraction",
+      "input": "2026-08-17T12:00:00Z",
+      "expect": { "normalized": "2026-08-17T12:00:00.000Z" }
+    },
+    {
+      "id": "ts-truncate-fraction",
+      "input": "2026-08-17T12:00:00.123456Z",
+      "expect": { "normalized": "2026-08-17T12:00:00.123Z" }
+    },
+    {
+      "id": "ts-already-canonical",
+      "input": "2026-08-17T12:00:00.000Z",
+      "expect": { "normalized": "2026-08-17T12:00:00.000Z" }
+    },
+    {
+      "id": "ts-lowercase-z-invalid",
+      "input": "2026-08-17T12:00:00.000z",
+      "expect": { "error": true }
+    },
+    {
+      "id": "ts-no-utc-marker-invalid",
+      "input": "2026-08-17T12:00:00.000+00:00",
+      "expect": { "error": true }
+    },
+    {
+      "id": "ts-month-out-of-range-invalid",
+      "input": "2026-13-17T12:00:00.000Z",
+      "expect": { "error": true }
+    },
+    {
+      "id": "ts-feb-31-invalid",
+      "description": "P1-6 repro: 2026-02-31 does not exist.",
+      "input": "2026-02-31T00:00:00.000Z",
+      "expect": { "error": true }
+    },
+    {
+      "id": "ts-feb-29-non-leap-invalid",
+      "input": "2026-02-29T00:00:00.000Z",
+      "expect": { "error": true }
+    },
+    {
+      "id": "ts-feb-29-leap-valid",
+      "input": "2024-02-29T00:00:00.000Z",
+      "expect": { "normalized": "2024-02-29T00:00:00.000Z" }
+    },
+    {
+      "id": "ts-feb-29-century-leap-valid",
+      "input": "2000-02-29T00:00:00.000Z",
+      "expect": { "normalized": "2000-02-29T00:00:00.000Z" }
+    },
+    {
+      "id": "ts-feb-29-century-non-leap-invalid",
+      "input": "1900-02-29T00:00:00.000Z",
+      "expect": { "error": true }
+    },
+    {
+      "id": "ts-apr-31-invalid",
+      "input": "2026-04-31T00:00:00.000Z",
+      "expect": { "error": true }
+    }
+  ]
+}

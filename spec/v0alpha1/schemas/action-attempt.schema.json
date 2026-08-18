@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/action-attempt.schema.json",
+  "title": "ActionAttempt",
+  "description": "One physical callback. Each physical callback has exactly one Attempt; a new callback requires a new Attempt retaining the Action identity and verified idempotency identity.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "attempt_no": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/SafeInteger", "minimum": 1 },
+    "state": {
+      "enum": [
+        "prepared", "dispatch_authorized", "acknowledged", "response_received",
+        "cancelled", "failed_local", "failed_authoritative", "unknown"
+      ]
+    },
+    "execution_profile": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ExecutionProfile" },
+    "destination": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Destination" },
+    "request": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/payload-ref.schema.json" },
+    "grant_ref": { "type": "string", "pattern": "^grn_[0-9a-hjkmnp-tv-z]{26}$" },
+    "lease": {
+      "type": "object",
+      "properties": {
+        "token": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/LeaseToken" },
+        "holder": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" },
+        "expires_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" }
+      },
+      "required": ["token", "holder", "expires_at"],
+      "additionalProperties": false
+    },
+    "receipts": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^rec_[0-9a-hjkmnp-tv-z]{26}$" },
+      "uniqueItems": true
+    },
+    "prepared_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "updated_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" }
+  },
+  "required": [
+    "protocol_version", "attempt_id", "action_id", "attempt_no", "state",
+    "execution_profile", "destination", "request", "prepared_at", "updated_at"
+  ],
+  "additionalProperties": false
+}

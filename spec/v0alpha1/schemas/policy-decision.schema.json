@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/policy-decision.schema.json",
+  "title": "PolicyDecision",
+  "description": "Deterministic classification and egress mode decision for one Action. Recorded before external send.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "decision_id": { "type": "string", "pattern": "^pdc_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "rule_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "policy_hash": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+    "classification": { "enum": ["public", "internal", "confidential", "restricted"] },
+    "mode": { "enum": ["auto_redact", "log_and_proceed", "approve_then_egress", "blocked"] },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "minItems": 1
+    },
+    "decided_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "actor": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" }
+  },
+  "required": [
+    "protocol_version", "decision_id", "action_id", "policy_version", "rule_id",
+    "policy_hash", "classification", "mode", "reasons", "decided_at", "actor"
+  ],
+  "additionalProperties": false
+}

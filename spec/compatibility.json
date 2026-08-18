@@ -1,0 +1,56 @@
+{
+  "schema": "https://ogra.dev/spec/compatibility.json",
+  "description": "Machine-readable protocol compatibility matrix for Ogra Action Protocol. Normative input to SDK and Edge handshake implementations.",
+  "protocol_version": "0.1",
+  "directory": "v0alpha1",
+  "maturity": "alpha",
+  "json_schema_dialect": "https://json-schema.org/draft/2020-12/schema",
+  "canonicalization": "ogra-jcs-1",
+  "hash_algorithm": "sha256",
+  "timestamp_format": "YYYY-MM-DDTHH:MM:SS.sssZ",
+  "negotiation": {
+    "major_rule": "exact_match_required",
+    "minor_rule": "min_of_client_and_server",
+    "higher_side_constrains_to_negotiated": true,
+    "failure_codes": {
+      "major_mismatch": "PROTOCOL_MAJOR_MISMATCH",
+      "minor_mismatch": "PROTOCOL_MINOR_MISMATCH"
+    }
+  },
+  "unknown_field_policy": "reject",
+  "unknown_enum_policy": "reject",
+  "null_policy": "invalid_unless_declared_nullable",
+  "objects": [
+    "run-ref",
+    "action-intent",
+    "action-snapshot",
+    "action-attempt",
+    "policy-decision",
+    "route-decision",
+    "redaction-record",
+    "approval-binding",
+    "dispatch-grant",
+    "external-receipt",
+    "payload-ref",
+    "ingress-finding",
+    "recovery-decision",
+    "capability-manifest",
+    "audit-event",
+    "error-envelope",
+    "client-hello",
+    "server-hello"
+  ],
+  "state_machines": ["action", "attempt", "ingress", "recovery_decision"],
+  "profiles": {
+    "governance": ["observe", "govern"],
+    "execution": ["inline", "edge_mediated"],
+    "recovery": ["replay_safe", "idempotent", "outcome_query", "compensatable"],
+    "isolation": ["development", "supervised", "hardened"]
+  },
+  "minor_history": {
+    "0.1": {
+      "added": ["initial protocol freeze"],
+      "breaking": false
+    }
+  }
+}

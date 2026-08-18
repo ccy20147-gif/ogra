@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/audit-event.schema.json",
+  "title": "AuditEvent",
+  "description": "Append-only, hash-linked audit record. Bounded metadata and hashes by default; raw secrets and sensitive payloads are excluded (PROT-027).",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "event_id": { "type": "string", "pattern": "^evt_[0-9a-hjkmnp-tv-z]{26}$" },
+    "sequence": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/SafeInteger", "minimum": 1 },
+    "prev_event_id": { "type": "string", "pattern": "^evt_[0-9a-hjkmnp-tv-z]{26}$" },
+    "prev_hash": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+    "run_id": { "type": "string", "pattern": "^run_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "event_type": {
+      "enum": [
+        "run_created", "run_sealed",
+        "action_proposed", "action_authorized", "action_blocked", "action_cancelled",
+        "action_executing", "action_result_received", "action_committed",
+        "action_failed_authoritative", "action_unknown_outcome",
+        "attempt_prepared", "attempt_dispatch_authorized", "attempt_acknowledged",
+        "attempt_response_received", "attempt_failed_local",
+        "attempt_failed_authoritative", "attempt_cancelled", "attempt_unknown",
+        "ingress_accepted", "ingress_quarantined", "ingress_rejected",
+        "ingress_review_unavailable",
+        "recovery_decided", "recovery_applied", "recovery_expired",
+        "approval_issued", "approval_consumed", "approval_revoked",
+        "grant_issued", "receipt_recorded", "evidence_appended",
+        "payload_stored", "payload_deleted"
+      ]
+    },
+    "occurred_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "actor": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" },
+    "summary": {
+      "type": "object",
+      "properties": {
+        "key_count": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/SafeInteger", "minimum": 0 },
+        "sensitive_fields_detected": { "type": "boolean" },
+        "payload_digest": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+        "field_types": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "uniqueItems": true
+        }
+      },
+      "required": ["key_count", "sensitive_fields_detected", "field_types"],
+      "additionalProperties": false
+    },
+    "content_hash": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+    "anchor": {
+      "oneOf": [
+        { "const": "none" },
+        {
+          "type": "object",
+          "properties": {
+            "provider": { "type": "string", "minLength": 1, "maxLength": 128 },
+            "ref": { "type": "string", "minLength": 1, "maxLength": 256 }
+          },
+          "required": ["provider", "ref"],
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "required": [
+    "protocol_version", "event_id", "sequence", "event_type", "occurred_at",
+    "actor", "summary", "content_hash", "anchor"
+  ],
+  "additionalProperties": false
+}

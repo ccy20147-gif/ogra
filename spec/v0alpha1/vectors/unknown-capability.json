@@ -1,0 +1,347 @@
+{
+  "kind": "unknown_capability",
+  "description": "Unknown capabilities are rejected (UNKNOWN_CAPABILITY); conformance trust is OPERATION-SCOPED (PROT-018/021, P0-1): an operation's capabilities are enabled only when every referenced conformance_id is trusted; missing refs fail closed. Compensate EXECUTION requires trusted compensatable (P1-7).",
+  "vectors": [
+    {
+      "id": "uc-unknown-capability-rejected",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["exactly_once"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-001", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": { "ok": false, "code": "UNKNOWN_CAPABILITY" }
+    },
+    {
+      "id": "uc-untrusted-conformance-no-enable",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-001"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-001", "status": "untrusted", "authority": "self-declared" }
+        ]
+      },
+      "expect": { "ok": true, "enabled": { "get_forecast": [] } }
+    },
+    {
+      "id": "uc-trusted-conformance-enables",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent", "outcome_query"],
+              "conformance_refs": ["conf-001"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "content_hash"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-001", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": { "ok": true, "enabled": { "get_forecast": ["idempotent", "outcome_query"] } }
+    },
+    {
+      "id": "uc-operation-scoped-trust",
+      "description": "P0-1 repro: a trusted conformance for one operation must NOT enable another operation that references an untrusted conformance.",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "trusted_op",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-a"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          },
+          {
+            "operation_id": "untrusted_op",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-b"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-a", "status": "trusted", "authority": "ogra-conformance" },
+          { "conformance_id": "conf-b", "status": "untrusted", "authority": "self-declared" }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "enabled": { "trusted_op": ["idempotent"], "untrusted_op": [] }
+      }
+    },
+    {
+      "id": "uc-missing-conformance-ref-fails-closed",
+      "description": "A conformance_ref that does not exist in the manifest can never enable capabilities.",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["replay_safe"],
+              "conformance_refs": ["conf-ghost"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-001", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": { "ok": true, "enabled": { "get_forecast": [] } }
+    },
+    {
+      "id": "uc-multiple-refs-all-must-be-trusted",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-a", "conf-b"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-a", "status": "trusted", "authority": "ogra-conformance" },
+          { "conformance_id": "conf-b", "status": "untrusted", "authority": "self-declared" }
+        ]
+      },
+      "expect": { "ok": true, "enabled": { "get_forecast": [] } }
+    },
+    {
+      "id": "uc-recovery-gated-by-capability",
+      "description": "Empty capability set: no retry, no reconcile, no compensation execution; manual_review and stop always allowed.",
+      "operation": "notify",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "plain-http-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "notify",
+            "recovery": {
+              "capabilities": [],
+              "conformance_refs": ["conf-002"],
+              "duplicate_effect_risk": "high",
+              "retry_cost_risk": "high",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-002", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "enabled": { "notify": [] },
+        "recovery_allowed": {
+          "retry_with_same_key": false,
+          "reconcile": false,
+          "compensate": false,
+          "manual_review": true,
+          "stop": true
+        }
+      }
+    },
+    {
+      "id": "uc-compensatable-gates-compensation",
+      "description": "P1-7: executing compensation requires the trusted compensatable capability.",
+      "operation": "refund",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "payments-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "refund",
+            "recovery": {
+              "capabilities": ["compensatable"],
+              "conformance_refs": ["conf-003"],
+              "duplicate_effect_risk": "medium",
+              "retry_cost_risk": "low",
+              "audit_level": "full"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-003", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": {
+        "ok": true,
+        "enabled": { "refund": ["compensatable"] },
+        "recovery_allowed": {
+          "retry_with_same_key": false,
+          "reconcile": false,
+          "compensate": true,
+          "manual_review": true,
+          "stop": true
+        }
+      }
+    },
+    {
+      "id": "uc-duplicate-conformance-id-rejected",
+      "description": "P1-2 repro: the same conformance_id declared twice (untrusted first, trusted second) must be REJECTED with DUPLICATE_ID, never resolved by last-one-wins.",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-x"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-x", "status": "untrusted", "authority": "self-declared" },
+          { "conformance_id": "conf-x", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": { "ok": false, "code": "DUPLICATE_ID" }
+    },
+    {
+      "id": "uc-duplicate-conformance-id-reversed",
+      "description": "P1-2: same as above with declaration order reversed — rejection must be order-independent.",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-x"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-x", "status": "trusted", "authority": "ogra-conformance" },
+          { "conformance_id": "conf-x", "status": "untrusted", "authority": "self-declared" }
+        ]
+      },
+      "expect": { "ok": false, "code": "DUPLICATE_ID" }
+    },
+    {
+      "id": "uc-duplicate-operation-id-rejected",
+      "description": "P1-2: the same operation_id declared twice must be REJECTED with DUPLICATE_ID, never resolved by last-operation-wins.",
+      "manifest": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent"],
+              "conformance_refs": ["conf-a"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          },
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["outcome_query"],
+              "conformance_refs": ["conf-a"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-a", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": { "ok": false, "code": "DUPLICATE_ID" }
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/redaction-record.schema.json",
+  "title": "RedactionRecord",
+  "description": "Record of applied redactions for one Action: rule version, per-field operations, and before/after hashes. Evidence projection excludes raw secrets by default.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "record_id": { "type": "string", "pattern": "^rdr_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "rule_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "redactions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "field_path": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "rule_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+          "mode": { "enum": ["mask", "remove", "replace", "hash"] },
+          "replacement": { "type": "string", "maxLength": 256 }
+        },
+        "required": ["field_path", "rule_id", "mode"],
+        "additionalProperties": false
+      },
+      "minItems": 1
+    },
+    "original_hash": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+    "redacted_hash": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+    "applied_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "actor": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" }
+  },
+  "required": [
+    "protocol_version", "record_id", "action_id", "rule_version", "redactions",
+    "original_hash", "redacted_hash", "applied_at", "actor"
+  ],
+  "additionalProperties": false
+}

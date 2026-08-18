@@ -1,0 +1,426 @@
+{
+  "kind": "receipt_authority",
+  "description": "Advisory receipts never resolve an external effect; only authoritative completion or failure may resolve an executing or unknown Action (PROT-028, PROT-029). authority is NOT self-declared: resolving evidence additionally requires (a) a resolving receipt kind (effect_completion or failure) and (b) trusted adapter conformance for the (provider, operation) pair (P0-2). Action resolution additionally requires the server-persisted Attempt context to match receipt attempt_id, action_id, execution_profile, provider, and operation.",
+  "vectors": [
+    {
+      "id": "ra-http-2xx-advisory",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "transport_ack",
+        "authority": "advisory",
+        "effect_status": "unknown",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "action_state": "unknown_outcome",
+      "trusted_ops": [],
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-provider-request-id-advisory",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "provider_acceptance",
+        "authority": "advisory",
+        "effect_status": "unknown",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "action_state": "executing",
+      "trusted_ops": [],
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-authoritative-accepted-not-resolving",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "provider_acceptance",
+        "authority": "authoritative",
+        "effect_status": "accepted",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "unknown_outcome",
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-authoritative-completion-resolves",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "inline",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": true, "can_resolve_action": true }
+    },
+    {
+      "id": "ra-authoritative-failure-resolves-unknown",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "failure",
+        "authority": "authoritative",
+        "effect_status": "failed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "unknown_outcome",
+      "expect": { "resolves": true, "can_resolve_action": true }
+    },
+    {
+      "id": "ra-advisory-result-cannot-drive-success",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "result",
+        "authority": "advisory",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "action_state": "executing",
+      "trusted_ops": [],
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-timeout-is-never-authoritative-failure",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "transport_ack",
+        "authority": "advisory",
+        "effect_status": "failed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "action_state": "executing",
+      "trusted_ops": [],
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-transport-ack-self-declared-authoritative",
+      "description": "P0-2 repro: a transport_ack that self-declares authority=authoritative and effect_status=completed must NOT resolve an effect.",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "transport_ack",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-authoritative-untrusted-adapter",
+      "description": "P0-2: effect_completion with authority=authoritative from an adapter/operation WITHOUT trusted conformance must NOT resolve.",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "mallory-api",
+          "account": "acct-9",
+          "operation": "do_thing",
+          "request_id": "req-evil-1"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "unknown_outcome",
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-authoritative-trusted-adapter-resolves",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": true, "can_resolve_action": true }
+    },
+    {
+      "id": "ra-no-context-fails-closed",
+      "description": "P0-2 round 2 repro: an authoritative effect_completion WITHOUT a trusted conformance context (omitted trusted_ops) must NOT resolve — omitting the security context fails closed.",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "action_state": "executing",
+      "expect": { "resolves": false, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-attempt-binding-mismatch",
+      "description": "P0-2 round 2: the receipt's declared provider is NOT authorization evidence — it must equal the server-persisted Attempt destination.",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "other-api", "operation": "do_thing" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "unknown_outcome",
+      "expect": { "resolves": true, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-missing-attempt-context-fails-closed",
+      "description": "Qualified receipt fields without the server-persisted Attempt are never an Action-resolution input.",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": true, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-attempt-id-mismatch-fails-closed",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fax",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": true, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-action-id-mismatch-fails-closed",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fax",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": true, "can_resolve_action": false }
+    },
+    {
+      "id": "ra-attempt-binding-match",
+      "receipt": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "edge_mediated",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "attempt": {
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "edge_mediated",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" }
+      },
+      "trusted_ops": [["weather-api", "get_forecast"]],
+      "action_state": "executing",
+      "expect": { "resolves": true, "can_resolve_action": true }
+    }
+  ]
+}

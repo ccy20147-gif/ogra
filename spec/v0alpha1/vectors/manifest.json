@@ -1,0 +1,18 @@
+{
+  "manifest_version": "0.1",
+  "protocol_version": "0.1",
+  "description": "Golden vectors for the Ogra v0alpha1 protocol. Synthetic data only; no real credentials or sensitive payloads. Both language validators MUST reach identical verdicts.",
+  "vector_files": [
+    "schema-valid.json",
+    "schema-invalid.json",
+    "transitions-valid.json",
+    "transitions-invalid.json",
+    "canonical-hash.json",
+    "timestamp-normalization.json",
+    "minor-version.json",
+    "unknown-capability.json",
+    "receipt-authority.json",
+    "submission-reattach.json",
+    "hash-only-replay.json"
+  ]
+}

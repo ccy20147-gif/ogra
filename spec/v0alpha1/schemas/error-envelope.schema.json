@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/error-envelope.schema.json",
+  "title": "ErrorEnvelope",
+  "description": "Typed, sanitized, retry-classified error response. Safe to display without raw payload disclosure (PROT-009).",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "http_status": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/SafeInteger", "minimum": 100, "maximum": 599 },
+    "request_id": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/GeneratedId" },
+    "command_id": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/GeneratedId" },
+    "error": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "enum": [
+            "BAD_REQUEST",
+            "VALIDATION_ERROR",
+            "CONFLICTING_SUBMISSION",
+            "DUPLICATE_ID",
+            "ILLEGAL_TRANSITION",
+            "PROTOCOL_MAJOR_MISMATCH",
+            "PROTOCOL_MINOR_MISMATCH",
+            "UNKNOWN_CAPABILITY",
+            "POLICY_BLOCKED",
+            "APPROVAL_REQUIRED",
+            "APPROVAL_INVALID",
+            "INGRESS_REVIEW_UNAVAILABLE",
+            "LEASE_CONFLICT",
+            "NOT_FOUND",
+            "REQUEST_TOO_LARGE",
+            "INTERNAL_ERROR",
+            "UNAVAILABLE"
+          ]
+        },
+        "message": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "retry_class": { "enum": ["none", "retryable_safe", "retryable_after_reconcile", "manual"] },
+        "detail_ref": { "type": "string", "minLength": 1, "maxLength": 128 }
+      },
+      "required": ["code", "message", "retry_class"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["protocol_version", "http_status", "error"],
+  "additionalProperties": false
+}

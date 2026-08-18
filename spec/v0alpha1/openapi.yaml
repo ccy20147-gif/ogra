@@ -1,0 +1,2550 @@
+openapi: 3.1.0
+info:
+  title: Ogra Action Protocol — Command/Query Contract
+  version: '0.1'
+  description: 'Language-neutral command/query surface for the Ogra Action Runtime. Normative data shapes
+    live in the JSON Schema files under spec/v0alpha1/schemas/; this document is generated from them (tools/build-openapi.py).
+    Transport: local HTTP, Unix domain socket, or loopback TCP. Default development endpoint: http://127.0.0.1:7634.
+    Mutating commands carry X-Ogra-Command-Id (required, PROT-008). Commands that mutate an existing object
+    additionally carry X-Ogra-Expected-Revision (required; mismatch fails with LEASE_CONFLICT). Creation
+    commands (create run, store payload, propose action, approval request, prepare attempt, register manifest)
+    carry only X-Ogra-Command-Id and MUST NOT carry X-Ogra-Expected-Revision; created objects start at
+    revision 1. Errors use the ErrorEnvelope.'
+servers:
+- url: http://127.0.0.1:7634
+  description: Local Ogra Edge (development default)
+tags:
+- name: health
+  description: Health check
+- name: protocol
+  description: Protocol negotiation
+- name: run
+  description: Run lifecycle
+- name: action
+  description: Action lifecycle and decisions
+- name: attempt
+  description: Attempt lifecycle, grants, receipts, outcomes
+- name: approval
+  description: Approval binding
+- name: ingress
+  description: Ingress review and quarantine
+- name: recovery
+  description: Recovery decisions
+- name: capability
+  description: Capability manifests
+- name: evidence
+  description: Evidence and audit verification
+paths:
+  /health:
+    get:
+      tags:
+      - health
+      operationId: healthCheck
+      summary: Liveness and capability probe
+      responses:
+        '200':
+          description: Healthy Edge with independent profiles
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    const: ok
+                  server_id:
+                    type: string
+                  protocol_version:
+                    type: string
+                  profiles:
+                    $ref: '#/components/schemas/_defs'
+                  server_clock:
+                    type: string
+                required:
+                - status
+                - server_id
+                - protocol_version
+                - profiles
+                - server_clock
+                additionalProperties: false
+        '503':
+          description: Unavailable (retryable_safe)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /protocol/handshake:
+    post:
+      tags:
+      - protocol
+      operationId: handshake
+      summary: Negotiate protocol major/minor and profiles
+      description: ClientHello declares the client's protocol version. Same major required; negotiated
+        minor is min(client, server); the side declaring the higher minor must constrain itself (PROT-007,
+        ADR-009).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/client-hello'
+      responses:
+        '200':
+          description: Negotiated ServerHello
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/server-hello'
+        '400':
+          description: Protocol mismatch (PROTOCOL_MAJOR_MISMATCH / PROTOCOL_MINOR_MISMATCH)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /runs:
+    post:
+      tags:
+      - run
+      operationId: createRun
+      summary: Create a Run (idempotent by submission_key)
+      description: A repeated submission_key returns the existing Run identity; a conflicting canonical
+        request is rejected (PROT-031).
+      parameters: &id002
+      - &id001
+        name: X-Ogra-Command-Id
+        in: header
+        required: true
+        description: 'Command identity (PROT-008): makes mutating commands idempotent. REQUIRED on every
+          mutating command.'
+        schema:
+          type: string
+          pattern: ^cmd_[0-9a-hjkmnp-tv-z]{26}$
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                submission_key:
+                  $ref: '#/components/schemas/_defs/$defs/SubmissionKey'
+                created_at:
+                  $ref: '#/components/schemas/_defs/$defs/Timestamp'
+              required:
+              - protocol_version
+              - created_at
+              additionalProperties: false
+      responses:
+        '201':
+          description: Run created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/run-ref'
+        '409':
+          description: Conflicting submission (CONFLICTING_SUBMISSION)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /runs/{run_id}:
+    get:
+      tags:
+      - run
+      operationId: getRun
+      summary: Read a Run
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/run-ref'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /runs/{run_id}/seal:
+    post:
+      tags:
+      - run
+      operationId: sealRun
+      summary: Seal a Run after agent completion
+      parameters:
+      - name: run_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - &id003
+        name: X-Ogra-Expected-Revision
+        in: header
+        required: true
+        description: Expected positive revision of the object being mutated (PROT-008). Commands fail
+          with LEASE_CONFLICT on mismatch. REQUIRED on every command that mutates an existing object.
+        schema:
+          $ref: '#/components/schemas/_defs/$defs/RevisionRef'
+      responses:
+        '200':
+          description: Sealed Run
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/run-ref'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /payloads:
+    post:
+      tags:
+      - run
+      operationId: storePayload
+      summary: Store sanctioned payload material under explicit retention
+      description: 'Returns a PayloadRef. json payloads are canonicalized with ogra-jcs-1; bytes payloads
+        are base64-encoded. retention: hash_only (evidence only) or encrypted (explicitly replayable,
+        authenticated-encrypted, with key id, retention class, and expiry).'
+      parameters: *id002
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                encoding:
+                  enum:
+                  - json
+                  - bytes
+                data:
+                  type: string
+                retention:
+                  enum:
+                  - hash_only
+                  - encrypted_replayable
+                expires_at:
+                  $ref: '#/components/schemas/_defs/$defs/Timestamp'
+              required:
+              - protocol_version
+              - encoding
+              - data
+              - retention
+              additionalProperties: false
+      responses:
+        '201':
+          description: Stored payload reference
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/payload-ref'
+        '413':
+          description: Request too large (REQUEST_TOO_LARGE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /actions:
+    post:
+      tags:
+      - action
+      operationId: proposeAction
+      summary: Propose an Action from an ActionIntent
+      description: Persists durable intent before any external callback. Principal and workspace come
+        from the authenticated context, never from the payload. A repeated submission_key with an identical
+        canonical request re-attaches to the existing Action (PROT-031).
+      parameters: *id002
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/action-intent'
+      responses:
+        '201':
+          description: Proposed Action snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/action-snapshot'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+        '409':
+          description: Conflicting submission (CONFLICTING_SUBMISSION)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+    get:
+      tags:
+      - action
+      operationId: listActions
+      summary: 'List Actions of a Run (query: run_id)'
+      parameters:
+      - name: run_id
+        in: query
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Action snapshots
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  actions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/action-snapshot'
+                required:
+                - actions
+                additionalProperties: false
+  /actions/{action_id}:
+    get:
+      tags:
+      - action
+      operationId: getAction
+      summary: Read an Action snapshot
+      parameters:
+      - name: action_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Action snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/action-snapshot'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /actions/{action_id}/attempts:
+    post:
+      tags:
+      - attempt
+      operationId: prepareAttempt
+      summary: Prepare an Attempt (prepared)
+      parameters:
+      - name: action_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      responses:
+        '201':
+          description: Prepared Attempt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/action-attempt'
+        '409':
+          description: Illegal transition or revision mismatch (ILLEGAL_TRANSITION / LEASE_CONFLICT)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+    get:
+      tags:
+      - attempt
+      operationId: listAttempts
+      summary: List Attempts of an Action
+      parameters:
+      - name: action_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Attempts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  attempts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/action-attempt'
+                required:
+                - attempts
+                additionalProperties: false
+  /attempts/{attempt_id}/grant:
+    post:
+      tags:
+      - attempt
+      operationId: issueGrant
+      summary: Issue a single-use DispatchGrant (prepared -> dispatch_authorized)
+      description: 'Inline flow: the SDK executes the callback only after receiving this grant. The grant
+        binds payload, destination, policy, redaction rule version, scope, revision, and expiry.'
+      parameters:
+      - name: attempt_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      responses:
+        '201':
+          description: Dispatch grant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/dispatch-grant'
+        '409':
+          description: Illegal transition / approval invalid / lease conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /attempts/{attempt_id}/ack:
+    post:
+      tags:
+      - attempt
+      operationId: acknowledgeAttempt
+      summary: Persist an authoritative acknowledgement (dispatch_authorized -> acknowledged)
+      description: If a grant may have been used but no authoritative acknowledgement is persisted before
+        expiry, the Attempt becomes unknown (PROT-013).
+      parameters:
+      - name: attempt_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      responses:
+        '200':
+          description: Acknowledged Attempt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/action-attempt'
+        '409':
+          description: Illegal transition / grant expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /attempts/{attempt_id}/receipts:
+    post:
+      tags:
+      - attempt
+      operationId: recordReceipt
+      summary: Record an ExternalReceipt (additive evidence)
+      description: HTTP 2xx and provider request IDs are advisory unless the adapter contract proves stronger
+        semantics (PROT-028). Only authoritative completion or failure may resolve an executing or unknown
+        Action (PROT-029).
+      parameters:
+      - name: attempt_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/external-receipt'
+      responses:
+        '201':
+          description: Recorded receipt
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/external-receipt'
+        '400':
+          description: Validation error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+    get:
+      tags:
+      - attempt
+      operationId: listReceipts
+      summary: List receipts of an Attempt
+      parameters:
+      - name: attempt_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Receipts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  receipts:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/external-receipt'
+                required:
+                - receipts
+                additionalProperties: false
+  /attempts/{attempt_id}/outcome:
+    post:
+      tags:
+      - attempt
+      operationId: submitOutcome
+      summary: Submit authoritative outcome evidence (reconciliation result)
+      description: Resolves unknown_outcome only with authoritative evidence. Returns the updated Action
+        snapshot; the Action transitions via reconcile_committed / reconcile_failed (PROT-015, PROT-029).
+      parameters:
+      - name: attempt_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                receipt:
+                  $ref: '#/components/schemas/external-receipt'
+                evidence_refs:
+                  type: array
+                  items:
+                    type: string
+                  uniqueItems: true
+              required:
+              - protocol_version
+              - receipt
+              additionalProperties: false
+      responses:
+        '200':
+          description: Updated Action snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/action-snapshot'
+        '400':
+          description: Advisory receipt cannot resolve an effect (validation error)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+        '409':
+          description: Illegal transition / lease conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /actions/{action_id}/approval-requests:
+    post:
+      tags:
+      - approval
+      operationId: requestApproval
+      summary: Open an approval request (approve_then_egress mode)
+      description: Creates an ApprovalBinding in status pending-before-decision; the binding is sealed
+        to the exact canonical payload hash, destination, policy version, redaction rule version, scope,
+        revision, and expiry.
+      parameters:
+      - name: action_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                expires_at:
+                  $ref: '#/components/schemas/_defs/$defs/Timestamp'
+              required:
+              - protocol_version
+              - expires_at
+              additionalProperties: false
+      responses:
+        '201':
+          description: Approval binding created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/approval-binding'
+        '400':
+          description: Not an approve_then_egress action
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /approvals/{approval_id}/decide:
+    post:
+      tags:
+      - approval
+      operationId: decideApproval
+      summary: Approve or reject the bound approval
+      description: Any binding mismatch (payload, destination, policy, scope, revision, expiry) invalidates
+        the approval and requires re-evaluation.
+      parameters:
+      - name: approval_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                decision:
+                  enum:
+                  - approve
+                  - reject
+                reason:
+                  type: string
+                  maxLength: 512
+              required:
+              - protocol_version
+              - decision
+              additionalProperties: false
+      responses:
+        '200':
+          description: Decided approval binding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/approval-binding'
+        '409':
+          description: Expired or superseded approval (APPROVAL_INVALID)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /ingress:
+    post:
+      tags:
+      - ingress
+      operationId: submitIngress
+      summary: Submit an ingress review finding
+      description: clean -> accepted, suspicious/malicious -> quarantined, reviewer unavailable -> review_unavailable
+        (fail closed in governed production). Content is never an Agent observation before accepted.
+      parameters:
+      - *id001
+      - *id003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                action_id:
+                  type: string
+                attempt_id:
+                  type: string
+                verdict:
+                  enum:
+                  - clean
+                  - suspicious
+                  - malicious
+                  - review_unavailable
+                findings:
+                  type: array
+                  items:
+                    type: object
+                reviewer_mode:
+                  enum:
+                  - in_process
+                  - remote
+                  - manual
+              required:
+              - protocol_version
+              - action_id
+              - attempt_id
+              - verdict
+              - reviewer_mode
+              additionalProperties: false
+      responses:
+        '201':
+          description: Ingress finding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ingress-finding'
+        '503':
+          description: Ingress review unavailable (INGRESS_REVIEW_UNAVAILABLE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /ingress/{ingress_id}/resolve:
+    post:
+      tags:
+      - ingress
+      operationId: resolveIngress
+      summary: Resolve a quarantined finding (quarantined -> accepted | rejected)
+      parameters:
+      - name: ingress_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                decision:
+                  enum:
+                  - accept
+                  - reject
+                reason:
+                  type: string
+                  maxLength: 512
+              required:
+              - protocol_version
+              - decision
+              additionalProperties: false
+      responses:
+        '200':
+          description: Resolved ingress finding
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ingress-finding'
+        '409':
+          description: Not quarantined (ILLEGAL_TRANSITION)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /actions/{action_id}/recovery:
+    post:
+      tags:
+      - recovery
+      operationId: proposeRecovery
+      summary: Propose a RecoveryDecision
+      description: 'decisions: reconcile | retry_with_same_key | compensate | manual_review | stop. Every
+        decision requires evidence refs, actor, revision, lease token, and reason. Uncertainty is never
+        retry authority.'
+      parameters:
+      - name: action_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/recovery-decision'
+      responses:
+        '201':
+          description: Recovery decision recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/recovery-decision'
+        '400':
+          description: Unknown capability or unsupported recovery (UNKNOWN_CAPABILITY)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /recovery/{decision_id}:
+    get:
+      tags:
+      - recovery
+      operationId: getRecovery
+      summary: Read a RecoveryDecision
+      parameters:
+      - name: decision_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Recovery decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/recovery-decision'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /recovery/{decision_id}/apply:
+    post:
+      tags:
+      - recovery
+      operationId: applyRecovery
+      summary: Apply a decided RecoveryDecision (decided -> executed)
+      description: retry_with_same_key creates a NEW Attempt under the verified stable identity with a
+        new recovery approval and a new dispatch grant bound to the original sanctioned payload (handbook
+        §7.2, PROT-015).
+      parameters:
+      - name: decision_id
+        in: path
+        required: true
+        schema:
+          type: string
+      - *id001
+      - *id003
+      responses:
+        '200':
+          description: Applied recovery decision
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/recovery-decision'
+        '409':
+          description: Superseded / expired / lease conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /capabilities:
+    post:
+      tags:
+      - capability
+      operationId: registerManifest
+      summary: Register a CapabilityManifest
+      description: A manifest claim never enables recovery until its conformance result is trusted by
+        Edge (PROT-021). Unknown capability values are rejected with UNKNOWN_CAPABILITY.
+      parameters: *id002
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/capability-manifest'
+      responses:
+        '201':
+          description: Registered manifest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/capability-manifest'
+        '400':
+          description: Unknown capability (UNKNOWN_CAPABILITY)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /capabilities/{manifest_id}:
+    get:
+      tags:
+      - capability
+      operationId: getManifest
+      summary: Read a CapabilityManifest
+      parameters:
+      - name: manifest_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Capability manifest
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/capability-manifest'
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /evidence/{action_id}:
+    get:
+      tags:
+      - evidence
+      operationId: getEvidence
+      summary: Expandable evidence packet for an Action
+      description: Bounded metadata and hashes by default; raw secrets and sensitive payloads are excluded
+        (PROT-027).
+      parameters:
+      - name: action_id
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          description: Evidence packet
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  protocol_version:
+                    const: '0.1'
+                  action_id:
+                    type: string
+                  events:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/audit-event'
+                  decisions:
+                    type: array
+                    items:
+                      type: object
+                required:
+                - protocol_version
+                - action_id
+                - events
+                - decisions
+                additionalProperties: false
+        '404':
+          description: Not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/error-envelope'
+  /audit/verify:
+    post:
+      tags:
+      - evidence
+      operationId: verifyAudit
+      summary: Verify the hash-linked audit chain
+      description: 'Without an expected or externally anchored head, a valid local chain does not prove
+        tail events were never removed (ADR-010). Read-only: no command headers required.'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                protocol_version:
+                  const: '0.1'
+                run_id:
+                  type: string
+                expected_head:
+                  $ref: '#/components/schemas/_defs/$defs/HashRef'
+              required:
+              - protocol_version
+              - run_id
+              additionalProperties: false
+      responses:
+        '200':
+          description: Verification result
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  protocol_version:
+                    const: '0.1'
+                  chain_valid:
+                    type: boolean
+                  anchor:
+                    type: string
+                  verified_events:
+                    $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+                  head_event_id:
+                    type: string
+                required:
+                - protocol_version
+                - chain_valid
+                - anchor
+                - verified_events
+                - head_event_id
+                additionalProperties: false
+components:
+  schemas:
+    _defs:
+      title: Ogra v0alpha1 shared definitions
+      description: Shared lexical and structural definitions. Not a top-level object; referenced by every
+        protocol schema.
+      $defs:
+        ProtocolVersion:
+          type: string
+          pattern: ^[0-9]+\.[0-9]+$
+          examples:
+          - '0.1'
+        Timestamp:
+          type: string
+          pattern: ^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$
+          description: 'RFC 3339 subset: uppercase T and Z, exactly three fractional digits, UTC only.'
+        HashRef:
+          type: object
+          properties:
+            algorithm:
+              const: sha256
+            canonicalization:
+              enum:
+              - ogra-jcs-1
+              - raw-bytes
+            value:
+              type: string
+              pattern: ^sha256:[0-9a-f]{64}$
+          required:
+          - algorithm
+          - canonicalization
+          - value
+          additionalProperties: false
+        UlidBody:
+          type: string
+          pattern: ^[0-9a-hjkmnp-tv-z]{26}$
+          description: 'Crockford Base32 ULID body: 26 characters, no i/l/o/u, time-ordered.'
+        GeneratedId:
+          type: string
+          pattern: ^(run|act|atp|ing|rec|dec|evt|app|grn|cmd|pdc|rte|rdr|ply|mft)_[0-9a-hjkmnp-tv-z]{26}$
+          description: 'Opaque generated identifier: kind prefix plus ULID body.'
+        SubmissionKey:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{1,128}$
+          description: Caller-chosen, caller-stable key. Scoped by (principal, operation) on the server.
+        ActorRef:
+          type: string
+          pattern: ^[A-Za-z0-9._:@/-]{1,128}$
+          description: Opaque principal or actor identifier. Always server-verified, never authorization
+            evidence from client payload.
+        ScopeRef:
+          type: object
+          properties:
+            principal:
+              $ref: '#/components/schemas/_defs/$defs/ActorRef'
+            workspace:
+              type: string
+              pattern: ^[A-Za-z0-9._:-]{1,128}$
+          required:
+          - principal
+          - workspace
+          additionalProperties: false
+        LeaseToken:
+          type: string
+          pattern: ^[A-Za-z0-9._:-]{1,128}$
+        SafeInteger:
+          type: integer
+          minimum: -9007199254740991
+          maximum: 9007199254740991
+          description: 'Cross-language exact-integer range |n| <= 2^53-1 (P1-3): every value in this range
+            is represented exactly by the reference validators. Integers beyond it MUST be decimal strings;
+            canonicalization rejects them.'
+        RevisionRef:
+          $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+          minimum: 1
+        GovernanceProfile:
+          enum:
+          - observe
+          - govern
+        ExecutionProfile:
+          enum:
+          - inline
+          - edge_mediated
+        IsolationProfile:
+          enum:
+          - development
+          - supervised
+          - hardened
+        RecoveryCapability:
+          enum:
+          - replay_safe
+          - idempotent
+          - outcome_query
+          - compensatable
+        Profiles:
+          type: object
+          properties:
+            governance:
+              $ref: '#/components/schemas/_defs/$defs/GovernanceProfile'
+            execution:
+              $ref: '#/components/schemas/_defs/$defs/ExecutionProfile'
+            recovery:
+              type: array
+              items:
+                $ref: '#/components/schemas/_defs/$defs/RecoveryCapability'
+              uniqueItems: true
+            isolation:
+              $ref: '#/components/schemas/_defs/$defs/IsolationProfile'
+          required:
+          - governance
+          - execution
+          - recovery
+          - isolation
+          additionalProperties: false
+        Destination:
+          type: object
+          properties:
+            provider:
+              type: string
+              minLength: 1
+              maxLength: 128
+            operation:
+              type: string
+              minLength: 1
+              maxLength: 128
+            endpoint_ref:
+              type: string
+              minLength: 1
+              maxLength: 256
+          required:
+          - provider
+          - operation
+          additionalProperties: false
+        CorrelationRef:
+          type: object
+          description: Optional framework correlation. NEVER satisfies Attempt or receipt transitions
+            (PROT-014).
+          properties:
+            framework:
+              type: string
+              minLength: 1
+              maxLength: 64
+            checkpoint_id:
+              type: string
+              minLength: 1
+              maxLength: 256
+            thread_id:
+              type: string
+              minLength: 1
+              maxLength: 256
+            framework_run_id:
+              type: string
+              minLength: 1
+              maxLength: 256
+          additionalProperties: false
+    run-ref:
+      title: RunRef
+      description: 'Identity and status of a Run: the correlation aggregate for Actions, attempts, and
+        evidence. Principal and workspace are bound by the server from the authenticated context; they
+        are never client-declared authorization evidence.'
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        run_id:
+          type: string
+          pattern: ^run_[0-9a-hjkmnp-tv-z]{26}$
+        status:
+          enum:
+          - open
+          - sealed
+        submission_key:
+          $ref: '#/components/schemas/_defs/$defs/SubmissionKey'
+        created_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        sealed_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        summary:
+          type: object
+          description: 'Extension point: preserved verbatim, never interpreted by core logic.'
+          additionalProperties: true
+      required:
+      - protocol_version
+      - run_id
+      - status
+      - created_at
+      additionalProperties: false
+    action-intent:
+      title: ActionIntent
+      description: 'What the Agent intends to do: the proposal for one governed external call. Principal
+        and workspace are bound by the server from the authenticated context, never accepted from this
+        payload (P0 invariant).'
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        run_id:
+          type: string
+          pattern: ^run_[0-9a-hjkmnp-tv-z]{26}$
+        submission_key:
+          $ref: '#/components/schemas/_defs/$defs/SubmissionKey'
+        intent:
+          type: object
+          properties:
+            kind:
+              enum:
+              - model_call
+              - tool_call
+              - delegation
+              - memory_write
+              - file_export
+              - side_effect
+            operation_id:
+              type: string
+              minLength: 1
+              maxLength: 128
+            destination:
+              $ref: '#/components/schemas/_defs/$defs/Destination'
+            request:
+              $ref: '#/components/schemas/payload-ref'
+            metadata:
+              type: object
+              description: 'Extension point: preserved verbatim, never interpreted by core logic.'
+              additionalProperties: true
+          required:
+          - kind
+          - operation_id
+          - destination
+          - request
+          additionalProperties: false
+        execution_profile:
+          $ref: '#/components/schemas/_defs/$defs/ExecutionProfile'
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        redaction_rule_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        correlation:
+          $ref: '#/components/schemas/_defs/$defs/CorrelationRef'
+        proposed_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+      required:
+      - protocol_version
+      - run_id
+      - intent
+      - execution_profile
+      - proposed_at
+      additionalProperties: false
+    action-snapshot:
+      title: ActionSnapshot
+      description: 'Read model of one Action: intent, state, revision, decisions, attempts, receipts,
+        ingress, and recovery decisions.'
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        run_id:
+          type: string
+          pattern: ^run_[0-9a-hjkmnp-tv-z]{26}$
+        state:
+          enum:
+          - proposed
+          - authorized
+          - executing
+          - result_received
+          - committed
+          - blocked
+          - cancelled
+          - failed_authoritative
+          - unknown_outcome
+          - quarantined
+          - review_unavailable
+        revision:
+          $ref: '#/components/schemas/_defs/$defs/RevisionRef'
+        intent:
+          $ref: '#/components/schemas/action-intent'
+        policy_decision:
+          $ref: '#/components/schemas/policy-decision'
+        route_decision:
+          $ref: '#/components/schemas/route-decision'
+        redaction_record:
+          $ref: '#/components/schemas/redaction-record'
+        approval_binding:
+          $ref: '#/components/schemas/approval-binding'
+        ingress:
+          $ref: '#/components/schemas/ingress-finding'
+        attempts:
+          type: array
+          items:
+            type: string
+            pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+          uniqueItems: true
+        current_attempt:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        receipts:
+          type: array
+          items:
+            type: string
+            pattern: ^rec_[0-9a-hjkmnp-tv-z]{26}$
+          uniqueItems: true
+        recovery_decisions:
+          type: array
+          items:
+            type: string
+            pattern: ^dec_[0-9a-hjkmnp-tv-z]{26}$
+          uniqueItems: true
+        created_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+      required:
+      - protocol_version
+      - action_id
+      - run_id
+      - state
+      - revision
+      - intent
+      - attempts
+      - created_at
+      - updated_at
+      additionalProperties: false
+    action-attempt:
+      title: ActionAttempt
+      description: One physical callback. Each physical callback has exactly one Attempt; a new callback
+        requires a new Attempt retaining the Action identity and verified idempotency identity.
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        attempt_no:
+          $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+          minimum: 1
+        state:
+          enum:
+          - prepared
+          - dispatch_authorized
+          - acknowledged
+          - response_received
+          - cancelled
+          - failed_local
+          - failed_authoritative
+          - unknown
+        execution_profile:
+          $ref: '#/components/schemas/_defs/$defs/ExecutionProfile'
+        destination:
+          $ref: '#/components/schemas/_defs/$defs/Destination'
+        request:
+          $ref: '#/components/schemas/payload-ref'
+        grant_ref:
+          type: string
+          pattern: ^grn_[0-9a-hjkmnp-tv-z]{26}$
+        lease:
+          type: object
+          properties:
+            token:
+              $ref: '#/components/schemas/_defs/$defs/LeaseToken'
+            holder:
+              $ref: '#/components/schemas/_defs/$defs/ActorRef'
+            expires_at:
+              $ref: '#/components/schemas/_defs/$defs/Timestamp'
+          required:
+          - token
+          - holder
+          - expires_at
+          additionalProperties: false
+        receipts:
+          type: array
+          items:
+            type: string
+            pattern: ^rec_[0-9a-hjkmnp-tv-z]{26}$
+          uniqueItems: true
+        prepared_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+      required:
+      - protocol_version
+      - attempt_id
+      - action_id
+      - attempt_no
+      - state
+      - execution_profile
+      - destination
+      - request
+      - prepared_at
+      - updated_at
+      additionalProperties: false
+    policy-decision:
+      title: PolicyDecision
+      description: Deterministic classification and egress mode decision for one Action. Recorded before
+        external send.
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        decision_id:
+          type: string
+          pattern: ^pdc_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        rule_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+        policy_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        classification:
+          enum:
+          - public
+          - internal
+          - confidential
+          - restricted
+        mode:
+          enum:
+          - auto_redact
+          - log_and_proceed
+          - approve_then_egress
+          - blocked
+        reasons:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          minItems: 1
+        decided_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        actor:
+          $ref: '#/components/schemas/_defs/$defs/ActorRef'
+      required:
+      - protocol_version
+      - decision_id
+      - action_id
+      - policy_version
+      - rule_id
+      - policy_hash
+      - classification
+      - mode
+      - reasons
+      - decided_at
+      - actor
+      additionalProperties: false
+    route-decision:
+      title: RouteDecision
+      description: 'Deterministic routing decision for one Action: which adapter or egress boundary executes
+        the call.'
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        decision_id:
+          type: string
+          pattern: ^rte_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        destination:
+          $ref: '#/components/schemas/_defs/$defs/Destination'
+        route:
+          type: string
+          minLength: 1
+          maxLength: 128
+        route_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        fallback_allowed:
+          type: boolean
+        reasons:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          minItems: 1
+        decided_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        actor:
+          $ref: '#/components/schemas/_defs/$defs/ActorRef'
+      required:
+      - protocol_version
+      - decision_id
+      - action_id
+      - destination
+      - route
+      - route_version
+      - fallback_allowed
+      - reasons
+      - decided_at
+      - actor
+      additionalProperties: false
+    redaction-record:
+      title: RedactionRecord
+      description: 'Record of applied redactions for one Action: rule version, per-field operations, and
+        before/after hashes. Evidence projection excludes raw secrets by default.'
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        record_id:
+          type: string
+          pattern: ^rdr_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        rule_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        redactions:
+          type: array
+          items:
+            type: object
+            properties:
+              field_path:
+                type: string
+                minLength: 1
+                maxLength: 256
+              rule_id:
+                type: string
+                minLength: 1
+                maxLength: 128
+              mode:
+                enum:
+                - mask
+                - remove
+                - replace
+                - hash
+              replacement:
+                type: string
+                maxLength: 256
+            required:
+            - field_path
+            - rule_id
+            - mode
+            additionalProperties: false
+          minItems: 1
+        original_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        redacted_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        applied_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        actor:
+          $ref: '#/components/schemas/_defs/$defs/ActorRef'
+      required:
+      - protocol_version
+      - record_id
+      - action_id
+      - rule_version
+      - redactions
+      - original_hash
+      - redacted_hash
+      - applied_at
+      - actor
+      additionalProperties: false
+    approval-binding:
+      title: ApprovalBinding
+      description: Approval bound to the exact payload, destination, policy version, redaction rule version,
+        scope, revision, and expiry. An ordinary approval authorizes exactly one dispatch Attempt; a recovery
+        retry requires a new recovery approval.
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        approval_id:
+          type: string
+          pattern: ^app_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        canonical_payload_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        destination:
+          $ref: '#/components/schemas/_defs/$defs/Destination'
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        redaction_rule_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        scope:
+          $ref: '#/components/schemas/_defs/$defs/ScopeRef'
+        revision:
+          $ref: '#/components/schemas/_defs/$defs/RevisionRef'
+        operation:
+          enum:
+          - dispatch
+          - recovery
+        status:
+          enum:
+          - approved
+          - rejected
+          - expired
+          - revoked
+          - consumed
+        expires_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        decided_by:
+          $ref: '#/components/schemas/_defs/$defs/ActorRef'
+        decided_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        consumed_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+      required:
+      - protocol_version
+      - approval_id
+      - action_id
+      - attempt_id
+      - canonical_payload_hash
+      - destination
+      - policy_version
+      - redaction_rule_version
+      - scope
+      - revision
+      - operation
+      - status
+      - expires_at
+      - decided_by
+      - decided_at
+      additionalProperties: false
+    dispatch-grant:
+      title: DispatchGrant
+      description: Short-lived, single-use authority to dispatch one Attempt, bound to Action, Attempt,
+        canonical payload, destination, policy version, redaction rule version, scope, revision, and expiry.
+        An expired grant without an authoritative acknowledgement produces an unknown Attempt (PROT-013).
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        grant_id:
+          type: string
+          pattern: ^grn_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        execution_profile:
+          $ref: '#/components/schemas/_defs/$defs/ExecutionProfile'
+        payload_ref:
+          $ref: '#/components/schemas/payload-ref'
+        destination:
+          $ref: '#/components/schemas/_defs/$defs/Destination'
+        policy_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        redaction_rule_version:
+          type: string
+          minLength: 1
+          maxLength: 128
+        scope:
+          $ref: '#/components/schemas/_defs/$defs/ScopeRef'
+        revision:
+          $ref: '#/components/schemas/_defs/$defs/RevisionRef'
+        single_use:
+          const: true
+        state:
+          enum:
+          - active
+          - consumed
+          - expired
+          - revoked
+        issued_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        expires_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        consumed_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+      required:
+      - protocol_version
+      - grant_id
+      - action_id
+      - attempt_id
+      - execution_profile
+      - payload_ref
+      - destination
+      - policy_version
+      - redaction_rule_version
+      - scope
+      - revision
+      - single_use
+      - state
+      - issued_at
+      - expires_at
+      additionalProperties: false
+    external-receipt:
+      title: ExternalReceipt
+      description: What is known about the external effect of one Attempt. HTTP success and provider request
+        IDs are advisory unless the adapter contract proves stronger semantics (PROT-028). Only authoritative
+        completion or failure evidence may resolve an executing or unknown Action (PROT-029).
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        receipt_id:
+          type: string
+          pattern: ^rec_[0-9a-hjkmnp-tv-z]{26}$
+        attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        receipt_kind:
+          enum:
+          - transport_ack
+          - provider_acceptance
+          - effect_completion
+          - failure
+          - result
+        authority:
+          enum:
+          - advisory
+          - authoritative
+        effect_status:
+          enum:
+          - unknown
+          - accepted
+          - completed
+          - failed
+        execution_profile:
+          $ref: '#/components/schemas/_defs/$defs/ExecutionProfile'
+        provider:
+          type: object
+          properties:
+            provider:
+              type: string
+              minLength: 1
+              maxLength: 128
+            account:
+              type: string
+              minLength: 1
+              maxLength: 256
+            operation:
+              type: string
+              minLength: 1
+              maxLength: 128
+            request_id:
+              type: string
+              minLength: 1
+              maxLength: 256
+          required:
+          - provider
+          - account
+          - operation
+          - request_id
+          additionalProperties: false
+        content_ref:
+          $ref: '#/components/schemas/payload-ref'
+        received_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        retention_until:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        evidence_refs:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          uniqueItems: true
+        provider_details:
+          type: object
+          description: 'Extension point: preserved verbatim, never interpreted by core logic.'
+          additionalProperties: true
+      required:
+      - protocol_version
+      - receipt_id
+      - attempt_id
+      - action_id
+      - receipt_kind
+      - authority
+      - effect_status
+      - execution_profile
+      - provider
+      - received_at
+      additionalProperties: false
+      allOf:
+      - if:
+          properties:
+            receipt_kind:
+              const: transport_ack
+        then:
+          properties:
+            authority:
+              const: advisory
+            effect_status:
+              const: unknown
+          description: A transport acknowledgement says nothing about the external effect; it can never
+            be authoritative (PROT-028).
+      - if:
+          properties:
+            receipt_kind:
+              const: provider_acceptance
+        then:
+          properties:
+            effect_status:
+              enum:
+              - unknown
+              - accepted
+          description: Provider acceptance proves at most acceptance, never completion.
+      - if:
+          properties:
+            receipt_kind:
+              const: effect_completion
+        then:
+          properties:
+            authority:
+              const: authoritative
+            effect_status:
+              const: completed
+          description: Effect completion is by definition authoritative; advisory completion is meaningless.
+      - if:
+          properties:
+            receipt_kind:
+              const: failure
+        then:
+          properties:
+            authority:
+              const: authoritative
+            effect_status:
+              const: failed
+          description: A failure receipt is by definition authoritative.
+      - if:
+          properties:
+            receipt_kind:
+              const: result
+        then:
+          properties:
+            authority:
+              const: authoritative
+          description: Result content is evidence only when authoritative.
+    payload-ref:
+      title: PayloadRef
+      description: Reference to sanctioned payload material. storage_mode distinguishes evidence-only,
+        encrypted replayable, and external retrieval. Implements PROT-025, PROT-026, PROT-027.
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        storage_mode:
+          enum:
+          - hash_only
+          - encrypted_replayable
+          - external_reference
+        content_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        replay_eligible:
+          type: boolean
+        size_bytes:
+          $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+          minimum: 0
+        mime_type:
+          type: string
+          maxLength: 128
+        storage_ref:
+          type: string
+          minLength: 1
+          maxLength: 256
+        key_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        encryption_scheme:
+          type: string
+          minLength: 1
+          maxLength: 64
+        retention_class:
+          type: string
+          minLength: 1
+          maxLength: 64
+        expires_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        deleted:
+          type: boolean
+          default: false
+        external_store:
+          type: string
+          minLength: 1
+          maxLength: 256
+        retrieval_policy:
+          enum:
+          - immediate
+          - delegated
+          - unknown
+      required:
+      - protocol_version
+      - storage_mode
+      - content_hash
+      - replay_eligible
+      additionalProperties: false
+      allOf:
+      - if:
+          properties:
+            storage_mode:
+              const: hash_only
+        then:
+          properties:
+            replay_eligible:
+              const: false
+          description: A hash-only payload proves identity but cannot be replayed (PROT-026).
+      - if:
+          properties:
+            storage_mode:
+              const: encrypted_replayable
+        then:
+          required:
+          - storage_ref
+          - key_id
+          - encryption_scheme
+          - retention_class
+          - expires_at
+      - if:
+          properties:
+            storage_mode:
+              const: external_reference
+        then:
+          required:
+          - external_store
+          - retrieval_policy
+    ingress-finding:
+      title: IngressFinding
+      description: Review record for external content. Content is untrusted until accepted; external content
+        MUST NOT become an Agent observation before accepted.
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        ingress_id:
+          type: string
+          pattern: ^ing_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        state:
+          enum:
+          - pending
+          - accepted
+          - quarantined
+          - review_unavailable
+          - rejected
+        verdict:
+          enum:
+          - clean
+          - suspicious
+          - malicious
+        content_ref:
+          $ref: '#/components/schemas/payload-ref'
+        findings:
+          type: array
+          items:
+            type: object
+            properties:
+              type:
+                type: string
+                minLength: 1
+                maxLength: 128
+              severity:
+                enum:
+                - low
+                - medium
+                - high
+              rule_version:
+                type: string
+                minLength: 1
+                maxLength: 128
+              detail_ref:
+                type: string
+                minLength: 1
+                maxLength: 256
+            required:
+            - type
+            - severity
+            - rule_version
+            additionalProperties: false
+          uniqueItems: true
+        reviewer:
+          type: object
+          properties:
+            mode:
+              enum:
+              - in_process
+              - remote
+              - manual
+            reviewer_id:
+              $ref: '#/components/schemas/_defs/$defs/ActorRef'
+          required:
+          - mode
+          additionalProperties: false
+        created_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        reviewed_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        resolved_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+      required:
+      - protocol_version
+      - ingress_id
+      - action_id
+      - attempt_id
+      - state
+      - content_ref
+      - created_at
+      additionalProperties: false
+      allOf:
+      - if:
+          properties:
+            state:
+              const: accepted
+        then:
+          required:
+          - verdict
+          - reviewed_at
+          properties:
+            verdict:
+              const: clean
+      - if:
+          properties:
+            state:
+              const: quarantined
+        then:
+          required:
+          - verdict
+          - reviewed_at
+          properties:
+            verdict:
+              enum:
+              - suspicious
+              - malicious
+      - if:
+          properties:
+            state:
+              const: rejected
+        then:
+          required:
+          - reviewed_at
+    recovery-decision:
+      title: RecoveryDecision
+      description: Governed recovery decision record. Recovery decisions are NOT Action terminal states.
+        Every decision includes evidence, actor, revision, lease token, and reason.
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        decision_id:
+          type: string
+          pattern: ^dec_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        state:
+          enum:
+          - pending
+          - decided
+          - executed
+          - superseded
+          - expired
+          - cancelled
+        decision:
+          enum:
+          - reconcile
+          - retry_with_same_key
+          - compensate
+          - manual_review
+          - stop
+        evidence_refs:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 256
+          minItems: 1
+          uniqueItems: true
+        actor:
+          $ref: '#/components/schemas/_defs/$defs/ActorRef'
+        revision:
+          $ref: '#/components/schemas/_defs/$defs/RevisionRef'
+        lease_token:
+          $ref: '#/components/schemas/_defs/$defs/LeaseToken'
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+        decided_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        expires_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        target_attempt_id:
+          type: string
+          pattern: ^atp_[0-9a-hjkmnp-tv-z]{26}$
+        supersedes:
+          type: string
+          pattern: ^dec_[0-9a-hjkmnp-tv-z]{26}$
+      required:
+      - protocol_version
+      - decision_id
+      - action_id
+      - attempt_id
+      - state
+      - decision
+      - evidence_refs
+      - actor
+      - revision
+      - lease_token
+      - reason
+      - decided_at
+      additionalProperties: false
+    capability-manifest:
+      title: CapabilityManifest
+      description: Operation-scoped declaration of recovery capabilities. A manifest claim never enables
+        recovery until its conformance result is trusted by Edge (PROT-021).
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        manifest_id:
+          type: string
+          pattern: ^mft_[0-9a-hjkmnp-tv-z]{26}$
+        adapter_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        adapter_kind:
+          enum:
+          - model
+          - tool
+          - delegation
+          - storage
+          - reconciler
+          - other
+        operations:
+          type: array
+          items:
+            type: object
+            properties:
+              operation_id:
+                type: string
+                minLength: 1
+                maxLength: 128
+              recovery:
+                type: object
+                properties:
+                  capabilities:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/_defs/$defs/RecoveryCapability'
+                    uniqueItems: true
+                    minItems: 1
+                  idempotency_scope:
+                    type: string
+                    minLength: 1
+                    maxLength: 256
+                  idempotency_valid_until:
+                    $ref: '#/components/schemas/_defs/$defs/Timestamp'
+                  idempotency_conflict_behavior:
+                    enum:
+                    - dedupe
+                    - reject
+                    - error
+                  outcome_retention_until:
+                    $ref: '#/components/schemas/_defs/$defs/Timestamp'
+                  duplicate_effect_risk:
+                    enum:
+                    - none
+                    - low
+                    - medium
+                    - high
+                  retry_cost_risk:
+                    enum:
+                    - none
+                    - low
+                    - medium
+                    - high
+                  audit_level:
+                    enum:
+                    - metadata
+                    - content_hash
+                    - full
+                  conformance_refs:
+                    type: array
+                    items:
+                      type: string
+                      minLength: 1
+                      maxLength: 256
+                    uniqueItems: true
+                required:
+                - capabilities
+                - duplicate_effect_risk
+                - retry_cost_risk
+                - audit_level
+                additionalProperties: false
+            required:
+            - operation_id
+            - recovery
+            additionalProperties: false
+          minItems: 1
+          uniqueItems: true
+        declared_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        conformance:
+          type: array
+          items:
+            type: object
+            properties:
+              conformance_id:
+                type: string
+                minLength: 1
+                maxLength: 256
+              status:
+                enum:
+                - trusted
+                - untrusted
+                - pending
+              authority:
+                type: string
+                minLength: 1
+                maxLength: 256
+              result_ref:
+                type: string
+                minLength: 1
+                maxLength: 256
+            required:
+            - conformance_id
+            - status
+            - authority
+            additionalProperties: false
+          uniqueItems: true
+        metadata:
+          type: object
+          description: 'Extension point: preserved verbatim, never interpreted by core logic.'
+          additionalProperties: true
+      required:
+      - protocol_version
+      - manifest_id
+      - adapter_id
+      - adapter_kind
+      - operations
+      - declared_at
+      - conformance
+      additionalProperties: false
+    audit-event:
+      title: AuditEvent
+      description: Append-only, hash-linked audit record. Bounded metadata and hashes by default; raw
+        secrets and sensitive payloads are excluded (PROT-027).
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        event_id:
+          type: string
+          pattern: ^evt_[0-9a-hjkmnp-tv-z]{26}$
+        sequence:
+          $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+          minimum: 1
+        prev_event_id:
+          type: string
+          pattern: ^evt_[0-9a-hjkmnp-tv-z]{26}$
+        prev_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        run_id:
+          type: string
+          pattern: ^run_[0-9a-hjkmnp-tv-z]{26}$
+        action_id:
+          type: string
+          pattern: ^act_[0-9a-hjkmnp-tv-z]{26}$
+        event_type:
+          enum:
+          - run_created
+          - run_sealed
+          - action_proposed
+          - action_authorized
+          - action_blocked
+          - action_cancelled
+          - action_executing
+          - action_result_received
+          - action_committed
+          - action_failed_authoritative
+          - action_unknown_outcome
+          - attempt_prepared
+          - attempt_dispatch_authorized
+          - attempt_acknowledged
+          - attempt_response_received
+          - attempt_failed_local
+          - attempt_failed_authoritative
+          - attempt_cancelled
+          - attempt_unknown
+          - ingress_accepted
+          - ingress_quarantined
+          - ingress_rejected
+          - ingress_review_unavailable
+          - recovery_decided
+          - recovery_applied
+          - recovery_expired
+          - approval_issued
+          - approval_consumed
+          - approval_revoked
+          - grant_issued
+          - receipt_recorded
+          - evidence_appended
+          - payload_stored
+          - payload_deleted
+        occurred_at:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        actor:
+          $ref: '#/components/schemas/_defs/$defs/ActorRef'
+        summary:
+          type: object
+          properties:
+            key_count:
+              $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+              minimum: 0
+            sensitive_fields_detected:
+              type: boolean
+            payload_digest:
+              $ref: '#/components/schemas/_defs/$defs/HashRef'
+            field_types:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 64
+              uniqueItems: true
+          required:
+          - key_count
+          - sensitive_fields_detected
+          - field_types
+          additionalProperties: false
+        content_hash:
+          $ref: '#/components/schemas/_defs/$defs/HashRef'
+        anchor:
+          oneOf:
+          - const: none
+          - type: object
+            properties:
+              provider:
+                type: string
+                minLength: 1
+                maxLength: 128
+              ref:
+                type: string
+                minLength: 1
+                maxLength: 256
+            required:
+            - provider
+            - ref
+            additionalProperties: false
+      required:
+      - protocol_version
+      - event_id
+      - sequence
+      - event_type
+      - occurred_at
+      - actor
+      - summary
+      - content_hash
+      - anchor
+      additionalProperties: false
+    error-envelope:
+      title: ErrorEnvelope
+      description: Typed, sanitized, retry-classified error response. Safe to display without raw payload
+        disclosure (PROT-009).
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        http_status:
+          $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+          minimum: 100
+          maximum: 599
+        request_id:
+          $ref: '#/components/schemas/_defs/$defs/GeneratedId'
+        command_id:
+          $ref: '#/components/schemas/_defs/$defs/GeneratedId'
+        error:
+          type: object
+          properties:
+            code:
+              enum:
+              - BAD_REQUEST
+              - VALIDATION_ERROR
+              - CONFLICTING_SUBMISSION
+              - DUPLICATE_ID
+              - ILLEGAL_TRANSITION
+              - PROTOCOL_MAJOR_MISMATCH
+              - PROTOCOL_MINOR_MISMATCH
+              - UNKNOWN_CAPABILITY
+              - POLICY_BLOCKED
+              - APPROVAL_REQUIRED
+              - APPROVAL_INVALID
+              - INGRESS_REVIEW_UNAVAILABLE
+              - LEASE_CONFLICT
+              - NOT_FOUND
+              - REQUEST_TOO_LARGE
+              - INTERNAL_ERROR
+              - UNAVAILABLE
+            message:
+              type: string
+              minLength: 1
+              maxLength: 512
+            retry_class:
+              enum:
+              - none
+              - retryable_safe
+              - retryable_after_reconcile
+              - manual
+            detail_ref:
+              type: string
+              minLength: 1
+              maxLength: 128
+          required:
+          - code
+          - message
+          - retry_class
+          additionalProperties: false
+      required:
+      - protocol_version
+      - http_status
+      - error
+      additionalProperties: false
+    client-hello:
+      title: ClientHello
+      description: First handshake message from a client. Declares the protocol version the client speaks
+        (its maximum supported minor within the declared major).
+      type: object
+      properties:
+        protocol_version:
+          const: '0.1'
+        minimum_protocol_version:
+          type: string
+          pattern: ^[0-9]+\.[0-9]+$
+        client_info:
+          type: object
+          properties:
+            sdk:
+              type: string
+              minLength: 1
+              maxLength: 64
+            sdk_version:
+              type: string
+              minLength: 1
+              maxLength: 64
+            framework:
+              type: string
+              minLength: 1
+              maxLength: 64
+          required:
+          - sdk
+          - sdk_version
+          additionalProperties: false
+        requested_capabilities:
+          type: array
+          items:
+            type: string
+            minLength: 1
+            maxLength: 64
+          uniqueItems: true
+      required:
+      - protocol_version
+      additionalProperties: false
+    server-hello:
+      title: ServerHello
+      description: Handshake response. protocol_version is the NEGOTIATED version; the side declaring
+        the higher minor must constrain itself to it. Profiles are reported independently.
+      type: object
+      properties:
+        protocol_version:
+          type: string
+          pattern: ^[0-9]+\.[0-9]+$
+        server_max_protocol_version:
+          type: string
+          pattern: ^[0-9]+\.[0-9]+$
+        server_id:
+          type: string
+          minLength: 1
+          maxLength: 256
+        profiles:
+          $ref: '#/components/schemas/_defs/$defs/Profiles'
+        server_clock:
+          $ref: '#/components/schemas/_defs/$defs/Timestamp'
+        capabilities:
+          type: object
+          properties:
+            max_payload_bytes:
+              $ref: '#/components/schemas/_defs/$defs/SafeInteger'
+              minimum: 1
+            streaming:
+              type: boolean
+          required:
+          - max_payload_bytes
+          - streaming
+          additionalProperties: false
+      required:
+      - protocol_version
+      - server_max_protocol_version
+      - server_id
+      - profiles
+      - server_clock
+      - capabilities
+      additionalProperties: false
+  parameters: {}
+  securitySchemes:
+    edgeToken:
+      type: http
+      scheme: bearer
+      description: Local Edge token. Loopback/Unix-socket deployments may use filesystem ownership instead
+        (ADR-005).
+security:
+- edgeToken: []

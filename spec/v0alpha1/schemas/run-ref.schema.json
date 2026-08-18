@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/run-ref.schema.json",
+  "title": "RunRef",
+  "description": "Identity and status of a Run: the correlation aggregate for Actions, attempts, and evidence. Principal and workspace are bound by the server from the authenticated context; they are never client-declared authorization evidence.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "run_id": {
+      "type": "string",
+      "pattern": "^run_[0-9a-hjkmnp-tv-z]{26}$"
+    },
+    "status": { "enum": ["open", "sealed"] },
+    "submission_key": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/SubmissionKey" },
+    "created_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "sealed_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "summary": {
+      "type": "object",
+      "description": "Extension point: preserved verbatim, never interpreted by core logic.",
+      "additionalProperties": true
+    }
+  },
+  "required": ["protocol_version", "run_id", "status", "created_at"],
+  "additionalProperties": false
+}

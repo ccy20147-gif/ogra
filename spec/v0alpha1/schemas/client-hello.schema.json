@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/client-hello.schema.json",
+  "title": "ClientHello",
+  "description": "First handshake message from a client. Declares the protocol version the client speaks (its maximum supported minor within the declared major).",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "minimum_protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "client_info": {
+      "type": "object",
+      "properties": {
+        "sdk": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "sdk_version": { "type": "string", "minLength": 1, "maxLength": 64 },
+        "framework": { "type": "string", "minLength": 1, "maxLength": 64 }
+      },
+      "required": ["sdk", "sdk_version"],
+      "additionalProperties": false
+    },
+    "requested_capabilities": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 64 },
+      "uniqueItems": true
+    }
+  },
+  "required": ["protocol_version"],
+  "additionalProperties": false
+}

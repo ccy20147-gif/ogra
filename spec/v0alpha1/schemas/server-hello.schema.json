@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/server-hello.schema.json",
+  "title": "ServerHello",
+  "description": "Handshake response. protocol_version is the NEGOTIATED version; the side declaring the higher minor must constrain itself to it. Profiles are reported independently.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "server_max_protocol_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+$" },
+    "server_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "profiles": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Profiles" },
+    "server_clock": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "capabilities": {
+      "type": "object",
+      "properties": {
+        "max_payload_bytes": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/SafeInteger", "minimum": 1 },
+        "streaming": { "type": "boolean" }
+      },
+      "required": ["max_payload_bytes", "streaming"],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "protocol_version", "server_max_protocol_version", "server_id", "profiles",
+    "server_clock", "capabilities"
+  ],
+  "additionalProperties": false
+}

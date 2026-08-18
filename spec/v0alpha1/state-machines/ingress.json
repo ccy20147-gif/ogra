@@ -1,0 +1,15 @@
+{
+  "machine": "ingress",
+  "protocol_version": "0.1",
+  "description": "External content MUST NOT become an Agent observation before accepted.",
+  "states": ["pending", "accepted", "quarantined", "review_unavailable", "rejected"],
+  "terminal": ["accepted", "rejected"],
+  "transitions": [
+    {"from": "pending", "event": "accept", "to": "accepted", "guard": "review verdict clean"},
+    {"from": "pending", "event": "quarantine", "to": "quarantined", "guard": "review verdict suspicious or malicious"},
+    {"from": "pending", "event": "review_unavailable", "to": "review_unavailable", "guard": "reviewer unavailable, fail closed in governed production"},
+    {"from": "review_unavailable", "event": "retry_review", "to": "pending", "guard": "review retried"},
+    {"from": "quarantined", "event": "resolve_accept", "to": "accepted", "guard": "manual or automated resolution accepts"},
+    {"from": "quarantined", "event": "resolve_reject", "to": "rejected", "guard": "manual or automated resolution rejects"}
+  ]
+}

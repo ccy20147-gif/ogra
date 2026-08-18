@@ -1,0 +1,758 @@
+{
+  "kind": "schema_validation",
+  "description": "Invalid documents: unknown fields, unknown enums, malformed IDs/timestamps, null misuse, and binding violations.",
+  "vectors": [
+    {
+      "id": "sx-action-intent-unknown-field",
+      "schema": "action-intent",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "owner_scope": "user:mallory",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": {
+            "provider": "weather-api",
+            "operation": "get_forecast"
+          },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": ":additionalProperties"
+      }
+    },
+    {
+      "id": "sx-action-intent-bad-run-id",
+      "schema": "action-intent",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": {
+            "provider": "weather-api",
+            "operation": "get_forecast"
+          },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": {
+        "valid": false
+      }
+    },
+    {
+      "id": "sx-action-intent-unknown-execution-profile",
+      "schema": "action-intent",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": {
+            "provider": "weather-api",
+            "operation": "get_forecast"
+          },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          }
+        },
+        "execution_profile": "edge",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "execution_profile:enum"
+      }
+    },
+    {
+      "id": "sx-action-intent-bad-timestamp",
+      "schema": "action-intent",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "intent": {
+          "kind": "model_call",
+          "operation_id": "chat:complete",
+          "destination": {
+            "provider": "openai",
+            "operation": "chat.completions.create"
+          },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "proposed_at"
+      }
+    },
+    {
+      "id": "sx-payload-ref-hash-only-replayable",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "hash_only",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "replay_eligible"
+      }
+    },
+    {
+      "id": "sx-payload-ref-encrypted-missing-required",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "encrypted_replayable",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "key_id"
+      }
+    },
+    {
+      "id": "sx-payload-ref-external-missing-policy",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "external_reference",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "external_store": "s3://ogra-payloads"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "retrieval_policy"
+      }
+    },
+    {
+      "id": "sx-payload-ref-null-value",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "hash_only",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": false,
+        "size_bytes": null
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "size_bytes"
+      }
+    },
+    {
+      "id": "sx-payload-ref-float-number",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "hash_only",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": false,
+        "size_bytes": 4.5
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "size_bytes"
+      }
+    },
+    {
+      "id": "sx-run-ref-wrong-prefix",
+      "schema": "run-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "status": "open",
+        "created_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "run_id"
+      }
+    },
+    {
+      "id": "sx-error-envelope-unknown-retry-class",
+      "schema": "error-envelope",
+      "document": {
+        "protocol_version": "0.1",
+        "http_status": 500,
+        "error": {
+          "code": "INTERNAL_ERROR",
+          "message": "boom",
+          "retry_class": "always"
+        }
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "error/retry_class:enum"
+      }
+    },
+    {
+      "id": "sx-server-hello-unknown-governance",
+      "schema": "server-hello",
+      "document": {
+        "protocol_version": "0.1",
+        "server_max_protocol_version": "0.1",
+        "server_id": "edge-01",
+        "profiles": {
+          "governance": "supervise",
+          "execution": "inline",
+          "recovery": [
+            "outcome_query"
+          ],
+          "isolation": "development"
+        },
+        "server_clock": "2026-08-17T12:00:00.000Z",
+        "capabilities": {
+          "max_payload_bytes": 1048576,
+          "streaming": true
+        }
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "profiles/governance:enum"
+      }
+    },
+    {
+      "id": "sx-audit-event-unknown-type",
+      "schema": "audit-event",
+      "document": {
+        "protocol_version": "0.1",
+        "event_id": "evt_01arz3ndektsv4rrffq69g5fav",
+        "sequence": 1,
+        "event_type": "action_frozen",
+        "occurred_at": "2026-08-17T12:00:06.000Z",
+        "actor": "edge",
+        "summary": {
+          "key_count": 12,
+          "sensitive_fields_detected": false,
+          "field_types": [
+            "string",
+            "integer"
+          ]
+        },
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "anchor": "none"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "event_type:enum"
+      }
+    },
+    {
+      "id": "sx-action-attempt-bad-state",
+      "schema": "action-attempt",
+      "document": {
+        "protocol_version": "0.1",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_no": 1,
+        "state": "done",
+        "execution_profile": "inline",
+        "destination": {
+          "provider": "weather-api",
+          "operation": "get_forecast"
+        },
+        "request": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "prepared_at": "2026-08-17T12:00:00.000Z",
+        "updated_at": "2026-08-17T12:00:00.500Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "state:enum"
+      }
+    },
+    {
+      "id": "sx-action-snapshot-forbidden-state",
+      "schema": "action-snapshot",
+      "document": {
+        "protocol_version": "0.1",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "state": "safe_retry",
+        "revision": 1,
+        "intent": {
+          "protocol_version": "0.1",
+          "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+          "intent": {
+            "kind": "tool_call",
+            "operation_id": "weather:forecast",
+            "destination": {
+              "provider": "weather-api",
+              "operation": "get_forecast"
+            },
+            "request": {
+              "protocol_version": "0.1",
+              "storage_mode": "hash_only",
+              "content_hash": {
+                "algorithm": "sha256",
+                "canonicalization": "ogra-jcs-1",
+                "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+              },
+              "replay_eligible": false
+            }
+          },
+          "execution_profile": "inline",
+          "proposed_at": "2026-08-17T12:00:00.000Z"
+        },
+        "attempts": [],
+        "created_at": "2026-08-17T12:00:00.000Z",
+        "updated_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "state:enum"
+      }
+    },
+    {
+      "id": "sx-dispatch-grant-not-single-use",
+      "schema": "dispatch-grant",
+      "document": {
+        "protocol_version": "0.1",
+        "grant_id": "grn_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "inline",
+        "payload_ref": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "destination": {
+          "provider": "weather-api",
+          "operation": "get_forecast"
+        },
+        "policy_version": "policy-v7",
+        "redaction_rule_version": "redaction-rules-v3",
+        "scope": {
+          "principal": "user:alice",
+          "workspace": "ws-dev"
+        },
+        "revision": 3,
+        "single_use": false,
+        "state": "active",
+        "issued_at": "2026-08-17T12:00:00.000Z",
+        "expires_at": "2026-08-17T12:01:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "single_use"
+      }
+    },
+    {
+      "id": "sx-ingress-accepted-suspicious",
+      "schema": "ingress-finding",
+      "document": {
+        "protocol_version": "0.1",
+        "ingress_id": "ing_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "state": "accepted",
+        "verdict": "suspicious",
+        "content_ref": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "reviewer": {
+          "mode": "in_process"
+        },
+        "created_at": "2026-08-17T12:00:05.000Z",
+        "reviewed_at": "2026-08-17T12:00:06.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "verdict"
+      }
+    },
+    {
+      "id": "sx-ingress-quarantined-no-verdict",
+      "schema": "ingress-finding",
+      "document": {
+        "protocol_version": "0.1",
+        "ingress_id": "ing_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "state": "quarantined",
+        "content_ref": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "reviewer": {
+          "mode": "in_process"
+        },
+        "created_at": "2026-08-17T12:00:05.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "verdict"
+      }
+    },
+    {
+      "id": "sx-recovery-decision-unknown-value",
+      "schema": "recovery-decision",
+      "document": {
+        "protocol_version": "0.1",
+        "decision_id": "dec_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "state": "decided",
+        "decision": "retry",
+        "evidence_refs": [
+          "rec_01arz3ndektsv4rrffq69g5fav"
+        ],
+        "actor": "user:alice",
+        "revision": 3,
+        "lease_token": "lease-1",
+        "reason": "retry",
+        "decided_at": "2026-08-17T12:05:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "decision:enum"
+      }
+    },
+    {
+      "id": "sx-recovery-decision-empty-evidence",
+      "schema": "recovery-decision",
+      "document": {
+        "protocol_version": "0.1",
+        "decision_id": "dec_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "state": "decided",
+        "decision": "stop",
+        "evidence_refs": [],
+        "actor": "user:alice",
+        "revision": 3,
+        "lease_token": "lease-1",
+        "reason": "stop",
+        "decided_at": "2026-08-17T12:05:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "evidence_refs"
+      }
+    },
+    {
+      "id": "sx-client-hello-wrong-minor",
+      "schema": "client-hello",
+      "document": {
+        "protocol_version": "0.2",
+        "client_info": {
+          "sdk": "ogra-python",
+          "sdk_version": "0.1.0"
+        }
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "protocol_version"
+      }
+    },
+    {
+      "id": "sx-submission-key-invalid-chars",
+      "schema": "action-intent",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "submission_key": "bad key with spaces!",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": {
+            "provider": "weather-api",
+            "operation": "get_forecast"
+          },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": {
+        "valid": false,
+        "error_hint": "submission_key"
+      }
+    },
+    {
+      "id": "sx-capability-manifest-unknown-capability",
+      "schema": "capability-manifest",
+      "document": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["exactly_once"],
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "metadata"
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          { "conformance_id": "conf-001", "status": "trusted", "authority": "ogra-conformance" }
+        ]
+      },
+      "expect": { "valid": false, "error_hint": "operations/0/recovery/capabilities/0:enum" }
+    },
+    {
+      "id": "sx-receipt-transport-ack-authoritative",
+      "description": "P0-2: a transport_ack can never be authoritative.",
+      "schema": "external-receipt",
+      "document": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "transport_ack",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "expect": { "valid": false, "error_hint": "authority:const" }
+    },
+    {
+      "id": "sx-receipt-effect-completion-advisory",
+      "schema": "external-receipt",
+      "document": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "advisory",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "expect": { "valid": false, "error_hint": "authority:const" }
+    },
+    {
+      "id": "sx-receipt-provider-acceptance-completed",
+      "schema": "external-receipt",
+      "document": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "provider_acceptance",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "expect": { "valid": false, "error_hint": "effect_status:enum" }
+    },
+    {
+      "id": "sx-receipt-failure-completed",
+      "schema": "external-receipt",
+      "document": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "failure",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "expect": { "valid": false, "error_hint": "effect_status:const" }
+    },
+    {
+      "id": "sx-action-snapshot-revision-unsafe",
+      "description": "P1-3 repro: revision beyond the safe integer range must be rejected by the schema (SafeInteger).",
+      "schema": "action-snapshot",
+      "document": {
+        "protocol_version": "0.1",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "state": "proposed",
+        "revision": 9007199254740992,
+        "intent": {
+          "protocol_version": "0.1",
+          "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+          "intent": {
+            "kind": "tool_call",
+            "operation_id": "weather:forecast",
+            "destination": { "provider": "weather-api", "operation": "get_forecast" },
+            "request": {
+              "protocol_version": "0.1",
+              "storage_mode": "hash_only",
+              "content_hash": {
+                "algorithm": "sha256",
+                "canonicalization": "ogra-jcs-1",
+                "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+              },
+              "replay_eligible": false
+            }
+          },
+          "execution_profile": "inline",
+          "proposed_at": "2026-08-17T12:00:00.000Z"
+        },
+        "attempts": [],
+        "created_at": "2026-08-17T12:00:00.000Z",
+        "updated_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": { "valid": false, "error_hint": "revision:maximum" }
+    },
+    {
+      "id": "sx-audit-sequence-unsafe",
+      "schema": "audit-event",
+      "document": {
+        "protocol_version": "0.1",
+        "event_id": "evt_01arz3ndektsv4rrffq69g5fav",
+        "sequence": 9007199254740992,
+        "event_type": "action_committed",
+        "occurred_at": "2026-08-17T12:00:06.000Z",
+        "actor": "edge",
+        "summary": {
+          "key_count": 12,
+          "sensitive_fields_detected": false,
+          "field_types": ["string", "integer"]
+        },
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "anchor": "none"
+      },
+      "expect": { "valid": false, "error_hint": "sequence:maximum" }
+    }
+  ]
+}

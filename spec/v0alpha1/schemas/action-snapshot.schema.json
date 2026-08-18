@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/action-snapshot.schema.json",
+  "title": "ActionSnapshot",
+  "description": "Read model of one Action: intent, state, revision, decisions, attempts, receipts, ingress, and recovery decisions.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "run_id": { "type": "string", "pattern": "^run_[0-9a-hjkmnp-tv-z]{26}$" },
+    "state": {
+      "enum": [
+        "proposed", "authorized", "executing", "result_received", "committed",
+        "blocked", "cancelled", "failed_authoritative", "unknown_outcome",
+        "quarantined", "review_unavailable"
+      ]
+    },
+    "revision": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/RevisionRef" },
+    "intent": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/action-intent.schema.json" },
+    "policy_decision": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/policy-decision.schema.json" },
+    "route_decision": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/route-decision.schema.json" },
+    "redaction_record": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/redaction-record.schema.json" },
+    "approval_binding": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/approval-binding.schema.json" },
+    "ingress": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/ingress-finding.schema.json" },
+    "attempts": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+      "uniqueItems": true
+    },
+    "current_attempt": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "receipts": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^rec_[0-9a-hjkmnp-tv-z]{26}$" },
+      "uniqueItems": true
+    },
+    "recovery_decisions": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^dec_[0-9a-hjkmnp-tv-z]{26}$" },
+      "uniqueItems": true
+    },
+    "created_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "updated_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" }
+  },
+  "required": [
+    "protocol_version", "action_id", "run_id", "state", "revision", "intent",
+    "attempts", "created_at", "updated_at"
+  ],
+  "additionalProperties": false
+}

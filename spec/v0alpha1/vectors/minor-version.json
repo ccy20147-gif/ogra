@@ -1,0 +1,83 @@
+{
+  "kind": "negotiation",
+  "description": "Protocol major/minor negotiation (PROT-007, ADR-009): same major required; negotiated minor is min(client, server); higher side constrains itself.",
+  "vectors": [
+    {
+      "id": "nv-equal",
+      "client": "0.1",
+      "server": "0.1",
+      "expect": { "ok": true, "negotiated": "0.1" }
+    },
+    {
+      "id": "nv-client-older",
+      "client": "0.1",
+      "server": "0.2",
+      "expect": { "ok": true, "negotiated": "0.1" }
+    },
+    {
+      "id": "nv-server-older-constrains-client",
+      "client": "0.2",
+      "server": "0.1",
+      "expect": { "ok": true, "negotiated": "0.1" }
+    },
+    {
+      "id": "nv-client-major-newer",
+      "client": "1.0",
+      "server": "0.1",
+      "expect": { "ok": false, "code": "PROTOCOL_MAJOR_MISMATCH" }
+    },
+    {
+      "id": "nv-server-major-newer",
+      "client": "0.1",
+      "server": "1.0",
+      "expect": { "ok": false, "code": "PROTOCOL_MAJOR_MISMATCH" }
+    },
+    {
+      "id": "nv-client-minimum-above-negotiated",
+      "client": "0.3",
+      "server": "0.1",
+      "client_minimum": "0.2",
+      "expect": { "ok": false, "code": "PROTOCOL_MINOR_MISMATCH" }
+    },
+    {
+      "id": "nv-client-minimum-satisfied",
+      "client": "0.3",
+      "server": "0.1",
+      "client_minimum": "0.1",
+      "expect": { "ok": true, "negotiated": "0.1" }
+    },
+    {
+      "id": "nv-unparseable-client",
+      "client": "v0.1",
+      "server": "0.1",
+      "expect": { "ok": false, "code": "BAD_REQUEST" }
+    },
+    {
+      "id": "nv-unparseable-server",
+      "client": "0.1",
+      "server": "0.1-alpha",
+      "expect": { "ok": false, "code": "BAD_REQUEST" }
+    },
+    {
+      "id": "nv-multi-digit-minor",
+      "description": "P1-5 repro: negotiated 0.10 is numerically >= minimum 0.2; lexical comparison would wrongly fail.",
+      "client": "0.10",
+      "server": "0.10",
+      "client_minimum": "0.2",
+      "expect": { "ok": true, "negotiated": "0.10" }
+    },
+    {
+      "id": "nv-multi-digit-min",
+      "client": "0.9",
+      "server": "0.10",
+      "expect": { "ok": true, "negotiated": "0.9" }
+    },
+    {
+      "id": "nv-multi-digit-minimum-above",
+      "client": "0.8",
+      "server": "0.10",
+      "client_minimum": "0.9",
+      "expect": { "ok": false, "code": "PROTOCOL_MINOR_MISMATCH" }
+    }
+  ]
+}

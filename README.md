@@ -9,6 +9,7 @@ for **Ogra / Ogra Edge**.
 - [Development Requirements Index](docs/plans/00-development-requirements-index.md)
 - [Python-First Action Runtime Quickstart](docs/plans/01-python-first-action-runtime-quickstart.md)
 - [Action Runtime Implementation Roadmap](docs/plans/02-action-runtime-implementation-roadmap.md)
+- [Ogra Protocol Specification](spec/README.md) (M0: `spec/v0alpha1/` schemas, state machines, vectors, ADRs)
 
 The handbook is the highest-priority product and technical guidance. Earlier
 Desktop-first plans are superseded.
@@ -123,9 +124,27 @@ custom Agent loop, SaaS multi-tenancy, or a validator marketplace.
 │       ├── 01-python-first-action-runtime-quickstart.md
 │       ├── 02-action-runtime-implementation-roadmap.md
 │       └── 03-09 milestone requirement documents
+├── spec/                 # M0 protocol freeze: JSON Schema, OpenAPI, state
+│                         # machines, canonical rules, ADRs, golden vectors
+│   └── v0alpha1/         #   active protocol version 0.1 (alpha)
+├── tools/
+│   ├── verify-m0.sh      # single repeatable M0 verification command
+│   ├── build-openapi.py  # generates spec/v0alpha1/openapi.yaml from schemas
+│   └── validators/       # Python and TypeScript golden-vector validators
 ├── ogra-desktop/        # existing TypeScript semantic reference
 └── archive/             # historical context only
 ```
+
+## M0 Verification
+
+```bash
+tools/verify-m0.sh
+```
+
+runs every M0 exit gate: Draft 2020-12 meta-schema validation, OpenAPI load,
+Python/TypeScript vector agreement (identical verdicts and canonical hashes),
+no automatic replay path for unknown Attempts, schema purity, markdown links,
+and `git diff --check`. Requirement coverage: [spec/PROT-traceability.md](spec/PROT-traceability.md).
 
 ## Existing Implementation
 

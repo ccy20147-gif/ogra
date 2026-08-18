@@ -1,0 +1,84 @@
+{
+  "kind": "canonical_hash",
+  "description": "ogra-jcs-1 canonical forms and SHA-256 hashes. Expected values are independently verified (sha256sum over canonical bytes).",
+  "vectors": [
+    {
+      "id": "ch-key-order-escaping",
+      "document": { "b": 2, "a": { "d": true, "c": "x\u0001" }, "z": ["1", 1] },
+      "expect": {
+        "canonical": "{\"a\":{\"c\":\"x\\u0001\",\"d\":true},\"b\":2,\"z\":[\"1\",1]}",
+        "hash": "sha256:ef2a9df8f11a44b96c6299684a55841157161ae46318db588c0955dd3d5ecebd"
+      }
+    },
+    {
+      "id": "ch-utf8-unicode",
+      "document": {
+        "protocol_version": "0.1",
+        "ok": true,
+        "count": 3,
+        "name": "café",
+        "list": [1, 2, 3]
+      },
+      "expect": {
+        "canonical": "{\"count\":3,\"list\":[1,2,3],\"name\":\"café\",\"ok\":true,\"protocol_version\":\"0.1\"}",
+        "hash": "sha256:1525784b532d00b0aef32b3cfd597bf6df46c7ce1fdebd18a5f063bb2778a0c4"
+      }
+    },
+    {
+      "id": "ch-nested-timestamp",
+      "document": {
+        "at": "2026-08-17T12:00:00.000Z",
+        "empty": {},
+        "nested": { "x": [{ "y": false }] }
+      },
+      "expect": {
+        "canonical": "{\"at\":\"2026-08-17T12:00:00.000Z\",\"empty\":{},\"nested\":{\"x\":[{\"y\":false}]}}",
+        "hash": "sha256:3d8920dc4825b274d097b541a47e9effb3be8d952a0dcee94a2cd7a23d2ed09d"
+      }
+    },
+    {
+      "id": "ch-null-dropped",
+      "document": { "a": null, "b": 1 },
+      "expect": {
+        "canonical": "{\"b\":1}",
+        "hash": "sha256:eb8ed3ccb5023093b56f490a46501e88d09736687e609fdbc1c71b3df8b9ccd3"
+      }
+    },
+    {
+      "id": "ch-control-characters",
+      "document": { "s": "quote\"back\\slash", "ctrl": "\u0000\u001f" },
+      "expect": {
+        "canonical": "{\"ctrl\":\"\\u0000\\u001f\",\"s\":\"quote\\\"back\\\\slash\"}",
+        "hash": "sha256:33f658203258740f0a38dfe2416167d4b56c213ecf33f51c1a456d4a881f0c05"
+      }
+    },
+    {
+      "id": "ch-run-ref-shaped",
+      "document": { "run_id": "run_01arz3ndektsv4rrffq69g5fav", "count": 7, "ok": true },
+      "expect": {
+        "canonical": "{\"count\":7,\"ok\":true,\"run_id\":\"run_01arz3ndektsv4rrffq69g5fav\"}",
+        "hash": "sha256:40eefbff0cb46e4493c521e0f60d52684e46a87a6bd87847749bc868deba28c8"
+      }
+    },
+    {
+      "id": "ch-safe-int-max",
+      "description": "Boundary: 2^53-1 is the largest integer both Python and JS represent exactly (P0-3).",
+      "document": { "n": 9007199254740991 },
+      "expect": {
+        "canonical": "{\"n\":9007199254740991}",
+        "hash": "sha256:e1da48c6a6089f06ecb4e0a2259e658e3786b2420f52baccdf929ec6460d7b41"
+      }
+    },
+    {
+      "id": "ch-unsafe-int-rejected",
+      "description": "P0-3 repro: 2^53+1 is NOT exactly representable in JS Number; canonicalization MUST fail instead of producing divergent hashes.",
+      "document": { "n": 9007199254740993 },
+      "expect": { "error": true }
+    },
+    {
+      "id": "ch-unsafe-negative-int-rejected",
+      "document": { "n": -9007199254740992 },
+      "expect": { "error": true }
+    }
+  ]
+}

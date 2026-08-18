@@ -1,0 +1,32 @@
+{
+  "kind": "state_transition",
+  "description": "Illegal transitions: terminal states, skipped phases, and the no-auto-replay gate on unknown Attempts.",
+  "vectors": [
+    { "id": "tx-action-terminal-commit", "machine": "action", "state": "committed", "event": "commit", "expect": { "allowed": false } },
+    { "id": "tx-action-terminal-blocked", "machine": "action", "state": "blocked", "event": "authorize", "expect": { "allowed": false } },
+    { "id": "tx-action-terminal-cancelled", "machine": "action", "state": "cancelled", "event": "begin_execution", "expect": { "allowed": false } },
+    { "id": "tx-action-skip-phase", "machine": "action", "state": "proposed", "event": "commit", "expect": { "allowed": false } },
+    { "id": "tx-action-executing-commit", "machine": "action", "state": "executing", "event": "commit", "expect": { "allowed": false } },
+    { "id": "tx-action-unknown-cancel", "machine": "action", "state": "unknown_outcome", "event": "cancel", "expect": { "allowed": false } },
+    { "id": "tx-action-result-fail-direct", "machine": "action", "state": "result_received", "event": "fail_authoritative", "expect": { "allowed": false } },
+    { "id": "tx-action-unknown-state", "machine": "action", "state": "frozen", "event": "commit", "expect": { "allowed": false } },
+
+    { "id": "tx-attempt-unknown-no-replay", "machine": "attempt", "state": "unknown", "event": "retry", "expect": { "allowed": false } },
+    { "id": "tx-attempt-unknown-no-grant", "machine": "attempt", "state": "unknown", "event": "grant", "expect": { "allowed": false } },
+    { "id": "tx-attempt-unknown-no-reconcile", "machine": "attempt", "state": "unknown", "event": "reconcile", "expect": { "allowed": false } },
+    { "id": "tx-attempt-terminal-response", "machine": "attempt", "state": "response_received", "event": "response", "expect": { "allowed": false } },
+    { "id": "tx-attempt-skip-ack", "machine": "attempt", "state": "dispatch_authorized", "event": "response", "expect": { "allowed": false } },
+    { "id": "tx-attempt-terminal-failed", "machine": "attempt", "state": "failed_authoritative", "event": "ack", "expect": { "allowed": false } },
+    { "id": "tx-attempt-cancel-after-send", "machine": "attempt", "state": "acknowledged", "event": "cancel", "expect": { "allowed": false } },
+
+    { "id": "tx-ingress-terminal-accepted", "machine": "ingress", "state": "accepted", "event": "quarantine", "expect": { "allowed": false } },
+    { "id": "tx-ingress-terminal-rejected", "machine": "ingress", "state": "rejected", "event": "resolve_accept", "expect": { "allowed": false } },
+    { "id": "tx-ingress-direct-reject", "machine": "ingress", "state": "pending", "event": "resolve_reject", "expect": { "allowed": false } },
+    { "id": "tx-ingress-accept-from-quarantine-invalid", "machine": "ingress", "state": "quarantined", "event": "accept", "expect": { "allowed": false } },
+
+    { "id": "tx-recovery-terminal-executed", "machine": "recovery_decision", "state": "executed", "event": "apply", "expect": { "allowed": false } },
+    { "id": "tx-recovery-terminal-expired", "machine": "recovery_decision", "state": "expired", "event": "apply", "expect": { "allowed": false } },
+    { "id": "tx-recovery-decide-from-decided", "machine": "recovery_decision", "state": "decided", "event": "decide", "expect": { "allowed": false } },
+    { "id": "tx-recovery-apply-pending", "machine": "recovery_decision", "state": "pending", "event": "apply", "expect": { "allowed": false } }
+  ]
+}

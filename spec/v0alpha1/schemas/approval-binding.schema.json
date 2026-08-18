@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/approval-binding.schema.json",
+  "title": "ApprovalBinding",
+  "description": "Approval bound to the exact payload, destination, policy version, redaction rule version, scope, revision, and expiry. An ordinary approval authorizes exactly one dispatch Attempt; a recovery retry requires a new recovery approval.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "approval_id": { "type": "string", "pattern": "^app_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "attempt_id": { "type": "string", "pattern": "^atp_[0-9a-hjkmnp-tv-z]{26}$" },
+    "canonical_payload_hash": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/HashRef" },
+    "destination": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Destination" },
+    "policy_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "redaction_rule_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "scope": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ScopeRef" },
+    "revision": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/RevisionRef" },
+    "operation": { "enum": ["dispatch", "recovery"] },
+    "status": { "enum": ["approved", "rejected", "expired", "revoked", "consumed"] },
+    "expires_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "decided_by": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" },
+    "decided_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "consumed_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" }
+  },
+  "required": [
+    "protocol_version", "approval_id", "action_id", "attempt_id",
+    "canonical_payload_hash", "destination", "policy_version",
+    "redaction_rule_version", "scope", "revision", "operation", "status",
+    "expires_at", "decided_by", "decided_at"
+  ],
+  "additionalProperties": false
+}

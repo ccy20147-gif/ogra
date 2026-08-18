@@ -1,0 +1,29 @@
+{
+  "machine": "action",
+  "protocol_version": "0.1",
+  "description": "User-visible aggregate lifecycle. safe_retry and reconciled are NOT Action states.",
+  "states": [
+    "proposed", "authorized", "executing", "result_received", "committed",
+    "blocked", "cancelled", "failed_authoritative", "unknown_outcome",
+    "quarantined", "review_unavailable"
+  ],
+  "terminal": ["committed", "blocked", "cancelled", "failed_authoritative"],
+  "transitions": [
+    {"from": "proposed", "event": "authorize", "to": "authorized", "guard": "policy allowed and approval bound (if required)"},
+    {"from": "proposed", "event": "block", "to": "blocked", "guard": "policy blocked"},
+    {"from": "authorized", "event": "begin_execution", "to": "executing", "guard": "dispatch grant issued"},
+    {"from": "authorized", "event": "cancel", "to": "cancelled", "guard": "no dispatch grant consumed"},
+    {"from": "executing", "event": "result_received", "to": "result_received", "guard": "external result content received"},
+    {"from": "executing", "event": "fail_authoritative", "to": "failed_authoritative", "guard": "authoritative failure receipt"},
+    {"from": "executing", "event": "unknown_outcome", "to": "unknown_outcome", "guard": "no authoritative outcome evidence"},
+    {"from": "result_received", "event": "commit", "to": "committed", "guard": "ingress accepted"},
+    {"from": "result_received", "event": "quarantine", "to": "quarantined", "guard": "ingress verdict suspicious or malicious"},
+    {"from": "result_received", "event": "review_unavailable", "to": "review_unavailable", "guard": "reviewer unavailable, fail closed"},
+    {"from": "review_unavailable", "event": "retry_review", "to": "result_received", "guard": "review retried"},
+    {"from": "quarantined", "event": "commit", "to": "committed", "guard": "ingress resolved accepted"},
+    {"from": "quarantined", "event": "fail_authoritative", "to": "failed_authoritative", "guard": "ingress resolved rejected"},
+    {"from": "unknown_outcome", "event": "reconcile_retry", "to": "executing", "guard": "verified recovery decision retry_with_same_key AND new dispatch grant AND recovery approval"},
+    {"from": "unknown_outcome", "event": "reconcile_committed", "to": "committed", "guard": "authoritative completion evidence"},
+    {"from": "unknown_outcome", "event": "reconcile_failed", "to": "failed_authoritative", "guard": "authoritative failure evidence"}
+  ]
+}

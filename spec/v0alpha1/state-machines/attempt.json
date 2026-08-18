@@ -1,0 +1,21 @@
+{
+  "machine": "attempt",
+  "protocol_version": "0.1",
+  "description": "One physical callback. A new callback requires a new Attempt retaining the Action identity and verified idempotency identity.",
+  "states": [
+    "prepared", "dispatch_authorized", "acknowledged", "response_received",
+    "cancelled", "failed_local", "failed_authoritative", "unknown"
+  ],
+  "terminal": ["cancelled", "failed_local", "response_received", "failed_authoritative", "unknown"],
+  "transitions": [
+    {"from": "prepared", "event": "grant", "to": "dispatch_authorized", "guard": "dispatch grant issued and bound"},
+    {"from": "prepared", "event": "cancel", "to": "cancelled", "guard": "no dispatch grant issued"},
+    {"from": "prepared", "event": "local_error", "to": "failed_local", "guard": "local exception before dispatch"},
+    {"from": "dispatch_authorized", "event": "ack", "to": "acknowledged", "guard": "authoritative acknowledgement persisted"},
+    {"from": "dispatch_authorized", "event": "cancel", "to": "cancelled", "guard": "provider provably not called"},
+    {"from": "dispatch_authorized", "event": "expiry", "to": "unknown", "guard": "grant expired without authoritative acknowledgement (PROT-013)"},
+    {"from": "acknowledged", "event": "response", "to": "response_received", "guard": "external result content received"},
+    {"from": "acknowledged", "event": "fail_authoritative", "to": "failed_authoritative", "guard": "authoritative failure receipt"},
+    {"from": "acknowledged", "event": "unknown", "to": "unknown", "guard": "no authoritative outcome evidence"}
+  ]
+}

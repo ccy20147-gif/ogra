@@ -1,0 +1,13 @@
+{
+  "name": "ogra-protocol-validator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal TypeScript validator for the Ogra v0alpha1 protocol (M0).",
+  "scripts": {
+    "vectors": "node run_vectors.ts"
+  },
+  "dependencies": {
+    "ajv": "8.20.0"
+  }
+}

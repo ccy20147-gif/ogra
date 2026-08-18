@@ -1,0 +1,146 @@
+{
+  "kind": "replay_eligibility",
+  "description": "Machine-readable replay eligibility (PROT-025, PROT-026): hash-only payloads are never replayable; encrypted replayable material is eligible only within retention and while decryptable; external references delegate to their retrieval policy.",
+  "vectors": [
+    {
+      "id": "rp-hash-only-never-replayable",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "hash_only",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": false
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": false }
+    },
+    {
+      "id": "rp-hash-only-declared-replayable-still-blocked",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "hash_only",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": false }
+    },
+    {
+      "id": "rp-encrypted-within-retention-replayable",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "encrypted_replayable",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "storage_ref": "ply_01arz3ndektsv4rrffq69g5fav",
+        "key_id": "k-2026-01",
+        "encryption_scheme": "aes-256-gcm",
+        "retention_class": "recovery-window",
+        "expires_at": "2026-08-18T12:00:00.000Z"
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": true }
+    },
+    {
+      "id": "rp-encrypted-expired-not-replayable",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "encrypted_replayable",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "storage_ref": "ply_01arz3ndektsv4rrffq69g5fav",
+        "key_id": "k-2026-01",
+        "encryption_scheme": "aes-256-gcm",
+        "retention_class": "recovery-window",
+        "expires_at": "2026-08-17T11:00:00.000Z"
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": false }
+    },
+    {
+      "id": "rp-encrypted-deleted-not-replayable",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "encrypted_replayable",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "deleted": true,
+        "storage_ref": "ply_01arz3ndektsv4rrffq69g5fav",
+        "key_id": "k-2026-01",
+        "encryption_scheme": "aes-256-gcm",
+        "retention_class": "recovery-window",
+        "expires_at": "2026-08-18T12:00:00.000Z"
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": false }
+    },
+    {
+      "id": "rp-external-immediate-replayable",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "external_reference",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "external_store": "s3://ogra-payloads/2026/08/17",
+        "retrieval_policy": "immediate"
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": true }
+    },
+    {
+      "id": "rp-external-unknown-policy-blocked",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "external_reference",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "external_store": "s3://ogra-payloads/2026/08/17",
+        "retrieval_policy": "unknown"
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": false }
+    },
+    {
+      "id": "rp-unknown-mode-blocked",
+      "payload_ref": {
+        "protocol_version": "0.1",
+        "storage_mode": "tape_backup",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true
+      },
+      "now": "2026-08-17T12:00:00.000Z",
+      "expect": { "replay_eligible": false }
+    }
+  ]
+}

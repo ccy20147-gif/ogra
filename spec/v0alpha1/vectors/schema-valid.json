@@ -1,0 +1,551 @@
+{
+  "kind": "schema_validation",
+  "description": "Valid documents: every protocol object in canonical form.",
+  "vectors": [
+    {
+      "id": "sv-run-ref-valid",
+      "schema": "run-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "status": "open",
+        "created_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-action-intent-valid",
+      "schema": "action-intent",
+      "document": {
+        "protocol_version": "0.1",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "submission_key": "tool:weather:7f83b1657ff1fc53b92dc18148a1d65d",
+        "intent": {
+          "kind": "tool_call",
+          "operation_id": "weather:forecast",
+          "destination": { "provider": "weather-api", "operation": "get_forecast" },
+          "request": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false,
+            "size_bytes": 4,
+            "mime_type": "application/json"
+          }
+        },
+        "execution_profile": "inline",
+        "proposed_at": "2026-08-17T12:00:00.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-payload-ref-hash-only-valid",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "hash_only",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": false,
+        "size_bytes": 4
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-payload-ref-encrypted-valid",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "encrypted_replayable",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "size_bytes": 4,
+        "storage_ref": "ply_01arz3ndektsv4rrffq69g5fav",
+        "key_id": "k-2026-01",
+        "encryption_scheme": "aes-256-gcm",
+        "retention_class": "recovery-window",
+        "expires_at": "2026-08-18T12:00:00.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-payload-ref-external-valid",
+      "schema": "payload-ref",
+      "document": {
+        "protocol_version": "0.1",
+        "storage_mode": "external_reference",
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "replay_eligible": true,
+        "external_store": "s3://ogra-payloads/2026/08/17",
+        "retrieval_policy": "delegated"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-policy-decision-valid",
+      "schema": "policy-decision",
+      "document": {
+        "protocol_version": "0.1",
+        "decision_id": "pdc_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "policy_version": "policy-v7",
+        "rule_id": "r-class-7",
+        "policy_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "classification": "public",
+        "mode": "auto_redact",
+        "reasons": ["rule r-class-7 matched"],
+        "decided_at": "2026-08-17T12:00:00.000Z",
+        "actor": "edge"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-route-decision-valid",
+      "schema": "route-decision",
+      "document": {
+        "protocol_version": "0.1",
+        "decision_id": "rte_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" },
+        "route": "edge:adapter:weather-api",
+        "route_version": "rt1",
+        "fallback_allowed": false,
+        "reasons": ["canonical route"],
+        "decided_at": "2026-08-17T12:00:00.000Z",
+        "actor": "edge"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-redaction-record-valid",
+      "schema": "redaction-record",
+      "document": {
+        "protocol_version": "0.1",
+        "record_id": "rdr_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "rule_version": "redaction-rules-v3",
+        "redactions": [
+          { "field_path": "body.zip", "rule_id": "rr-postal", "mode": "mask" }
+        ],
+        "original_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "redacted_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+        },
+        "applied_at": "2026-08-17T12:00:00.000Z",
+        "actor": "edge"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-approval-binding-valid",
+      "schema": "approval-binding",
+      "document": {
+        "protocol_version": "0.1",
+        "approval_id": "app_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "canonical_payload_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "destination": { "provider": "weather-api", "operation": "get_forecast" },
+        "policy_version": "policy-v7",
+        "redaction_rule_version": "redaction-rules-v3",
+        "scope": { "principal": "user:alice", "workspace": "ws-dev" },
+        "revision": 3,
+        "operation": "dispatch",
+        "status": "approved",
+        "expires_at": "2026-08-17T13:00:00.000Z",
+        "decided_by": "user:alice",
+        "decided_at": "2026-08-17T12:30:00.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-dispatch-grant-valid",
+      "schema": "dispatch-grant",
+      "document": {
+        "protocol_version": "0.1",
+        "grant_id": "grn_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "execution_profile": "inline",
+        "payload_ref": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "destination": { "provider": "weather-api", "operation": "get_forecast" },
+        "policy_version": "policy-v7",
+        "redaction_rule_version": "redaction-rules-v3",
+        "scope": { "principal": "user:alice", "workspace": "ws-dev" },
+        "revision": 3,
+        "single_use": true,
+        "state": "active",
+        "issued_at": "2026-08-17T12:00:00.000Z",
+        "expires_at": "2026-08-17T12:01:00.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-external-receipt-valid",
+      "schema": "external-receipt",
+      "document": {
+        "protocol_version": "0.1",
+        "receipt_id": "rec_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "receipt_kind": "effect_completion",
+        "authority": "authoritative",
+        "effect_status": "completed",
+        "execution_profile": "inline",
+        "provider": {
+          "provider": "weather-api",
+          "account": "acct-1",
+          "operation": "get_forecast",
+          "request_id": "req-abc-123"
+        },
+        "received_at": "2026-08-17T12:00:05.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-ingress-finding-valid",
+      "schema": "ingress-finding",
+      "document": {
+        "protocol_version": "0.1",
+        "ingress_id": "ing_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "state": "accepted",
+        "verdict": "clean",
+        "content_ref": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "reviewer": { "mode": "in_process" },
+        "created_at": "2026-08-17T12:00:05.000Z",
+        "reviewed_at": "2026-08-17T12:00:06.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-recovery-decision-valid",
+      "schema": "recovery-decision",
+      "document": {
+        "protocol_version": "0.1",
+        "decision_id": "dec_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "state": "decided",
+        "decision": "retry_with_same_key",
+        "evidence_refs": [
+          "rec_01arz3ndektsv4rrffq69g5fav",
+          "evt_01arz3ndektsv4rrffq69g5fav"
+        ],
+        "actor": "user:alice",
+        "revision": 3,
+        "lease_token": "lease-1",
+        "reason": "idempotency scope valid; original sanctioned payload retained",
+        "decided_at": "2026-08-17T12:05:00.000Z",
+        "expires_at": "2026-08-17T12:10:00.000Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-capability-manifest-valid",
+      "schema": "capability-manifest",
+      "document": {
+        "protocol_version": "0.1",
+        "manifest_id": "mft_01arz3ndektsv4rrffq69g5fav",
+        "adapter_id": "weather-api-v1",
+        "adapter_kind": "tool",
+        "operations": [
+          {
+            "operation_id": "get_forecast",
+            "recovery": {
+              "capabilities": ["idempotent", "outcome_query"],
+              "idempotency_scope": "account:weather-api",
+              "idempotency_valid_until": "2026-12-31T23:59:59.999Z",
+              "idempotency_conflict_behavior": "dedupe",
+              "outcome_retention_until": "2026-12-31T23:59:59.999Z",
+              "duplicate_effect_risk": "low",
+              "retry_cost_risk": "low",
+              "audit_level": "content_hash",
+              "conformance_refs": ["conf-001"]
+            }
+          }
+        ],
+        "declared_at": "2026-08-17T12:00:00.000Z",
+        "conformance": [
+          {
+            "conformance_id": "conf-001",
+            "status": "trusted",
+            "authority": "ogra-conformance"
+          }
+        ]
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-audit-event-valid",
+      "schema": "audit-event",
+      "document": {
+        "protocol_version": "0.1",
+        "event_id": "evt_01arz3ndektsv4rrffq69g5fav",
+        "sequence": 1,
+        "event_type": "action_committed",
+        "occurred_at": "2026-08-17T12:00:06.000Z",
+        "actor": "edge",
+        "summary": {
+          "key_count": 12,
+          "sensitive_fields_detected": false,
+          "field_types": ["string", "integer"]
+        },
+        "content_hash": {
+          "algorithm": "sha256",
+          "canonicalization": "ogra-jcs-1",
+          "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        },
+        "anchor": "none"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-error-envelope-valid",
+      "schema": "error-envelope",
+      "document": {
+        "protocol_version": "0.1",
+        "http_status": 400,
+        "error": {
+          "code": "VALIDATION_ERROR",
+          "message": "unknown field 'owner' is not allowed",
+          "retry_class": "none"
+        }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-client-hello-valid",
+      "schema": "client-hello",
+      "document": {
+        "protocol_version": "0.1",
+        "client_info": { "sdk": "ogra-python", "sdk_version": "0.1.0" }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-server-hello-valid",
+      "schema": "server-hello",
+      "document": {
+        "protocol_version": "0.1",
+        "server_max_protocol_version": "0.1",
+        "server_id": "edge-01",
+        "profiles": {
+          "governance": "govern",
+          "execution": "inline",
+          "recovery": ["outcome_query"],
+          "isolation": "development"
+        },
+        "server_clock": "2026-08-17T12:00:00.000Z",
+        "capabilities": { "max_payload_bytes": 1048576, "streaming": true }
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-action-attempt-valid",
+      "schema": "action-attempt",
+      "document": {
+        "protocol_version": "0.1",
+        "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "attempt_no": 1,
+        "state": "dispatch_authorized",
+        "execution_profile": "inline",
+        "destination": { "provider": "weather-api", "operation": "get_forecast" },
+        "request": {
+          "protocol_version": "0.1",
+          "storage_mode": "hash_only",
+          "content_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "replay_eligible": false
+        },
+        "grant_ref": "grn_01arz3ndektsv4rrffq69g5fav",
+        "prepared_at": "2026-08-17T12:00:00.000Z",
+        "updated_at": "2026-08-17T12:00:00.500Z"
+      },
+      "expect": { "valid": true }
+    },
+    {
+      "id": "sv-action-snapshot-valid",
+      "schema": "action-snapshot",
+      "document": {
+        "protocol_version": "0.1",
+        "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+        "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+        "state": "committed",
+        "revision": 3,
+        "intent": {
+          "protocol_version": "0.1",
+          "run_id": "run_01arz3ndektsv4rrffq69g5fav",
+          "intent": {
+            "kind": "tool_call",
+            "operation_id": "weather:forecast",
+            "destination": { "provider": "weather-api", "operation": "get_forecast" },
+            "request": {
+              "protocol_version": "0.1",
+              "storage_mode": "hash_only",
+              "content_hash": {
+                "algorithm": "sha256",
+                "canonicalization": "ogra-jcs-1",
+                "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+              },
+              "replay_eligible": false
+            }
+          },
+          "execution_profile": "inline",
+          "proposed_at": "2026-08-17T12:00:00.000Z"
+        },
+        "policy_decision": {
+          "protocol_version": "0.1",
+          "decision_id": "pdc_01arz3ndektsv4rrffq69g5fav",
+          "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+          "policy_version": "policy-v7",
+          "rule_id": "r-class-7",
+          "policy_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "classification": "public",
+          "mode": "auto_redact",
+          "reasons": ["rule r-class-7 matched"],
+          "decided_at": "2026-08-17T12:00:00.000Z",
+          "actor": "edge"
+        },
+        "route_decision": {
+          "protocol_version": "0.1",
+          "decision_id": "rte_01arz3ndektsv4rrffq69g5fav",
+          "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+          "destination": { "provider": "weather-api", "operation": "get_forecast" },
+          "route": "edge:adapter:weather-api",
+          "route_version": "rt1",
+          "fallback_allowed": false,
+          "reasons": ["canonical route"],
+          "decided_at": "2026-08-17T12:00:00.000Z",
+          "actor": "edge"
+        },
+        "redaction_record": {
+          "protocol_version": "0.1",
+          "record_id": "rdr_01arz3ndektsv4rrffq69g5fav",
+          "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+          "rule_version": "redaction-rules-v3",
+          "redactions": [
+            { "field_path": "body.zip", "rule_id": "rr-postal", "mode": "mask" }
+          ],
+          "original_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "redacted_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"
+          },
+          "applied_at": "2026-08-17T12:00:00.000Z",
+          "actor": "edge"
+        },
+        "approval_binding": {
+          "protocol_version": "0.1",
+          "approval_id": "app_01arz3ndektsv4rrffq69g5fav",
+          "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+          "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+          "canonical_payload_hash": {
+            "algorithm": "sha256",
+            "canonicalization": "ogra-jcs-1",
+            "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+          },
+          "destination": { "provider": "weather-api", "operation": "get_forecast" },
+          "policy_version": "policy-v7",
+          "redaction_rule_version": "redaction-rules-v3",
+          "scope": { "principal": "user:alice", "workspace": "ws-dev" },
+          "revision": 3,
+          "operation": "dispatch",
+          "status": "approved",
+          "expires_at": "2026-08-17T13:00:00.000Z",
+          "decided_by": "user:alice",
+          "decided_at": "2026-08-17T12:30:00.000Z"
+        },
+        "ingress": {
+          "protocol_version": "0.1",
+          "ingress_id": "ing_01arz3ndektsv4rrffq69g5fav",
+          "action_id": "act_01arz3ndektsv4rrffq69g5fav",
+          "attempt_id": "atp_01arz3ndektsv4rrffq69g5fav",
+          "state": "accepted",
+          "verdict": "clean",
+          "content_ref": {
+            "protocol_version": "0.1",
+            "storage_mode": "hash_only",
+            "content_hash": {
+              "algorithm": "sha256",
+              "canonicalization": "ogra-jcs-1",
+              "value": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+            },
+            "replay_eligible": false
+          },
+          "reviewer": { "mode": "in_process" },
+          "created_at": "2026-08-17T12:00:05.000Z",
+          "reviewed_at": "2026-08-17T12:00:06.000Z"
+        },
+        "attempts": ["atp_01arz3ndektsv4rrffq69g5fav"],
+        "current_attempt": "atp_01arz3ndektsv4rrffq69g5fav",
+        "receipts": ["rec_01arz3ndektsv4rrffq69g5fav"],
+        "recovery_decisions": ["dec_01arz3ndektsv4rrffq69g5fav"],
+        "created_at": "2026-08-17T12:00:00.000Z",
+        "updated_at": "2026-08-17T12:00:06.000Z"
+      },
+      "expect": { "valid": true }
+    }
+  ]
+}

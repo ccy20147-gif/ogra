@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ogra.dev/spec/v0alpha1/schemas/route-decision.schema.json",
+  "title": "RouteDecision",
+  "description": "Deterministic routing decision for one Action: which adapter or egress boundary executes the call.",
+  "type": "object",
+  "properties": {
+    "protocol_version": { "const": "0.1" },
+    "decision_id": { "type": "string", "pattern": "^rte_[0-9a-hjkmnp-tv-z]{26}$" },
+    "action_id": { "type": "string", "pattern": "^act_[0-9a-hjkmnp-tv-z]{26}$" },
+    "destination": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Destination" },
+    "route": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "route_version": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "fallback_allowed": { "type": "boolean" },
+    "reasons": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+      "minItems": 1
+    },
+    "decided_at": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/Timestamp" },
+    "actor": { "$ref": "https://ogra.dev/spec/v0alpha1/schemas/_defs.schema.json#/$defs/ActorRef" }
+  },
+  "required": [
+    "protocol_version", "decision_id", "action_id", "destination", "route",
+    "route_version", "fallback_allowed", "reasons", "decided_at", "actor"
+  ],
+  "additionalProperties": false
+}
